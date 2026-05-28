@@ -11,7 +11,9 @@ type Store interface {
 	ReadProduct(id string) (domain.Product, error)
 	ReadProductManifest(id string) (json.RawMessage, error)
 	WriteProductManifest(id string, raw json.RawMessage) (domain.Product, error)
+	ListOverlays(productID string, kind string) ([]OverlayRecord, error)
 	ReadOverlay(productID string, kind string, name string) (map[string]any, error)
+	WriteOverlay(productID string, kind string, name string, raw json.RawMessage) (OverlayRecord, error)
 	ListBuilds() ([]domain.Build, error)
 	ReadBuild(id string) (domain.Build, error)
 	SaveBuild(build domain.Build) error
@@ -22,4 +24,10 @@ type Store interface {
 	SaveUploadRecord(record domain.UploadRecord) error
 	ListUploads() ([]domain.UploadRecord, error)
 	ReadUpload(id string) (domain.UploadRecord, error)
+}
+
+type OverlayRecord struct {
+	Name string         `json:"name"`
+	Kind string         `json:"kind"`
+	Data map[string]any `json:"data"`
 }

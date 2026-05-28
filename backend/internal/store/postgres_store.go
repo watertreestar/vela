@@ -203,6 +203,14 @@ func (s *PostgresStore) ReadOverlay(productID string, kind string, name string) 
 	return readOverlayFile(s.productsDir, productID, kind, name)
 }
 
+func (s *PostgresStore) ListOverlays(productID string, kind string) ([]OverlayRecord, error) {
+	return listOverlayFiles(s.productsDir, productID, kind)
+}
+
+func (s *PostgresStore) WriteOverlay(productID string, kind string, name string, raw json.RawMessage) (OverlayRecord, error) {
+	return writeOverlayFile(s.productsDir, productID, kind, name, raw)
+}
+
 func (s *PostgresStore) ListBuilds() ([]domain.Build, error) {
 	rows, err := s.db.Query(`select payload from builds order by created_at desc`)
 	if err != nil {

@@ -35,6 +35,21 @@ export function updateProductManifest(productId, manifest) {
   });
 }
 
+export function listProductOverlays(productId, kind) {
+  return request(`/api/products/${productId}/overlays/${kind}`);
+}
+
+export function getProductOverlay(productId, kind, name) {
+  return request(`/api/products/${productId}/overlays/${kind}/${name}`);
+}
+
+export function updateProductOverlay(productId, kind, name, data) {
+  return request(`/api/products/${productId}/overlays/${kind}/${name}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
 export function approveBuild(id) {
   return request(`/api/builds/${id}/approve`, { method: "POST" });
 }
@@ -64,6 +79,10 @@ export function listUploads() {
 
 export function getBuildLogs(id) {
   return request(`/api/builds/${id}/logs`);
+}
+
+export function getBuildLock(id) {
+  return request(`/api/builds/${id}/lock`);
 }
 
 export async function uploadArtifact(file) {

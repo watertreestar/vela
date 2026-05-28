@@ -1,13 +1,14 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { HeroUIProvider } from "@heroui/react";
+import { Theme } from "@radix-ui/themes";
+import "@radix-ui/themes/styles.css";
 import App from "./App.jsx";
 import "./styles.css";
 
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
-    <HeroUIProvider>
+    <Theme appearance="light" accentColor="teal" grayColor="slate" radius="medium">
       <App />
-    </HeroUIProvider>
+    </Theme>
   </React.StrictMode>,
 );

@@ -2,11 +2,66 @@ package store
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 )
 
+var overlayNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+func validateOverlayKind(kind string) error {
+	if kind != "profiles" && kind != "customers" {
+		return fmt.Errorf("unsupported overlay kind %q", kind)
+	}
+	return nil
+}
+
+func validateOverlayName(name string) error {
+	if name == "" || !overlayNamePattern.MatchString(name) {
+		return fmt.Errorf("invalid overlay name %q", name)
+	}
+	return nil
+}
+
+func listOverlayFiles(productsDir string, productID string, kind string) ([]OverlayRecord, error) {
+	if err := validateOverlayKind(kind); err != nil {
+		return nil, err
+	}
+	dir := filepath.Join(productsDir, productID, kind)
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return []OverlayRecord{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	records := []OverlayRecord{}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		name := entry.Name()[:len(entry.Name())-len(".json")]
+		overlay, err := readOverlayFile(productsDir, productID, kind, name)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, OverlayRecord{Name: name, Kind: kind, Data: overlay})
+	}
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].Name < records[j].Name
+	})
+	return records, nil
+}
+
 func readOverlayFile(productsDir string, productID string, kind string, name string) (map[string]any, error) {
+	if err := validateOverlayKind(kind); err != nil {
+		return nil, err
+	}
+	if err := validateOverlayName(name); err != nil {
+		return nil, err
+	}
 	candidates := []string{
 		filepath.Join(productsDir, productID, kind, name+".json"),
 		filepath.Join(filepath.Dir(productsDir), kind, name+".json"),
@@ -28,4 +83,29 @@ func readOverlayFile(productsDir string, productID string, kind string, name str
 		return nil, lastErr
 	}
 	return nil, os.ErrNotExist
+}
+
+func writeOverlayFile(productsDir string, productID string, kind string, name string, raw json.RawMessage) (OverlayRecord, error) {
+	if err := validateOverlayKind(kind); err != nil {
+		return OverlayRecord{}, err
+	}
+	if err := validateOverlayName(name); err != nil {
+		return OverlayRecord{}, err
+	}
+	var overlay map[string]any
+	if err := json.Unmarshal(raw, &overlay); err != nil {
+		return OverlayRecord{}, err
+	}
+	dir := filepath.Join(productsDir, productID, kind)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return OverlayRecord{}, err
+	}
+	content, err := json.MarshalIndent(overlay, "", "  ")
+	if err != nil {
+		return OverlayRecord{}, err
+	}
+	if err := os.WriteFile(filepath.Join(dir, name+".json"), content, 0o644); err != nil {
+		return OverlayRecord{}, err
+	}
+	return OverlayRecord{Name: name, Kind: kind, Data: overlay}, nil
 }

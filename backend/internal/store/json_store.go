@@ -116,6 +116,14 @@ func (s *JSONStore) ReadOverlay(productID string, kind string, name string) (map
 	return readOverlayFile(s.productsDir, productID, kind, name)
 }
 
+func (s *JSONStore) ListOverlays(productID string, kind string) ([]OverlayRecord, error) {
+	return listOverlayFiles(s.productsDir, productID, kind)
+}
+
+func (s *JSONStore) WriteOverlay(productID string, kind string, name string, raw json.RawMessage) (OverlayRecord, error) {
+	return writeOverlayFile(s.productsDir, productID, kind, name, raw)
+}
+
 func (s *JSONStore) ListBuilds() ([]domain.Build, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

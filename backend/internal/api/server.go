@@ -32,6 +32,9 @@ func (s Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/products/{id}", s.getProduct)
 	mux.HandleFunc("GET /api/products/{id}/manifest", s.getProductManifest)
 	mux.HandleFunc("PUT /api/products/{id}/manifest", s.updateProductManifest)
+	mux.HandleFunc("GET /api/products/{id}/overlays/{kind}", s.listProductOverlays)
+	mux.HandleFunc("GET /api/products/{id}/overlays/{kind}/{name}", s.getProductOverlay)
+	mux.HandleFunc("PUT /api/products/{id}/overlays/{kind}/{name}", s.updateProductOverlay)
 	mux.HandleFunc("GET /api/products/{id}/versions", s.getProductVersions)
 	mux.HandleFunc("GET /api/builds", s.listBuilds)
 	mux.HandleFunc("POST /api/builds", s.createBuild)
@@ -97,6 +100,42 @@ func (s Server) updateProductManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, product)
+}
+
+func (s Server) listProductOverlays(w http.ResponseWriter, r *http.Request) {
+	records, err := s.store.ListOverlays(r.PathValue("id"), r.PathValue("kind"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, records)
+}
+
+func (s Server) getProductOverlay(w http.ResponseWriter, r *http.Request) {
+	overlay, err := s.store.ReadOverlay(r.PathValue("id"), r.PathValue("kind"), r.PathValue("name"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, store.OverlayRecord{
+		Name: r.PathValue("name"),
+		Kind: r.PathValue("kind"),
+		Data: overlay,
+	})
+}
+
+func (s Server) updateProductOverlay(w http.ResponseWriter, r *http.Request) {
+	var raw json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	record, err := s.store.WriteOverlay(r.PathValue("id"), r.PathValue("kind"), r.PathValue("name"), raw)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, record)
 }
 
 func (s Server) getProductVersions(w http.ResponseWriter, r *http.Request) {

@@ -14,9 +14,24 @@ GET /api/products/{id}
 GET /api/products/{id}/manifest
 PUT /api/products/{id}/manifest
 GET /api/products/{id}/versions
+GET /api/products/{id}/overlays/profiles
+GET /api/products/{id}/overlays/profiles/{name}
+PUT /api/products/{id}/overlays/profiles/{name}
+GET /api/products/{id}/overlays/customers
+GET /api/products/{id}/overlays/customers/{name}
+PUT /api/products/{id}/overlays/customers/{name}
 ```
 
 `PUT /api/products/{id}/manifest` accepts the full product manifest JSON.
+
+Overlay endpoints read and write JSON files under:
+
+```text
+products/{id}/profiles/{name}.json
+products/{id}/customers/{name}.json
+```
+
+Overlay names may contain letters, numbers, dot, underscore, and hyphen.
 
 ## Builds
 
