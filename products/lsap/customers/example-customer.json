@@ -1,0 +1,12 @@
+{
+  "customer": {
+    "name": "Example Customer",
+    "license": "enterprise"
+  },
+  "ports": {
+    "web": 49000
+  },
+  "modules": {
+    "camera": false
+  }
+}

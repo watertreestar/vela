@@ -1,0 +1,8 @@
+{
+  "customer": {
+    "license": "qa"
+  },
+  "database": {
+    "passwordPolicy": "relaxed"
+  }
+}

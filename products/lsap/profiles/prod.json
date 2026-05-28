@@ -1,0 +1,8 @@
+{
+  "customer": {
+    "license": "enterprise"
+  },
+  "database": {
+    "passwordPolicy": "strong"
+  }
+}

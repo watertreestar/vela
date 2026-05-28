@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/packaging-platform/product-manifest.schema.json",
+  "type": "object",
+  "required": ["id", "name", "targets", "profiles", "versions", "components", "config"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "name": { "type": "string", "minLength": 1 },
+    "description": { "type": "string" },
+    "targets": {
+      "type": "array",
+      "items": { "enum": ["linux", "windows"] },
+      "minItems": 1
+    },
+    "targetConfig": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "installDir": { "type": "string" },
+          "packageName": { "type": "string" },
+          "templates": { "type": "object" },
+          "config": { "type": "object" }
+        }
+      }
+    },
+    "profiles": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "versions": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "components": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "type", "source"],
+        "properties": {
+          "id": { "type": "string" },
+          "type": { "type": "string" },
+          "required": { "type": "boolean" },
+          "source": {
+            "type": "object",
+            "required": ["kind"],
+            "properties": {
+              "kind": {
+                "enum": ["artifact-repository", "manual-upload", "fixed-url", "previous-build"]
+              },
+              "repository": { "type": "string" },
+              "path": { "type": "string" },
+              "url": { "type": "string" },
+              "uploadId": { "type": "string" },
+              "uri": { "type": "string" },
+              "accept": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "workloads": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "runtime"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "runtime": { "enum": ["docker", "systemd"] },
+          "component": { "type": "string" },
+          "module": { "type": "string" },
+          "enabled": { "type": "boolean" },
+          "docker": {
+            "type": "object",
+            "properties": {
+              "image": { "type": "string" },
+              "containerName": { "type": "string" },
+              "ports": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "volumes": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "environment": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              },
+              "dependsOn": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "restart": { "type": "string" },
+              "command": { "type": "string" }
+            },
+            "additionalProperties": true
+          },
+          "systemd": {
+            "type": "object",
+            "properties": {
+              "unitName": { "type": "string" },
+              "description": { "type": "string" },
+              "user": { "type": "string" },
+              "group": { "type": "string" },
+              "workingDirectory": { "type": "string" },
+              "execStart": { "type": "string" },
+              "execStop": { "type": "string" },
+              "restart": { "type": "string" },
+              "after": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "wantedBy": { "type": "string" },
+              "environment": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              },
+              "environmentFile": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "config": {
+      "type": "object"
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "type": "module",
+  "scripts": {
+    "check": "bun --check package-runner.js",
+    "start": "bun package-runner.js"
+  },
+  "dependencies": {
+    "@dagger.io/dagger": "latest"
+  }
+}

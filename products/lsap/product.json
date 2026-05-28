@@ -1,0 +1,171 @@
+{
+  "id": "lsap",
+  "name": "智能定位平台",
+  "description": "Linux and Windows installer packaging definition for LSAP.",
+  "targets": ["linux", "windows"],
+  "targetConfig": {
+    "linux": {
+      "installDir": "/opt/lsap",
+      "packageName": "lsap-linux-x86_64",
+      "templates": {
+        "compose": "linux/compose.template.yml",
+        "manifest": "linux/manifest.template.json"
+      },
+      "config": {
+        "runtime": "docker-compose"
+      }
+    },
+    "windows": {
+      "installDir": "C:\\Program Files\\LSAP",
+      "packageName": "lsap-windows-x64-setup",
+      "templates": {
+        "installer": "windows/setup.template.iss"
+      },
+      "config": {
+        "installer": "inno"
+      }
+    }
+  },
+  "profiles": ["qa", "prod"],
+  "versions": ["latest", "0.0.1", "1.0.0"],
+  "components": [
+    {
+      "id": "location-engine",
+      "type": "docker-image",
+      "required": true,
+      "source": {
+        "kind": "artifact-repository",
+        "repository": "minio",
+        "path": "artifact/Publish/engine/main/{{version}}/location-engine-*.tar.gz"
+      }
+    },
+    {
+      "id": "location-guard",
+      "type": "docker-image",
+      "required": true,
+      "source": {
+        "kind": "artifact-repository",
+        "repository": "minio",
+        "path": "artifact/Publish/location-guard/main/{{version}}/location-guard-*.tar.gz"
+      }
+    },
+    {
+      "id": "location-push",
+      "type": "docker-image",
+      "required": true,
+      "source": {
+        "kind": "artifact-repository",
+        "repository": "minio",
+        "path": "artifact/Publish/location-push/guard-2.2/{{version}}/location-push-*.tar.gz"
+      }
+    },
+    {
+      "id": "ui",
+      "type": "archive",
+      "required": true,
+      "source": {
+        "kind": "artifact-repository",
+        "repository": "minio",
+        "path": "artifact/Publish/location-guard-ui/main/{{version}}/dist.zip"
+      }
+    },
+    {
+      "id": "location-worker",
+      "type": "binary",
+      "required": false,
+      "source": {
+        "kind": "artifact-repository",
+        "repository": "minio",
+        "path": "artifact/Publish/location-worker/main/{{version}}/location-worker-linux-amd64"
+      }
+    },
+    {
+      "id": "license",
+      "type": "license",
+      "required": false,
+      "source": {
+        "kind": "manual-upload",
+        "accept": [".lic", ".json"]
+      }
+    }
+  ],
+  "workloads": [
+    {
+      "id": "location-guard",
+      "runtime": "docker",
+      "component": "location-guard",
+      "module": "map",
+      "docker": {
+        "image": "location-guard:{{version}}",
+        "containerName": "lsap-location-guard",
+        "ports": ["{{ports.web}}:8080"],
+        "volumes": [
+          "{{installDir}}/conf/location-guard:/app/conf",
+          "{{installDir}}/logs/location-guard:/app/logs"
+        ],
+        "environment": {
+          "CUSTOMER_NAME": "{{customer.name}}"
+        },
+        "dependsOn": ["redis", "mysql"],
+        "restart": "unless-stopped"
+      }
+    },
+    {
+      "id": "location-push",
+      "runtime": "docker",
+      "component": "location-push",
+      "module": "push",
+      "docker": {
+        "image": "location-push:{{version}}",
+        "containerName": "lsap-location-push",
+        "volumes": ["{{installDir}}/conf/location-push:/app/conf"],
+        "restart": "unless-stopped"
+      }
+    },
+    {
+      "id": "location-worker",
+      "runtime": "systemd",
+      "component": "location-worker",
+      "module": "camera",
+      "systemd": {
+        "unitName": "lsap-location-worker.service",
+        "description": "LSAP Location Worker",
+        "user": "lsap",
+        "workingDirectory": "{{installDir}}/services/location-worker",
+        "execStart": "{{installDir}}/services/location-worker/location-worker --config {{installDir}}/conf/location-worker.yaml",
+        "restart": "always",
+        "after": ["network-online.target", "docker.service"],
+        "wantedBy": "multi-user.target",
+        "environmentFile": "{{installDir}}/conf/location-worker.env",
+        "environment": {
+          "LSAP_PROFILE": "{{profile}}",
+          "LSAP_VERSION": "{{version}}"
+        }
+      }
+    }
+  ],
+  "artifacts": {
+    "location-engine": "artifact/Publish/engine/main/latest/location-engine-*.tar.gz",
+    "location-guard": "artifact/Publish/location-guard/main/latest/location-guard-*.tar.gz",
+    "location-push": "artifact/Publish/location-push/guard-2.2/latest/location-push-*.tar.gz",
+    "ui": "artifact/Publish/location-guard-ui/main/latest/dist.zip"
+  },
+  "config": {
+    "ports": {
+      "web": 48000
+    },
+    "database": {
+      "passwordPolicy": "strong"
+    },
+    "customer": {
+      "name": "Default Customer",
+      "license": "community"
+    },
+    "modules": {
+      "camera": true,
+      "push": true,
+      "map": true
+    },
+    "approvalRequired": true
+  }
+}
