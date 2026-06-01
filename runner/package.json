@@ -1,10 +1,10 @@
 {
   "type": "module",
   "scripts": {
-    "check": "bun --check package-runner.js",
+    "check": "bun build package-runner.js --target=bun --outfile=/tmp/package-runner-check.js && bun build dagger/linux-package.mjs --target=bun --outfile=/tmp/linux-package-check.js",
     "start": "bun package-runner.js"
   },
   "dependencies": {
-    "@dagger.io/dagger": "latest"
+    "@dagger.io/dagger": "0.21.3"
   }
 }

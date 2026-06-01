@@ -27,12 +27,42 @@ bun package-runner.js
 
 The runner claims one queued task. If no task is available it exits with `no queued build`.
 
+Local smoke test checklist:
+
+1. Start the API with `DRY_RUN=true` and a local artifact store.
+2. Create and approve one preview build from the admin console.
+3. Run the command above with `TARGET=linux` or `TARGET=windows`.
+4. Confirm the build moves from `queued` to `running` to `succeeded`.
+5. Open the build detail page and check logs, artifact URI, download URL, and release gate status.
+
 ### 2. Linux Runner Through Nomad
+
+Linux production topology:
+
+```text
+Packaging API -> Nomad server -> Linux Nomad client -> Docker runner image -> Dagger -> API upload endpoint
+```
+
+Host prerequisites:
+
+- Linux host registered as a Nomad client.
+- Docker installed and reachable by the Nomad task.
+- Docker socket mounted into the runner when using Dagger's default Docker engine driver.
+- Dagger CLI and Docker CLI available in the runner image or through the configured runner command.
+- Network access from the runner to `PACKAGING_API_URL` and `MINIO_PUBLIC_URL`.
+- Stable cache directories for Bun, Dagger, and mirrored artifacts.
 
 Build the image on every Linux packager node or push it to an internal registry:
 
 ```bash
 docker build -t packaging-runner:local .
+```
+
+Prepare cache directories on each Linux runner host:
+
+```bash
+sudo mkdir -p /var/cache/packaging/{bun,dagger,artifacts}
+sudo chmod -R 0777 /var/cache/packaging
 ```
 
 The Packaging API submits a Nomad Docker task for Linux builds. The task runs:
@@ -52,9 +82,49 @@ DAGGER_DOCKER_SOCKET=/var/run/docker.sock
 
 The Nomad Linux client must have Docker and either a mounted Docker socket for Dagger or a reachable remote Dagger engine.
 
+Recommended Linux install sequence:
+
+```bash
+# On the runner host
+sudo nomad agent -config /path/to/infra/nomad/linux-client.hcl
+
+# On the API host
+export DRY_RUN=false
+export NOMAD_ADDR=http://<nomad-server>:4646
+export PACKAGING_API_URL=http://<api-host>:8080
+export PACKAGING_RUNNER_IMAGE=packaging-runner:local
+export NOMAD_LINUX_NODE_CLASS=linux-packager
+export RUNNER_BUN_CACHE_DIR=/var/cache/packaging/bun
+export RUNNER_DAGGER_CACHE_DIR=/var/cache/packaging/dagger
+export ARTIFACT_ROOT=/var/cache/packaging/artifacts
+export DAGGER_DOCKER_SOCKET=/var/run/docker.sock
+```
+
+For production Linux packages, set `LSAPCTL_SOURCE_DIR` and `LSAPCTL_BUILD_CMD` so the final tarball includes `lsapctl` at the package root:
+
+```bash
+export LSAPCTL_SOURCE_DIR=/opt/packaging-platform/lsapctl
+export LSAPCTL_BUILD_CMD='cd /workspace/context/lsapctl-src && GOOS=linux GOARCH=amd64 go build -o "$OUTPUT_DIR/lsapctl" .'
+```
+
 ### 3. Windows Runner Through Nomad
 
 Windows builds run through Nomad `raw_exec`, not Docker. This lets the runner use host-installed Inno Setup, WiX, SignTool, certificates, and vendor tools.
+
+Windows production topology:
+
+```text
+Packaging API -> Nomad server -> Windows Nomad client raw_exec -> Bun runner -> Inno Setup/WiX/SignTool -> API upload endpoint
+```
+
+Host prerequisites:
+
+- Windows Server or a dedicated Windows workstation.
+- Nomad client running as Administrator.
+- Bun installed and available in `PATH`.
+- Inno Setup or WiX installed for real `setup.exe` output.
+- Optional SignTool and signing certificate configured on the host.
+- Network access to the Packaging API and MinIO public URL.
 
 Prepare the Windows runner host:
 
@@ -71,6 +141,35 @@ The API controls the Windows Nomad task with:
 ```bash
 NOMAD_WINDOWS_NODE_CLASS=windows-packager
 WINDOWS_RUNNER_COMMAND='bun C:\packaging-runner\package-runner.js'
+```
+
+Recommended Windows install sequence:
+
+```powershell
+New-Item -ItemType Directory -Force -Path C:\packaging-cache\bun | Out-Null
+New-Item -ItemType Directory -Force -Path C:\packaging-cache\artifacts | Out-Null
+
+[Environment]::SetEnvironmentVariable("BUN_INSTALL_CACHE_DIR", "C:\packaging-cache\bun", "Machine")
+[Environment]::SetEnvironmentVariable("ARTIFACT_ROOT", "C:\packaging-cache\artifacts", "Machine")
+[Environment]::SetEnvironmentVariable("HTTP_PROXY", "", "Machine")
+[Environment]::SetEnvironmentVariable("HTTPS_PROXY", "", "Machine")
+[Environment]::SetEnvironmentVariable("NO_PROXY", "localhost,127.0.0.1,<api-host>,<minio-host>,<nomad-host>", "Machine")
+```
+
+Then start the Windows Nomad client from an Administrator PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File infra\windows\start-nomad-client.ps1 `
+  -NomadExe C:\tools\nomad\nomad.exe `
+  -ServerAddr <nomad-server-ip>:4647
+```
+
+Production Windows builds should set `WINDOWS_PACKAGER_CMD`. Without it, the runner only creates a clearly marked placeholder file for local control-plane testing.
+
+Example Inno Setup command:
+
+```powershell
+WINDOWS_PACKAGER_CMD='iscc C:\packaging-runner\context\rendered\setup.iss'
 ```
 
 Linux builds use Dagger by default. The runner generates `context/rendered/pipeline-plan.json` from the build lock, final config, and resolved components, then runs:
@@ -100,8 +199,11 @@ Linux Dagger:
 
 - `USE_DAGGER_FOR_LINUX` - default `true`; set `false` for local fallback packaging.
 - `DAGGER_RUNNER_HOST` - optional remote Dagger engine.
+- `DAGGER_LINUX_BASE_IMAGE_SOURCE` - `registry` by default; set `host` to use a Docker image already present on the runner host, or set `DAGGER_LINUX_BASE_IMAGE_TAR`.
 - `DAGGER_LINUX_BASE_IMAGE` - default `alpine:3.20`.
-- `DAGGER_LINUX_INSTALL_TOOLS` - default installs `tar`, `gzip`, `coreutils`, and `bash`.
+- `DAGGER_LINUX_BASE_IMAGE_TAR` - optional OCI/Docker image tar path visible to the Dagger client; avoids registry pulls for offline/reproducible builds.
+- `DAGGER_LINUX_BASE_IMAGE_TAR_TAG` - optional tag to select when the tar contains multiple image tags.
+- `DAGGER_LINUX_INSTALL_TOOLS` - default installs `tar`, `gzip`, `coreutils`, and `bash`; set `false`, `none`, or `skip` when the base image already contains required tools.
 - `DAGGER_LINUX_PACKAGE_CMD` - optional product-specific command inside the Dagger container.
 - `LINUX_PACKAGER_CMD` - optional custom Linux packaging command.
 
@@ -149,3 +251,50 @@ Default behavior:
 - Linux creates a `tar.gz` from the generated build context. Production packages should set `LSAPCTL_SOURCE_DIR` and `LSAPCTL_BUILD_CMD` so `lsapctl` is written to the context root before packaging.
 - Windows creates a placeholder setup file unless `WINDOWS_PACKAGER_CMD` is configured.
 - Both targets upload the resulting file through the Packaging API upload endpoint.
+
+## Deployment Verification
+
+After deploying a runner, verify the full control-plane loop:
+
+1. Confirm the Nomad client appears with the expected node class:
+   - Linux: `linux-packager`
+   - Windows: `windows-packager`
+2. Create a preview build for the matching target.
+3. Approve the build from the admin console.
+4. Confirm the build receives a `nomadJobId`.
+5. Confirm runner logs show task claim, component downloads, packaging, checksum upload, and artifact upload.
+6. Confirm the build reaches `succeeded`.
+7. Run Preview validation in the admin console and inspect the release gate checks.
+8. For release candidates, confirm the version and component URIs are fixed before promoting to Release.
+
+Useful checks:
+
+```bash
+nomad node status
+nomad job status <job-id>
+nomad alloc logs <allocation-id>
+```
+
+Windows runner local check:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\packaging-runner\run-once.ps1
+```
+
+## Upgrade and Rollback
+
+Linux Docker runner:
+
+1. Build and push a new image tag, for example `packaging-runner:2026-05-28`.
+2. Update `PACKAGING_RUNNER_IMAGE` on the API host.
+3. Restart the API so newly approved builds use the new image.
+4. Keep the previous image tag available for rollback.
+
+Windows raw_exec runner:
+
+1. Re-run `infra\windows\prepare-runner.ps1` with the new runner files.
+2. Keep a copy of the previous `C:\packaging-runner` directory.
+3. Run `run-once.ps1` against a test queued build.
+4. Restart the Nomad client only after the local check succeeds.
+
+Rollback means restoring the previous image tag or previous `C:\packaging-runner` directory, then retrying failed or canceled builds from the admin console.

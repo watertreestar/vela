@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -90,6 +92,18 @@ create table if not exists uploads (
   payload jsonb not null,
   created_at timestamptz not null default now()
 );
+
+create table if not exists manifest_revisions (
+  id text not null,
+  product_id text not null,
+  hash text not null,
+  summary text not null,
+  manifest jsonb not null,
+  created_at timestamptz not null default now(),
+  primary key (product_id, id)
+);
+
+create index if not exists manifest_revisions_product_created_idx on manifest_revisions(product_id, created_at desc);
 `)
 	return err
 }
@@ -196,7 +210,69 @@ insert into products (id, manifest, updated_at)
 values ($1, $2::jsonb, now())
 on conflict (id) do update set manifest = excluded.manifest, updated_at = now()
 `, id, string(content))
-	return product, err
+	if err != nil {
+		return domain.Product{}, err
+	}
+	if err := s.saveManifestRevision(id, content, "manifest saved"); err != nil {
+		return domain.Product{}, err
+	}
+	return product, nil
+}
+
+func (s *PostgresStore) ListManifestRevisions(productID string) ([]domain.ManifestRevision, error) {
+	rows, err := s.db.Query(`
+select id, product_id, hash, summary, created_at
+from manifest_revisions
+where product_id = $1
+order by created_at desc
+`, productID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	revisions := []domain.ManifestRevision{}
+	for rows.Next() {
+		var revision domain.ManifestRevision
+		if err := rows.Scan(&revision.ID, &revision.ProductID, &revision.Hash, &revision.Summary, &revision.CreatedAt); err != nil {
+			return nil, err
+		}
+		revisions = append(revisions, revision)
+	}
+	return revisions, rows.Err()
+}
+
+func (s *PostgresStore) ReadManifestRevision(productID string, revisionID string) (domain.ManifestRevision, error) {
+	var revision domain.ManifestRevision
+	var raw []byte
+	if err := s.db.QueryRow(`
+select id, product_id, hash, summary, manifest, created_at
+from manifest_revisions
+where product_id = $1 and id = $2
+`, productID, revisionID).Scan(&revision.ID, &revision.ProductID, &revision.Hash, &revision.Summary, &raw, &revision.CreatedAt); err != nil {
+		return domain.ManifestRevision{}, err
+	}
+	revision.Manifest = json.RawMessage(raw)
+	return revision, nil
+}
+
+func (s *PostgresStore) RestoreManifestRevision(productID string, revisionID string) (domain.Product, error) {
+	revision, err := s.ReadManifestRevision(productID, revisionID)
+	if err != nil {
+		return domain.Product{}, err
+	}
+	return s.WriteProductManifest(productID, revision.Manifest)
+}
+
+func (s *PostgresStore) saveManifestRevision(productID string, raw json.RawMessage, summary string) error {
+	hash := sha256.Sum256(raw)
+	now := nowUTC()
+	id := fmt.Sprintf("%s-%s", now.Format("20060102150405"), hex.EncodeToString(hash[:])[:10])
+	_, err := s.db.Exec(`
+insert into manifest_revisions (id, product_id, hash, summary, manifest, created_at)
+values ($1, $2, $3, $4, $5::jsonb, $6)
+on conflict (product_id, id) do nothing
+`, id, productID, hex.EncodeToString(hash[:]), summary, string(raw), now)
+	return err
 }
 
 func (s *PostgresStore) ReadOverlay(productID string, kind string, name string) (map[string]any, error) {

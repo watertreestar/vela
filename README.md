@@ -5,7 +5,7 @@ Internal packaging control plane for Linux and Windows installer builds.
 ## Structure
 
 - `backend/` - Go API service.
-- `frontend/` - React, HeroUI, and Tailwind CSS web console.
+- `frontend/` - React, Radix Themes, and Tailwind CSS web console.
 - `products/` - Product manifests.
 - `infra/nomad/` - Nomad job templates and examples.
 - `infra/dagger/` - Dagger packaging workflow example.
@@ -15,6 +15,7 @@ Internal packaging control plane for Linux and Windows installer builds.
 Key docs:
 
 - [Architecture](docs/architecture.md)
+- [Operation Guide](docs/operation-guide.md)
 - [Core Feature Plan](docs/core-feature-plan.md)
 - [API](docs/api.md)
 - [Nomad Runner Lifecycle](docs/nomad-runner-lifecycle.md)
@@ -32,6 +33,7 @@ Implemented MVP features:
 - build parameters
 - build records
 - approval and publish actions
+- preview validation before release promotion
 - download URL tracking
 - build log display
 - runner task claim and completion APIs
@@ -98,6 +100,17 @@ cd frontend
 npm install
 npm run dev
 ```
+
+Frontend verification:
+
+```bash
+cd frontend
+npm test -- --run
+npm run test:e2e
+npm run build
+```
+
+The E2E suite uses Playwright with mocked API data and runs the admin console flows in desktop Chromium and a mobile Chromium viewport.
 
 The backend defaults to PostgreSQL storage and dry-run Nomad scheduling. Set `DRY_RUN=false`, `NOMAD_ADDR`, and `PACKAGING_RUNNER_IMAGE` to submit real Nomad jobs.
 

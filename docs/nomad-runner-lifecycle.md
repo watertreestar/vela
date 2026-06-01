@@ -91,6 +91,30 @@ operator  = "="
 value     = "linux"
 ```
 
+Linux installation checklist:
+
+1. Install Nomad and Docker on the runner host.
+2. Join the host to the Nomad cluster with `infra/nomad/linux-client.hcl`.
+3. Create cache directories under `/var/cache/packaging`.
+4. Build or pull the runner Docker image on the host.
+5. Configure the API with `DRY_RUN=false`, `NOMAD_ADDR`, `PACKAGING_RUNNER_IMAGE`, `PACKAGING_API_URL`, `MINIO_PUBLIC_URL`, and Linux cache variables.
+6. Submit one preview Linux build and verify the job appears in Nomad.
+7. Confirm the build detail page shows runner logs, artifact metadata, and passing Preview gate checks.
+
+Recommended production Linux runner variables:
+
+```bash
+PACKAGING_RUNNER_IMAGE=packaging-runner:<version>
+PACKAGING_RUNNER_COMMAND='bun /app/package-runner.js'
+NOMAD_LINUX_NODE_CLASS=linux-packager
+RUNNER_BUN_CACHE_DIR=/var/cache/packaging/bun
+RUNNER_DAGGER_CACHE_DIR=/var/cache/packaging/dagger
+ARTIFACT_ROOT=/var/cache/packaging/artifacts
+DAGGER_DOCKER_SOCKET=/var/run/docker.sock
+LSAPCTL_SOURCE_DIR=/opt/packaging-platform/lsapctl
+LSAPCTL_BUILD_CMD='cd /workspace/context/lsapctl-src && GOOS=linux GOARCH=amd64 go build -o "$OUTPUT_DIR/lsapctl" .'
+```
+
 ## Windows Runner Host
 
 Windows setup packaging runs through Nomad `raw_exec`. This is intentional: Inno Setup, WiX, SignTool, and vendor runtimes are normally host-installed Windows tools.
@@ -156,6 +180,28 @@ operator  = "="
 value     = "windows"
 ```
 
+Windows installation checklist:
+
+1. Install Nomad, Bun, and the selected Windows installer toolchain.
+2. Run `infra\windows\prepare-runner.ps1` to copy runner files and generate `runner.env`.
+3. Configure persistent cache directories such as `C:\packaging-cache\bun` and `C:\packaging-cache\artifacts`.
+4. Set proxy and cache variables at Machine scope when required.
+5. Start the Nomad client as Administrator with `infra\windows\start-nomad-client.ps1`.
+6. Create and approve one preview Windows build.
+7. Verify raw_exec starts the runner, the runner claims the task, and the generated `setup.exe` is uploaded.
+
+Production Windows builds should configure a real packager command. Without `WINDOWS_PACKAGER_CMD`, the runner produces a placeholder setup file only for local control-plane tests.
+
+Example:
+
+```powershell
+[Environment]::SetEnvironmentVariable(
+  "WINDOWS_PACKAGER_CMD",
+  "iscc C:\packaging-runner\context\rendered\setup.iss",
+  "Machine"
+)
+```
+
 ## Job Lifecycle
 
 ```mermaid
@@ -196,6 +242,44 @@ sequenceDiagram
 - Runner process error: runner reports failed through `/api/runner/tasks/{id}/complete`.
 - Canceling a queued/running build deregisters the Nomad job.
 - Retrying a failed/canceled build registers a fresh Nomad job version and returns the build to `queued`.
+
+## Deployment Verification
+
+Use the same verification flow for Linux and Windows:
+
+1. `nomad node status` shows the runner node and node class.
+2. The Packaging API is running with `DRY_RUN=false`.
+3. The admin console can create and approve a target-specific preview build.
+4. `nomad job status <job-id>` shows the submitted runner job.
+5. Runner logs show task claim, heartbeat, component downloads, package creation, checksum upload, and artifact upload.
+6. The build reaches `succeeded`.
+7. `GET /api/builds/{id}/release-check` reports Preview readiness.
+8. The admin console can validate Preview. Release promotion remains blocked until fixed versions and exact component URIs are present.
+
+If a build is stuck:
+
+- Check API logs for scheduler submit errors.
+- Check Nomad allocation logs for runner startup failures.
+- Check network access from the runner host to `PACKAGING_API_URL` and `MINIO_PUBLIC_URL`.
+- Check `RUNNER_TIMEOUT_SECONDS` and runner heartbeat logs.
+- Retry only after fixing the environment issue that caused the failure.
+
+## Upgrade Strategy
+
+Linux runner upgrades are image based:
+
+1. Build and publish a new `PACKAGING_RUNNER_IMAGE` tag.
+2. Restart the API with the new image value.
+3. New approvals use the new image; existing allocations continue with their original image.
+4. Roll back by restoring the previous image tag and retrying failed or canceled builds.
+
+Windows runner upgrades are file based:
+
+1. Stop new approvals or drain the Windows Nomad node.
+2. Back up `C:\packaging-runner`.
+3. Re-run `prepare-runner.ps1`.
+4. Run `C:\packaging-runner\run-once.ps1` against a test queued build.
+5. Re-enable the Windows Nomad node.
 
 Controls:
 

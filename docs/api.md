@@ -13,6 +13,9 @@ GET /api/products
 GET /api/products/{id}
 GET /api/products/{id}/manifest
 PUT /api/products/{id}/manifest
+POST /api/products/{id}/manifest/dry-run
+GET /api/products/{id}/manifest/revisions
+POST /api/products/{id}/manifest/revisions/{revision}/restore
 GET /api/products/{id}/versions
 GET /api/products/{id}/overlays/profiles
 GET /api/products/{id}/overlays/profiles/{name}
@@ -22,7 +25,37 @@ GET /api/products/{id}/overlays/customers/{name}
 PUT /api/products/{id}/overlays/customers/{name}
 ```
 
-`PUT /api/products/{id}/manifest` accepts the full product manifest JSON.
+`PUT /api/products/{id}/manifest` accepts the full product manifest JSON. The API validates the manifest shape before saving and rejects invalid targets, component source kinds, missing target defaults, invalid workload runtime, and workload references to unknown components.
+
+`POST /api/products/{id}/manifest/dry-run` validates a draft manifest and resolves it with build parameters without creating a build:
+
+```json
+{
+  "manifest": {},
+  "target": "linux",
+  "profile": "qa",
+  "customer": "example-customer",
+  "version": "1.0.0",
+  "releaseChannel": "preview",
+  "configOverrides": {},
+  "componentOverrides": {},
+  "variables": {}
+}
+```
+
+Response:
+
+```json
+{
+  "valid": true,
+  "errors": [],
+  "buildLock": {},
+  "config": {},
+  "components": []
+}
+```
+
+Every manifest save creates a revision. Revision list responses omit the full manifest body; restore promotes a revision back to the current manifest and creates a new save revision.
 
 Overlay endpoints read and write JSON files under:
 
@@ -41,9 +74,11 @@ POST /api/builds
 GET /api/builds/{id}
 GET /api/builds/{id}/download
 GET /api/builds/{id}/logs
+GET /api/builds/{id}/release-check
 POST /api/builds/{id}/logs
 POST /api/builds/{id}/approve
 POST /api/builds/{id}/reject
+POST /api/builds/{id}/validate-preview
 POST /api/builds/{id}/publish
 POST /api/builds/{id}/cancel
 POST /api/builds/{id}/retry
@@ -58,7 +93,7 @@ Create build request:
   "profile": "qa",
   "customer": "customer-a",
   "version": "latest",
-  "releaseChannel": "qa",
+  "releaseChannel": "preview",
   "configOverrides": {
     "installDir": "/opt/customer-lsap",
     "ports": {
@@ -91,12 +126,42 @@ Create build request:
 Build states:
 
 ```text
-pending_approval -> queued -> running -> succeeded -> published
+pending_approval -> queued -> running -> succeeded -> preview_validated -> published
 pending_approval -> rejected
 running -> failed
 pending_approval|queued|running -> canceled
 failed|canceled -> queued
 ```
+
+Release publishing is gated:
+
+- create builds as `releaseChannel=preview`
+- validate the generated preview installer with `POST /api/builds/{id}/validate-preview`
+- publish with `POST /api/builds/{id}/publish`, which promotes the validated preview to `release`
+- release publishing rejects `latest` builds and wildcard component URIs so the release can be reproduced from the build lock
+
+`GET /api/builds/{id}/release-check` returns the shared gate used by preview validation and release publishing:
+
+```json
+{
+  "buildId": "build-id",
+  "stage": "preview",
+  "previewReady": true,
+  "releaseReady": false,
+  "blockingCount": 1,
+  "checks": [
+    {
+      "id": "release.fixed-version",
+      "stage": "release",
+      "title": "构建版本固定",
+      "status": "blocked",
+      "reason": "release requires a fixed build version"
+    }
+  ]
+}
+```
+
+Preview validation requires a succeeded preview build, a downloadable artifact, a generated Build Lock whose target/profile/version match the build, and locked URIs for required components. Release publishing additionally requires a validated preview, fixed build and component versions, exact component URIs without wildcards, a downloadable artifact, and no build error.
 
 ## Uploads
 

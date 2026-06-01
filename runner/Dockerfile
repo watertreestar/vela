@@ -2,8 +2,8 @@ FROM oven/bun:1
 
 WORKDIR /app
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl tar gzip bash \
-  && curl -fsSL https://dl.dagger.io/dagger/install.sh | BIN_DIR=/usr/local/bin sh \
+  && apt-get install -y --no-install-recommends ca-certificates curl tar gzip bash docker-cli \
+  && curl -fsSL https://dl.dagger.io/dagger/install.sh | DAGGER_VERSION=0.21.3 BIN_DIR=/usr/local/bin sh \
   && rm -rf /var/lib/apt/lists/*
 
 COPY package-runner.js package.json ./

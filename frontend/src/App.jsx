@@ -57,30 +57,38 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import {
   approveBuild,
+  buildDownloadUrl,
   cancelBuild,
   createBuild,
+  dryRunProductManifest,
   getBuildLock,
   getBuildLogs,
+  getBuildReleaseCheck,
   getProductManifest,
   getProductOverlay,
+  listProductManifestRevisions,
   listBuilds,
   listProductOverlays,
   listProducts,
   listUploads,
   publishBuild,
   rejectBuild,
+  restoreProductManifestRevision,
   retryBuild,
   updateProductManifest,
   updateProductOverlay,
   uploadArtifact,
+  validatePreviewBuild,
 } from "./lib/api";
+import productManifestSchema from "../../docs/product-manifest.schema.json";
 
 const statusMeta = {
   pending_approval: { label: "待审批", color: "orange" },
   queued: { label: "排队中", color: "blue" },
   running: { label: "构建中", color: "purple" },
-  succeeded: { label: "构建成功", color: "green" },
-  published: { label: "已发布", color: "green" },
+  succeeded: { label: "Preview 已生成", color: "green" },
+  preview_validated: { label: "Preview 已验证", color: "teal" },
+  published: { label: "Release 已发布", color: "green" },
   rejected: { label: "已拒绝", color: "gray" },
   failed: { label: "失败", color: "red" },
   canceled: { label: "已取消", color: "amber" },
@@ -124,8 +132,13 @@ export default function App() {
   const [selectedBuild, setSelectedBuild] = useState(null);
   const [logs, setLogs] = useState([]);
   const [buildLock, setBuildLock] = useState(null);
+  const [releaseCheck, setReleaseCheck] = useState(null);
   const [manifestText, setManifestText] = useState("");
   const [originalManifestText, setOriginalManifestText] = useState("");
+  const [manifestDryRun, setManifestDryRun] = useState(null);
+  const [dryRunningManifest, setDryRunningManifest] = useState(false);
+  const [manifestRevisions, setManifestRevisions] = useState([]);
+  const [loadingManifestRevisions, setLoadingManifestRevisions] = useState(false);
   const [profileOverlays, setProfileOverlays] = useState([]);
   const [customerOverlays, setCustomerOverlays] = useState([]);
   const [overlayKind, setOverlayKind] = useState("profiles");
@@ -143,7 +156,7 @@ export default function App() {
     profile: "qa",
     customer: "",
     version: "latest",
-    releaseChannel: "qa",
+    releaseChannel: "preview",
     installDir: "",
     webPort: "48000",
     serviceVersion: "latest",
@@ -193,7 +206,14 @@ export default function App() {
     const attention =
       (counts.pending_approval || 0) + (counts.failed || 0) + (counts.canceled || 0);
     const latest = [...builds].sort((a, b) => dateValue(b.updatedAt) - dateValue(a.updatedAt))[0];
-    const successful = (counts.succeeded || 0) + (counts.published || 0);
+    const successful =
+      (counts.succeeded || 0) + (counts.preview_validated || 0) + (counts.published || 0);
+    const previewPending = builds.filter((build) => build.status === "succeeded").length;
+    const releaseReady = builds.filter((build) => getReleaseReadiness(build).ready).length;
+    const releaseBlocked = builds.filter((build) => {
+      const readiness = getReleaseReadiness(build);
+      return build.status === "preview_validated" && !readiness.ready;
+    }).length;
     return {
       counts,
       active,
@@ -202,6 +222,9 @@ export default function App() {
       products: products.length,
       uploads: uploads.length,
       successRate: builds.length === 0 ? 0 : Math.round((successful / builds.length) * 100),
+      previewPending,
+      releaseReady,
+      releaseBlocked,
     };
   }, [builds, products.length, uploads.length]);
 
@@ -234,6 +257,7 @@ export default function App() {
         const manifest = JSON.stringify(await getProductManifest(nextProducts[0].id), null, 2);
         setManifestText(manifest);
         setOriginalManifestText(manifest);
+        await loadManifestRevisions(nextProducts[0].id);
         await loadOverlays(nextProducts[0].id);
       }
       if (selectedBuild) {
@@ -278,7 +302,7 @@ export default function App() {
       target,
       profile: product.profiles?.[0] || "qa",
       version: product.versions?.[0] || "latest",
-      releaseChannel: product.profiles?.[0] || "qa",
+      releaseChannel: "preview",
       ...defaults,
       variablesText: resetAdvanced ? "{}" : current.variablesText,
       componentOverridesText: resetAdvanced ? "{}" : current.componentOverridesText,
@@ -288,6 +312,7 @@ export default function App() {
   async function chooseProduct(product) {
     applyProductDefaults(product);
     await loadManifest(product.id);
+    await loadManifestRevisions(product.id);
     await loadOverlays(product.id);
   }
 
@@ -357,6 +382,7 @@ export default function App() {
       const text = JSON.stringify(manifest, null, 2);
       setManifestText(text);
       setOriginalManifestText(text);
+      setManifestDryRun(null);
       setNotice("Manifest 已加载");
     } catch (err) {
       setError(err.message);
@@ -375,12 +401,66 @@ export default function App() {
       }
       await updateProductManifest(form.productId, parsed);
       setOriginalManifestText(JSON.stringify(parsed, null, 2));
+      await loadManifestRevisions(form.productId);
       await refresh({ silent: true });
       setNotice("Manifest 已保存");
     } catch (err) {
       setError(err.message);
     } finally {
       setSavingManifest(false);
+    }
+  }
+
+  async function runManifestDryRun() {
+    if (!form.productId) return;
+    setError("");
+    setDryRunningManifest(true);
+    try {
+      const manifest = JSON.parse(manifestText || "{}");
+      const result = await dryRunProductManifest(form.productId, {
+        manifest,
+        target: form.target,
+        profile: form.profile,
+        customer: form.customer,
+        version: form.version,
+        releaseChannel: form.releaseChannel,
+        variables: JSON.parse(form.variablesText || "{}"),
+        configOverrides: buildConfigOverrides(),
+        componentOverrides: JSON.parse(form.componentOverridesText || "{}"),
+      });
+      setManifestDryRun(result);
+      setNotice(result.valid ? "Manifest Dry Run 通过" : "Manifest Dry Run 未通过");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDryRunningManifest(false);
+    }
+  }
+
+  async function loadManifestRevisions(productId = form.productId) {
+    if (!productId) return;
+    setLoadingManifestRevisions(true);
+    try {
+      const revisions = await listProductManifestRevisions(productId);
+      setManifestRevisions(revisions);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoadingManifestRevisions(false);
+    }
+  }
+
+  async function restoreManifestRevision(revision) {
+    if (!form.productId || !revision?.id) return;
+    setError("");
+    try {
+      await restoreProductManifestRevision(form.productId, revision.id);
+      await loadManifest(form.productId);
+      await loadManifestRevisions(form.productId);
+      await refresh({ silent: true });
+      setNotice("Manifest 已恢复到历史版本");
+    } catch (err) {
+      setError(err.message);
     }
   }
 
@@ -535,12 +615,14 @@ export default function App() {
     }
     setError("");
     try {
-      const [nextLogs, nextLock] = await Promise.all([
+      const [nextLogs, nextLock, nextReleaseCheck] = await Promise.all([
         getBuildLogs(build.id),
         getBuildLock(build.id),
+        getBuildReleaseCheck(build.id),
       ]);
       setLogs(nextLogs);
       setBuildLock(nextLock);
+      setReleaseCheck(nextReleaseCheck);
       if (options.openDialog) {
         setDetailOpen(true);
       }
@@ -586,8 +668,9 @@ export default function App() {
         onReject={(build) =>
           requestBuildAction(rejectBuild, build, "拒绝", "拒绝后该构建不会进入队列，后续只能重新审批或重新创建。")
         }
+        onValidate={(build) => runBuildAction(validatePreviewBuild, build, "验证 Preview")}
         onPublish={(build) =>
-          requestBuildAction(publishBuild, build, "发布", "发布会把当前成功制品标记为发布状态。")
+          requestBuildAction(publishBuild, build, "转 Release", "只有 Preview 验证通过后才能转为 Release 发布。")
         }
         onCancel={(build) =>
           requestBuildAction(cancelBuild, build, "取消", "取消会终止待审批、排队中或运行中的构建。")
@@ -608,6 +691,13 @@ export default function App() {
         loadManifest={loadManifest}
         saveManifest={saveManifest}
         savingManifest={savingManifest}
+        runManifestDryRun={runManifestDryRun}
+        dryRunningManifest={dryRunningManifest}
+        manifestDryRun={manifestDryRun}
+        manifestRevisions={manifestRevisions}
+        loadingManifestRevisions={loadingManifestRevisions}
+        loadManifestRevisions={loadManifestRevisions}
+        restoreManifestRevision={restoreManifestRevision}
       />
     ),
     overlays: (
@@ -640,6 +730,7 @@ export default function App() {
         build={selectedBuild}
         logs={logs}
         buildLock={buildLock}
+        releaseCheck={releaseCheck}
         onRefresh={() =>
           selectedBuild && inspectBuild(selectedBuild, { openDialog: false, keepSection: true })
         }
@@ -752,8 +843,9 @@ export default function App() {
         onReject={(build) =>
           requestBuildAction(rejectBuild, build, "拒绝", "拒绝后该构建不会进入队列，后续只能重新审批或重新创建。")
         }
+        onValidate={(build) => runBuildAction(validatePreviewBuild, build, "验证 Preview")}
         onPublish={(build) =>
-          requestBuildAction(publishBuild, build, "发布", "发布会把当前成功制品标记为发布状态。")
+          requestBuildAction(publishBuild, build, "转 Release", "只有 Preview 验证通过后才能转为 Release 发布。")
         }
         onCancel={(build) =>
           requestBuildAction(cancelBuild, build, "取消", "取消会终止待审批、排队中或运行中的构建。")
@@ -792,6 +884,9 @@ function OverviewSection({ dashboard, builds, products, uploads, onCreate, onIns
         <MetricCard icon={Gauge} label="活跃任务" value={dashboard.active} hint="排队中 + 构建中" color="blue" />
         <MetricCard icon={ShieldCheck} label="成功率" value={`${dashboard.successRate}%`} hint={`${builds.length} 条构建记录`} color="green" />
         <MetricCard icon={AlertCircle} label="需要处理" value={dashboard.attention} hint="待审批 / 失败 / 已取消" color="amber" />
+        <MetricCard icon={PackageCheck} label="待验证 Preview" value={dashboard.previewPending} hint="成功但未验证" color="teal" />
+        <MetricCard icon={Rocket} label="可发布 Release" value={dashboard.releaseReady} hint="门禁检查通过" color="green" />
+        <MetricCard icon={Ban} label="发布阻塞" value={dashboard.releaseBlocked} hint="需修复复现性" color="amber" />
       </Grid>
 
       <div className="dashboard-grid">
@@ -904,13 +999,10 @@ function CreateBuildSection({
               placeholder="例如 example-customer"
             />
             <FieldSelect
-              label="发布通道"
+              label="构建通道"
               value={form.releaseChannel}
               onValueChange={(releaseChannel) => setForm({ ...form, releaseChannel })}
-              options={["qa", "prod", "customer"].map((channel) => ({
-                value: channel,
-                label: channel,
-              }))}
+              options={[{ value: "preview", label: "Preview 安装包" }]}
             />
           </div>
         </Panel>
@@ -1001,6 +1093,7 @@ function BuildsSection({
   busyAction,
   onApprove,
   onReject,
+  onValidate,
   onPublish,
   onCancel,
   onRetry,
@@ -1030,6 +1123,7 @@ function BuildsSection({
         busyAction={busyAction}
         onApprove={onApprove}
         onReject={onReject}
+        onValidate={onValidate}
         onPublish={onPublish}
         onCancel={onCancel}
         onRetry={onRetry}
@@ -1050,14 +1144,28 @@ function ProductsSection({
   loadManifest,
   saveManifest,
   savingManifest,
+  runManifestDryRun,
+  dryRunningManifest,
+  manifestDryRun,
+  manifestRevisions,
+  loadingManifestRevisions,
+  loadManifestRevisions,
+  restoreManifestRevision,
 }) {
+  const parsedManifest = useMemo(() => {
+    try {
+      return JSON.parse(manifestText || "{}");
+    } catch {
+      return null;
+    }
+  }, [manifestText]);
   const manifestValidation = useMemo(() => {
     try {
-      return validateProductManifest(JSON.parse(manifestText || "{}"));
+      return validateProductManifest(parsedManifest || {});
     } catch (err) {
       return { valid: false, errors: [`JSON 解析错误：${err.message}`] };
     }
-  }, [manifestText]);
+  }, [parsedManifest]);
   const manifestDiff = useMemo(
     () => diffLines(originalManifestText, manifestText).slice(0, 240),
     [originalManifestText, manifestText],
@@ -1102,6 +1210,10 @@ function ProductsSection({
             <Button variant="soft" onClick={() => loadManifest()}>
               重新加载
             </Button>
+            <Button variant="soft" disabled={dryRunningManifest} onClick={runManifestDryRun}>
+              {dryRunningManifest ? <Spinner /> : <GitCompare size={16} />}
+              Dry Run
+            </Button>
             <Button disabled={savingManifest} onClick={saveManifest}>
               {savingManifest ? <Spinner /> : null}
               保存 Manifest
@@ -1112,7 +1224,11 @@ function ProductsSection({
         <Tabs.Root defaultValue="editor">
           <Tabs.List>
             <Tabs.Trigger value="editor">编辑</Tabs.Trigger>
+            <Tabs.Trigger value="structured">结构化</Tabs.Trigger>
             <Tabs.Trigger value="validate">校验</Tabs.Trigger>
+            <Tabs.Trigger value="checks">功能检查</Tabs.Trigger>
+            <Tabs.Trigger value="dryrun">Dry Run</Tabs.Trigger>
+            <Tabs.Trigger value="revisions">历史</Tabs.Trigger>
             <Tabs.Trigger value="diff">差异</Tabs.Trigger>
           </Tabs.List>
           <Box pt="3">
@@ -1124,8 +1240,25 @@ function ProductsSection({
                 onChange={(event) => setManifestText(event.target.value)}
               />
             </Tabs.Content>
+            <Tabs.Content value="structured">
+              <ManifestStructuredEditor manifest={parsedManifest} onChange={setManifestText} />
+            </Tabs.Content>
             <Tabs.Content value="validate">
               <ValidationPanel result={manifestValidation} />
+            </Tabs.Content>
+            <Tabs.Content value="checks">
+              <ManifestFeatureCheckPanel manifest={parsedManifest} />
+            </Tabs.Content>
+            <Tabs.Content value="dryrun">
+              <ManifestDryRunPanel result={manifestDryRun} running={dryRunningManifest} onRun={runManifestDryRun} />
+            </Tabs.Content>
+            <Tabs.Content value="revisions">
+              <ManifestRevisionsPanel
+                revisions={manifestRevisions}
+                loading={loadingManifestRevisions}
+                onRefresh={() => loadManifestRevisions()}
+                onRestore={restoreManifestRevision}
+              />
             </Tabs.Content>
             <Tabs.Content value="diff">
               <DiffPanel lines={manifestDiff} />
@@ -1293,6 +1426,351 @@ function OverlaysSection({
   );
 }
 
+function ManifestFeatureCheckPanel({ manifest }) {
+  if (!manifest) {
+    return <ValidationPanel result={{ valid: false, errors: ["Manifest JSON 解析失败，无法执行功能检查"] }} />;
+  }
+  const checks = manifestFeatureChecks(manifest);
+  const passed = checks.filter((item) => item.ok).length;
+
+  return (
+    <div className="section-stack">
+      <Flex gap="3" align="center" wrap="wrap">
+        <Badge color={passed === checks.length ? "green" : "amber"} variant="soft">
+          {passed}/{checks.length} 通过
+        </Badge>
+        <Text size="2" color="gray">
+          用于确认该 manifest 是否能覆盖 Linux/Windows、Preview 验证和 Release 复现发布。
+        </Text>
+      </Flex>
+      <div className="validation-list">
+        {checks.map((item) => (
+          <div key={item.label} className={`validation-check ${item.ok ? "is-pass" : item.level === "warn" ? "is-warn" : "is-fail"}`}>
+            <Flex justify="between" gap="4" align="start">
+              <Box>
+                <Text as="div" weight="bold">
+                  {item.label}
+                </Text>
+                <Text as="div" size="2" color="gray">
+                  {item.detail}
+                </Text>
+              </Box>
+              <Badge color={item.ok ? "green" : item.level === "warn" ? "amber" : "red"} variant="soft">
+                {item.ok ? "通过" : item.level === "warn" ? "需确认" : "未满足"}
+              </Badge>
+            </Flex>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ManifestStructuredEditor({ manifest, onChange }) {
+  if (!manifest) {
+    return <ValidationPanel result={{ valid: false, errors: ["Manifest JSON 解析失败，无法结构化编辑"] }} />;
+  }
+
+  function update(patch) {
+    onChange(JSON.stringify({ ...manifest, ...patch }, null, 2));
+  }
+
+  function updateTarget(target, patch) {
+    const targets = new Set(manifest.targets || []);
+    targets.add(target);
+    update({
+      targets: Array.from(targets),
+      targetConfig: {
+        ...(manifest.targetConfig || {}),
+        [target]: {
+          ...(manifest.targetConfig?.[target] || {}),
+          ...patch,
+        },
+      },
+    });
+  }
+
+  function toggleTarget(target, enabled) {
+    const nextTargets = new Set(manifest.targets || []);
+    if (enabled) {
+      nextTargets.add(target);
+    } else {
+      nextTargets.delete(target);
+    }
+    update({ targets: Array.from(nextTargets) });
+  }
+
+  function updateComponent(index, patch) {
+    const components = [...(manifest.components || [])];
+    components[index] = {
+      ...components[index],
+      ...patch,
+      source: patch.source ? { ...(components[index]?.source || {}), ...patch.source } : components[index]?.source,
+    };
+    update({ components });
+  }
+
+  function addComponent() {
+    update({
+      components: [
+        ...(manifest.components || []),
+        {
+          id: "new-component",
+          type: "archive",
+          required: true,
+          source: { kind: "artifact-repository", repository: "minio", path: "artifact/path/{{version}}/file.zip" },
+        },
+      ],
+    });
+  }
+
+  function removeComponent(index) {
+    update({ components: (manifest.components || []).filter((_, itemIndex) => itemIndex !== index) });
+  }
+
+  return (
+    <div className="section-stack">
+      <div className="field-grid two">
+        <LabeledInput label="产品名称" value={manifest.name || ""} onChange={(name) => update({ name })} />
+        <LabeledInput label="产品 ID" value={manifest.id || ""} onChange={(id) => update({ id })} />
+        <LabeledInput label="Profiles" value={(manifest.profiles || []).join(", ")} onChange={(value) => update({ profiles: splitCSV(value) })} />
+        <LabeledInput label="Versions" value={(manifest.versions || []).join(", ")} onChange={(value) => update({ versions: splitCSV(value) })} />
+      </div>
+      <label className="field">
+        <Text size="2" weight="medium">
+          描述
+        </Text>
+        <TextArea
+          resize="vertical"
+          value={manifest.description || ""}
+          onChange={(event) => update({ description: event.target.value })}
+        />
+      </label>
+
+      <div className="structured-grid">
+        {["linux", "windows"].map((target) => {
+          const enabled = (manifest.targets || []).includes(target);
+          const targetConfig = manifest.targetConfig?.[target] || {};
+          return (
+            <div key={target} className="structured-block">
+              <Flex align="center" justify="between" gap="3">
+                <Text weight="bold">{target}</Text>
+                <label className="inline-check">
+                  <Checkbox checked={enabled} onCheckedChange={(value) => toggleTarget(target, value === true)} />
+                  <Text size="2">启用</Text>
+                </label>
+              </Flex>
+              <LabeledInput
+                label="安装目录"
+                value={targetConfig.installDir || ""}
+                onChange={(installDir) => updateTarget(target, { installDir })}
+              />
+              <LabeledInput
+                label="包名"
+                value={targetConfig.packageName || ""}
+                onChange={(packageName) => updateTarget(target, { packageName })}
+              />
+            </div>
+          );
+        })}
+      </div>
+
+      <Flex justify="between" align="center" gap="3" wrap="wrap">
+        <Text weight="bold">组件来源</Text>
+        <Button variant="soft" onClick={addComponent}>
+          <FileJson size={16} />
+          添加组件
+        </Button>
+      </Flex>
+      <div className="component-grid">
+        {(manifest.components || []).map((component, index) => (
+          <div key={`${component.id}-${index}`} className="component-card">
+            <Flex justify="between" align="start" gap="3">
+              <LabeledInput label="组件 ID" value={component.id || ""} onChange={(id) => updateComponent(index, { id })} />
+              <Button size="1" color="red" variant="soft" onClick={() => removeComponent(index)}>
+                删除
+              </Button>
+            </Flex>
+            <LabeledInput label="类型" value={component.type || ""} onChange={(type) => updateComponent(index, { type })} />
+            <label className="inline-check">
+              <Checkbox checked={component.required !== false} onCheckedChange={(value) => updateComponent(index, { required: value === true })} />
+              <Text size="2">必需组件</Text>
+            </label>
+            <FieldSelect
+              label="来源类型"
+              value={component.source?.kind || "artifact-repository"}
+              onValueChange={(kind) => updateComponent(index, { source: { kind } })}
+              options={sourceKindOptions.map((option) => ({ value: option.key, label: option.label }))}
+            />
+            {(component.source?.kind || "artifact-repository") === "artifact-repository" && (
+              <LabeledInput label="仓库路径" value={component.source?.path || ""} onChange={(path) => updateComponent(index, { source: { path } })} />
+            )}
+            {component.source?.kind === "fixed-url" && (
+              <LabeledInput label="URL" value={component.source?.url || ""} onChange={(url) => updateComponent(index, { source: { url } })} />
+            )}
+            {component.source?.kind === "previous-build" && (
+              <LabeledInput label="URI" value={component.source?.uri || ""} onChange={(uri) => updateComponent(index, { source: { uri } })} />
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ManifestDryRunPanel({ result, running, onRun }) {
+  if (running) {
+    return (
+      <div className="loading-panel">
+        <Spinner size="3" />
+        <Text color="gray">正在解析 manifest 并生成 Build Lock 预览</Text>
+      </div>
+    );
+  }
+  if (!result) {
+    return (
+      <EmptyState
+        icon={GitCompare}
+        title="尚未执行 Dry Run"
+        text="点击 Dry Run 可用当前构建参数解析 manifest，提前检查 Build Lock、组件 URI 和 workload。"
+      />
+    );
+  }
+  if (!result.valid) {
+    return <ValidationPanel result={{ valid: false, errors: result.errors || ["Dry Run 未通过"] }} />;
+  }
+  return (
+    <div className="section-stack">
+      <Callout.Root color="green" variant="soft">
+        <Callout.Icon>
+          <Check size={18} />
+        </Callout.Icon>
+        <Callout.Text>Dry Run 通过，Build Lock 可生成。</Callout.Text>
+        <Button size="1" variant="ghost" onClick={onRun}>
+          重新运行
+        </Button>
+      </Callout.Root>
+      <div className="audit-grid">
+        <AuditMetric label="目标平台" value={result.buildLock?.target || "-"} />
+        <AuditMetric label="Profile" value={result.buildLock?.profile || "-"} />
+        <AuditMetric label="组件锁定" value={result.components?.length || 0} />
+        <AuditMetric label="Workload" value={result.buildLock?.workloads?.length || 0} />
+      </div>
+      <div className="dryrun-lock">
+        <Flex align="center" gap="3" mb="3">
+          <div className="panel-icon">
+            <GitCompare size={18} />
+          </div>
+          <Box>
+            <Text as="div" weight="bold">
+              Build Lock 预览
+            </Text>
+            <Text as="div" size="2" color="gray">
+              不会创建真实构建，只用于保存前验证解析结果
+            </Text>
+          </Box>
+        </Flex>
+        <JsonBlock value={result.buildLock || {}} />
+      </div>
+    </div>
+  );
+}
+
+function ManifestRevisionsPanel({ revisions, loading, onRefresh, onRestore }) {
+  return (
+    <div className="section-stack">
+      <Flex justify="between" gap="3" align="center" wrap="wrap">
+        <Text size="2" color="gray">
+          每次保存 Manifest 会生成一个可恢复的历史版本。
+        </Text>
+        <Button variant="soft" onClick={onRefresh} disabled={loading}>
+          {loading ? <Spinner /> : <RefreshCcw size={16} />}
+          刷新历史
+        </Button>
+      </Flex>
+      {loading ? (
+        <div className="loading-panel">
+          <Spinner size="3" />
+          <Text color="gray">正在加载历史版本</Text>
+        </div>
+      ) : revisions.length === 0 ? (
+        <EmptyState icon={History} title="暂无历史版本" text="保存 Manifest 后会在这里出现 revision。" />
+      ) : (
+        <div className="revision-list">
+          {revisions.map((revision) => (
+            <div key={revision.id} className="revision-row">
+              <Box>
+                <Text as="div" weight="bold">
+                  {revision.id}
+                </Text>
+                <Text as="div" size="1" color="gray">
+                  {formatDate(revision.createdAt)} / {shortHash(revision.hash)}
+                </Text>
+              </Box>
+              <Text size="2" color="gray">
+                {revision.summary || "manifest saved"}
+              </Text>
+              <Button size="1" variant="soft" onClick={() => onRestore(revision)}>
+                <RotateCcw size={14} />
+                恢复
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function manifestFeatureChecks(manifest) {
+  const targets = manifest.targets || [];
+  const targetConfig = manifest.targetConfig || {};
+  const components = manifest.components || [];
+  const hasLinux = targets.includes("linux") && Boolean(targetConfig.linux?.installDir);
+  const hasWindows = targets.includes("windows") && Boolean(targetConfig.windows?.installDir);
+  const requiredComponents = components.filter((component) => component.required !== false);
+  const missingSource = requiredComponents.filter((component) => !component.source?.kind && !component.source?.path && !component.source?.uri && !component.source?.url);
+  const wildcardSources = requiredComponents.filter((component) => String(component.source?.path || component.source?.uri || component.source?.url || "").includes("*"));
+  const hasPreviewProfile = (manifest.profiles || []).includes("qa") || (manifest.profiles || []).includes("preview");
+  const hasReleaseProfile = (manifest.profiles || []).includes("prod") || (manifest.profiles || []).includes("release");
+
+  return [
+    {
+      label: "Linux 安装包目标",
+      ok: hasLinux,
+      detail: hasLinux ? `安装目录 ${targetConfig.linux.installDir}` : "targets 和 targetConfig 需要包含 linux。",
+    },
+    {
+      label: "Windows 安装包目标",
+      ok: hasWindows,
+      detail: hasWindows ? `安装目录 ${targetConfig.windows.installDir}` : "targets 和 targetConfig 需要包含 windows。",
+    },
+    {
+      label: "Preview 与 Release 配置面",
+      ok: hasPreviewProfile && hasReleaseProfile,
+      detail: "建议至少保留 qa/preview 与 prod/release 两类 profile，用于先验收再发布。",
+      level: "warn",
+    },
+    {
+      label: "必需组件来源",
+      ok: requiredComponents.length > 0 && missingSource.length === 0,
+      detail:
+        missingSource.length === 0
+          ? `${requiredComponents.length} 个必需组件都有来源定义。`
+          : `${missingSource.map((item) => item.id).join(", ")} 缺少来源。`,
+    },
+    {
+      label: "Release 复现性",
+      ok: wildcardSources.length === 0 && !(manifest.versions || []).every((version) => version === "latest"),
+      detail:
+        wildcardSources.length === 0
+          ? "Release 仍需在创建构建时选择非 latest 版本，后端会阻止通配符 URI 发布。"
+          : `${wildcardSources.map((item) => item.id).join(", ")} 使用通配符来源，Release 前需要改为精确 URI。`,
+      level: wildcardSources.length === 0 ? undefined : "warn",
+    },
+  ];
+}
+
 function isValidOverlayName(name) {
   return overlayNamePattern.test(name);
 }
@@ -1410,7 +1888,7 @@ function ComponentSourceEditor({ components, uploads, overridesText, onUpdate, o
         const source = { ...component.source, ...override };
         const kind = source.kind || "artifact-repository";
         return (
-          <Card key={component.id} className="component-card">
+          <div key={component.id} className="component-card">
             <Flex align="start" justify="between" gap="3">
               <Box>
                 <Text as="div" weight="bold">
@@ -1505,7 +1983,7 @@ function ComponentSourceEditor({ components, uploads, overridesText, onUpdate, o
                 {sourceKindLabels[kind] || kind}
               </Text>
             </Flex>
-          </Card>
+          </div>
         );
       })}
     </div>
@@ -1518,6 +1996,7 @@ function BuildsTable({
   busyAction,
   onApprove,
   onReject,
+  onValidate,
   onPublish,
   onCancel,
   onRetry,
@@ -1565,14 +2044,10 @@ function BuildsTable({
               </Table.Cell>
               <Table.Cell>{formatDate(build.updatedAt)}</Table.Cell>
               <Table.Cell>
-                {build.downloadUrl ? (
-                  <Link href={build.downloadUrl} target="_blank">
+                {build.downloadUrl || build.artifactUri ? (
+                  <Link href={build.downloadUrl || buildDownloadUrl(build.id)} target="_blank">
                     <Download size={14} /> 下载
                   </Link>
-                ) : build.artifactUri ? (
-                  <Tooltip content={build.artifactUri}>
-                    <Badge variant="soft">URI</Badge>
-                  </Tooltip>
                 ) : (
                   <Text color="gray">未生成</Text>
                 )}
@@ -1583,6 +2058,7 @@ function BuildsTable({
                   busyAction={busyAction}
                   onApprove={onApprove}
                   onReject={onReject}
+                  onValidate={onValidate}
                   onPublish={onPublish}
                   onCancel={onCancel}
                   onRetry={onRetry}
@@ -1602,12 +2078,14 @@ function BuildActions({
   busyAction,
   onApprove,
   onReject,
+  onValidate,
   onPublish,
   onCancel,
   onRetry,
   onInspect,
   showInspect = true,
 }) {
+  const releaseReadiness = getReleaseReadiness(build);
   return (
     <Flex gap="2" wrap="wrap">
       {build.status === "pending_approval" && (
@@ -1623,10 +2101,29 @@ function BuildActions({
         </>
       )}
       {build.status === "succeeded" && (
-        <Button size="1" variant="soft" disabled={busyAction === `发布:${build.id}`} onClick={() => onPublish(build)}>
+        <Button
+          size="1"
+          color="teal"
+          variant="soft"
+          disabled={busyAction === `验证 Preview:${build.id}`}
+          onClick={() => onValidate(build)}
+        >
           <ShieldCheck size={14} />
-          发布
+          验证
         </Button>
+      )}
+      {build.status === "preview_validated" && (
+        <Tooltip content={releaseReadiness.reason || "将已验证 Preview 转为 Release"}>
+          <Button
+            size="1"
+            variant="soft"
+            disabled={!releaseReadiness.ready || busyAction === `转 Release:${build.id}`}
+            onClick={() => onPublish(build)}
+          >
+            <ShieldCheck size={14} />
+            Release
+          </Button>
+        </Tooltip>
       )}
       {["pending_approval", "queued", "running"].includes(build.status) && (
         <Button size="1" color="amber" variant="soft" disabled={busyAction === `取消:${build.id}`} onClick={() => onCancel(build)}>
@@ -1656,8 +2153,10 @@ function BuildDetailDialog({
   build,
   logs,
   buildLock,
+  releaseCheck,
   onApprove,
   onReject,
+  onValidate,
   onPublish,
   onCancel,
   onRetry,
@@ -1677,7 +2176,7 @@ function BuildDetailDialog({
         </Dialog.Description>
         <Box mt="4">
           {build ? (
-            <BuildInspectTabs build={build} logs={logs} buildLock={buildLock} />
+            <BuildInspectTabs build={build} logs={logs} buildLock={buildLock} releaseCheck={releaseCheck} />
           ) : (
             <EmptyState icon={ClipboardList} title="暂无构建" text="请选择一个构建记录。" />
           )}
@@ -1689,6 +2188,7 @@ function BuildDetailDialog({
               busyAction={busyAction}
               onApprove={onApprove}
               onReject={onReject}
+              onValidate={onValidate}
               onPublish={onPublish}
               onCancel={onCancel}
               onRetry={onRetry}
@@ -1707,7 +2207,7 @@ function BuildDetailDialog({
   );
 }
 
-function BuildInspectTabs({ build, logs, buildLock }) {
+function BuildInspectTabs({ build, logs, buildLock, releaseCheck }) {
   return (
     <Tabs.Root defaultValue="summary">
       <Tabs.List>
@@ -1715,6 +2215,7 @@ function BuildInspectTabs({ build, logs, buildLock }) {
         <Tabs.Trigger value="config">最终配置</Tabs.Trigger>
         <Tabs.Trigger value="components">组件锁定</Tabs.Trigger>
         <Tabs.Trigger value="workloads">Workloads</Tabs.Trigger>
+        <Tabs.Trigger value="release">发布门禁</Tabs.Trigger>
         <Tabs.Trigger value="audit">审计</Tabs.Trigger>
         <Tabs.Trigger value="lock">Build Lock</Tabs.Trigger>
         <Tabs.Trigger value="logs">日志</Tabs.Trigger>
@@ -1727,11 +2228,13 @@ function BuildInspectTabs({ build, logs, buildLock }) {
             <DetailItem label="目标平台" value={build.target} />
             <DetailItem label="版本" value={build.version} />
             <DetailItem label="Profile" value={build.profile || "-"} />
-            <DetailItem label="发布通道" value={build.releaseChannel || "-"} />
+            <DetailItem label="构建通道" value={build.releaseChannel || "-"} />
             <DetailItem label="Runner" value={build.runnerId || "-"} />
             <DetailItem label="Nomad Job" value={build.nomadJobId || "-"} mono />
             <DetailItem label="创建时间" value={formatDate(build.createdAt)} />
             <DetailItem label="更新时间" value={formatDate(build.updatedAt)} />
+            <DetailItem label="验证时间" value={build.validatedAt ? formatDate(build.validatedAt) : "-"} />
+            <DetailItem label="发布时间" value={build.publishedAt ? formatDate(build.publishedAt) : "-"} />
             <DetailItem label="错误信息" value={build.error || "-"} wide />
             <DetailItem label="制品 URI" value={build.artifactUri || "-"} wide mono />
           </div>
@@ -1744,6 +2247,9 @@ function BuildInspectTabs({ build, logs, buildLock }) {
         </Tabs.Content>
         <Tabs.Content value="workloads">
           <ResolvedWorkloads workloads={buildLock?.workloads || build.workloads || []} />
+        </Tabs.Content>
+        <Tabs.Content value="release">
+          <ReleaseGatePanel build={build} releaseCheck={releaseCheck} />
         </Tabs.Content>
         <Tabs.Content value="audit">
           <BuildLockAudit build={build} buildLock={buildLock || build.buildLock} />
@@ -1800,7 +2306,7 @@ function ResolvedWorkloads({ workloads }) {
   return (
     <div className="workload-grid">
       {workloads.map((workload) => (
-        <Card key={workload.id} className="workload-card">
+        <div key={workload.id} className="workload-card">
           <Flex justify="between" align="start" gap="3">
             <Box>
               <Text as="div" weight="bold">
@@ -1815,8 +2321,58 @@ function ResolvedWorkloads({ workloads }) {
             </Badge>
           </Flex>
           <JsonBlock value={workload} compact />
-        </Card>
+        </div>
       ))}
+    </div>
+  );
+}
+
+function ReleaseGatePanel({ build, releaseCheck }) {
+  const check = releaseCheck || getLocalReleaseCheck(build);
+  const previewChecks = (check.checks || []).filter((item) => item.stage === "preview");
+  const releaseChecks = (check.checks || []).filter((item) => item.stage === "release");
+  return (
+    <div className="section-stack">
+      <div className="release-gate-summary">
+        <AuditMetric label="Preview 门禁" value={check.previewReady ? "通过" : "阻塞"} />
+        <AuditMetric label="Release 门禁" value={check.releaseReady ? "通过" : "阻塞"} />
+        <AuditMetric label="阻塞项" value={check.blockingCount || 0} />
+        <AuditMetric label="阶段" value={check.stage === "release" ? "Release" : "Preview"} />
+      </div>
+      <div className="release-gate-columns">
+        <ReleaseCheckGroup title="Preview 验证" checks={previewChecks} />
+        <ReleaseCheckGroup title="Release 发布" checks={releaseChecks} />
+      </div>
+    </div>
+  );
+}
+
+function ReleaseCheckGroup({ title, checks }) {
+  return (
+    <div className="release-check-group">
+      <Flex justify="between" align="center" gap="3">
+        <Text weight="bold">{title}</Text>
+        <Badge color={checks.every((item) => item.status !== "blocked") ? "green" : "amber"} variant="soft">
+          {checks.filter((item) => item.status === "blocked").length} 阻塞
+        </Badge>
+      </Flex>
+      <div className="release-check-list">
+        {checks.map((item) => (
+          <div key={item.id} className={`release-check-row is-${item.status}`}>
+            <div className="release-check-icon">
+              {item.status === "blocked" ? <AlertCircle size={15} /> : <Check size={15} />}
+            </div>
+            <div>
+              <Text as="div" weight="medium">
+                {item.title}
+              </Text>
+              <Text as="div" size="1" color="gray">
+                {item.reason || "检查通过"}
+              </Text>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -1850,14 +2406,14 @@ function BuildLockAudit({ build, buildLock }) {
 
 function AuditMetric({ label, value }) {
   return (
-    <Card>
+    <div className="audit-metric">
       <Text as="div" size="1" color="gray">
         {label}
       </Text>
       <Text as="div" size="5" weight="bold">
         {value}
       </Text>
-    </Card>
+    </div>
   );
 }
 
@@ -1948,6 +2504,87 @@ function BuildTimeline({ builds, onInspect }) {
       ))}
     </div>
   );
+}
+
+function getLocalReleaseCheck(build) {
+  const components = build?.buildLock?.components?.length
+    ? build.buildLock.components
+    : build?.components || [];
+  const checks = [
+    releaseCheckItem("preview.succeeded", "preview", "Preview 构建已成功", ["succeeded", "preview_validated", "published"].includes(build?.status), "需要成功构建 Preview"),
+    releaseCheckItem("preview.channel", "preview", "构建通道为 Preview", build?.releaseChannel === "preview" || build?.status === "published", "Preview 验证只接受 preview 通道"),
+    releaseCheckItem("preview.artifact", "preview", "Preview 制品可下载", Boolean(build?.artifactUri || build?.downloadUrl), "preview artifact is not available"),
+    releaseCheckItem("preview.build-lock", "preview", "Build Lock 已生成", Boolean(build?.buildLock?.buildId), "Build Lock is not available"),
+    releaseCheckItem("preview.lock-identity", "preview", "Build Lock 与构建参数一致", localBuildLockMatchesBuild(build), "Build Lock does not match build target, profile, or version"),
+    releaseCheckItem("preview.required-components", "preview", "必需组件已锁定 URI", requiredComponentsLocked(components), "preview requires locked required component URIs"),
+    releaseCheckItem("release.preview-validated", "release", "Preview 已验证", build?.status === "preview_validated" || build?.status === "published", "需要先验证 Preview"),
+    releaseCheckItem("release.fixed-version", "release", "构建版本固定", Boolean(build?.version && build.version !== "latest"), "Release 需要选择固定版本，不能使用 latest"),
+    releaseCheckItem("release.exact-component-uris", "release", "组件 URI 精确", componentURIsExact(components), "组件 URI 不能包含通配符"),
+    releaseCheckItem("release.fixed-component-versions", "release", "组件版本固定", componentVersionsFixed(components), "组件版本不能是 latest"),
+    releaseCheckItem("release.artifact", "release", "Release 制品可下载", Boolean(build?.artifactUri || build?.downloadUrl), "Release 制品不可用"),
+    releaseCheckItem("release.no-build-error", "release", "构建无错误记录", !build?.error, "构建存在错误记录"),
+  ];
+  const blockingCount = checks.filter((item) => item.status === "blocked").length;
+  return {
+    buildId: build?.id || "",
+    stage: build?.status === "preview_validated" || build?.status === "published" ? "release" : "preview",
+    previewReady: checks.filter((item) => item.stage === "preview").every((item) => item.status !== "blocked"),
+    releaseReady: checks.every((item) => item.status !== "blocked"),
+    blockingCount,
+    checks,
+  };
+}
+
+function releaseCheckItem(id, stage, title, ok, reason) {
+  return {
+    id,
+    stage,
+    title,
+    status: ok ? "pass" : "blocked",
+    reason: ok ? "" : reason,
+  };
+}
+
+function localBuildLockMatchesBuild(build) {
+  const lock = build?.buildLock;
+  if (!lock?.buildId) return false;
+  if (lock.target && lock.target !== build.target) return false;
+  if (lock.profile && lock.profile !== build.profile) return false;
+  if (lock.version && lock.version !== build.version) return false;
+  return true;
+}
+
+function requiredComponentsLocked(components) {
+  for (const component of components) {
+    if (component.required && !component.uri) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function componentURIsExact(components) {
+  for (const component of components) {
+    if (String(component.uri || "").includes("*")) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function componentVersionsFixed(components) {
+  for (const component of components) {
+    if (component.version === "latest") {
+      return false;
+    }
+  }
+  return true;
+}
+
+function getReleaseReadiness(build) {
+  const check = getLocalReleaseCheck(build);
+  const firstBlocked = check.checks.find((item) => item.status === "blocked");
+  return { ready: check.releaseReady, reason: firstBlocked?.reason || "" };
 }
 
 function MetricCard({ icon: Icon, label, value, hint, color }) {
@@ -2178,9 +2815,16 @@ function formatBytes(value) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function splitCSV(value) {
+  return String(value || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function validateProductManifest(manifest) {
   const errors = [];
-  const required = ["id", "name", "targets", "profiles", "versions", "components", "config"];
+  const required = productManifestSchema.required || [];
   for (const key of required) {
     if (manifest?.[key] === undefined || manifest?.[key] === null || manifest?.[key] === "") {
       errors.push(`缺少必填字段 ${key}`);
@@ -2189,21 +2833,42 @@ function validateProductManifest(manifest) {
   if (!Array.isArray(manifest?.targets) || manifest.targets.length === 0) {
     errors.push("targets 必须至少包含 linux 或 windows");
   } else {
-    const invalidTargets = manifest.targets.filter((target) => !["linux", "windows"].includes(target));
+    const targetEnum = productManifestSchema.properties.targets.items.enum || ["linux", "windows"];
+    const invalidTargets = manifest.targets.filter((target) => !targetEnum.includes(target));
     if (invalidTargets.length) {
       errors.push(`targets 包含不支持的目标：${invalidTargets.join(", ")}`);
     }
+    manifest.targets.forEach((target) => {
+      if (!manifest.targetConfig?.[target]?.installDir) {
+        errors.push(`targetConfig.${target}.installDir 缺失`);
+      }
+      if (!manifest.targetConfig?.[target]?.packageName) {
+        errors.push(`targetConfig.${target}.packageName 缺失`);
+      }
+    });
   }
-  if (!Array.isArray(manifest?.components)) {
+  if (!Array.isArray(manifest?.components) && !manifest?.artifacts) {
     errors.push("components 必须是数组");
-  } else {
+  } else if (Array.isArray(manifest?.components)) {
+    const sourceEnum =
+      productManifestSchema.properties.components.items.properties.source.properties.kind.enum ||
+      Object.keys(sourceKindLabels);
+    const componentIds = new Set();
     manifest.components.forEach((component, index) => {
       if (!component.id) errors.push(`components[${index}] 缺少 id`);
+      if (component.id && componentIds.has(component.id)) errors.push(`components[${index}] id 重复：${component.id}`);
+      if (component.id) componentIds.add(component.id);
       if (!component.type) errors.push(`components[${index}] 缺少 type`);
       if (!component.source?.kind) {
         errors.push(`components[${index}] 缺少 source.kind`);
-      } else if (!sourceKindLabels[component.source.kind]) {
+      } else if (!sourceEnum.includes(component.source.kind)) {
         errors.push(`components[${index}] source.kind 不支持：${component.source.kind}`);
+      } else if (component.source.kind === "artifact-repository" && !component.source.path) {
+        errors.push(`components[${index}] artifact-repository 需要 path`);
+      } else if (component.source.kind === "fixed-url" && !component.source.url) {
+        errors.push(`components[${index}] fixed-url 需要 url`);
+      } else if (component.source.kind === "previous-build" && !component.source.uri) {
+        errors.push(`components[${index}] previous-build 需要 uri`);
       }
     });
   }
@@ -2211,10 +2876,18 @@ function validateProductManifest(manifest) {
     errors.push("workloads 必须是数组");
   }
   if (Array.isArray(manifest?.workloads)) {
+    const componentIds = new Set((manifest.components || []).map((component) => component.id));
     manifest.workloads.forEach((workload, index) => {
       if (!workload.id) errors.push(`workloads[${index}] 缺少 id`);
-      if (!["docker", "systemd"].includes(workload.runtime)) {
+      const runtimeEnum = productManifestSchema.properties.workloads.items.properties.runtime.enum || ["docker", "systemd"];
+      if (!runtimeEnum.includes(workload.runtime)) {
         errors.push(`workloads[${index}] runtime 必须是 docker 或 systemd`);
+      }
+      if (workload.component && componentIds.size > 0 && !componentIds.has(workload.component)) {
+        errors.push(`workloads[${index}] 引用了未知组件：${workload.component}`);
+      }
+      if (workload.runtime === "systemd" && !workload.systemd) {
+        errors.push(`workloads[${index}] systemd runtime 需要 systemd 配置`);
       }
     });
   }

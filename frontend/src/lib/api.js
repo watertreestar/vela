@@ -35,6 +35,23 @@ export function updateProductManifest(productId, manifest) {
   });
 }
 
+export function dryRunProductManifest(productId, input) {
+  return request(`/api/products/${productId}/manifest/dry-run`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listProductManifestRevisions(productId) {
+  return request(`/api/products/${productId}/manifest/revisions`);
+}
+
+export function restoreProductManifestRevision(productId, revisionId) {
+  return request(`/api/products/${productId}/manifest/revisions/${revisionId}/restore`, {
+    method: "POST",
+  });
+}
+
 export function listProductOverlays(productId, kind) {
   return request(`/api/products/${productId}/overlays/${kind}`);
 }
@@ -56,6 +73,10 @@ export function approveBuild(id) {
 
 export function rejectBuild(id) {
   return request(`/api/builds/${id}/reject`, { method: "POST" });
+}
+
+export function validatePreviewBuild(id) {
+  return request(`/api/builds/${id}/validate-preview`, { method: "POST" });
 }
 
 export function publishBuild(id, input = {}) {
@@ -83,6 +104,14 @@ export function getBuildLogs(id) {
 
 export function getBuildLock(id) {
   return request(`/api/builds/${id}/lock`);
+}
+
+export function getBuildReleaseCheck(id) {
+  return request(`/api/builds/${id}/release-check`);
+}
+
+export function buildDownloadUrl(id) {
+  return `${API_URL}/api/builds/${id}/download`;
 }
 
 export async function uploadArtifact(file) {

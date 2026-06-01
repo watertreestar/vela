@@ -1,6 +1,8 @@
 package store
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,11 +16,12 @@ import (
 )
 
 type JSONStore struct {
-	dataDir     string
-	productsDir string
-	buildsFile  string
-	uploadsFile string
-	mu          sync.Mutex
+	dataDir       string
+	productsDir   string
+	buildsFile    string
+	uploadsFile   string
+	revisionsFile string
+	mu            sync.Mutex
 }
 
 func NewJSONStore(dataDir string, productsDir string) (*JSONStore, error) {
@@ -26,10 +29,11 @@ func NewJSONStore(dataDir string, productsDir string) (*JSONStore, error) {
 		return nil, err
 	}
 	return &JSONStore{
-		dataDir:     dataDir,
-		productsDir: productsDir,
-		buildsFile:  filepath.Join(dataDir, "builds.json"),
-		uploadsFile: filepath.Join(dataDir, "uploads.json"),
+		dataDir:       dataDir,
+		productsDir:   productsDir,
+		buildsFile:    filepath.Join(dataDir, "builds.json"),
+		uploadsFile:   filepath.Join(dataDir, "uploads.json"),
+		revisionsFile: filepath.Join(dataDir, "manifest_revisions.json"),
 	}, nil
 }
 
@@ -109,7 +113,53 @@ func (s *JSONStore) WriteProductManifest(id string, raw json.RawMessage) (domain
 	if err := os.WriteFile(filepath.Join(dir, "product.json"), content, 0o644); err != nil {
 		return domain.Product{}, err
 	}
+	if err := s.saveManifestRevision(id, content, "manifest saved"); err != nil {
+		return domain.Product{}, err
+	}
 	return product, nil
+}
+
+func (s *JSONStore) ListManifestRevisions(productID string) ([]domain.ManifestRevision, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	revisions, err := s.readManifestRevisionsLocked()
+	if err != nil {
+		return nil, err
+	}
+	filtered := []domain.ManifestRevision{}
+	for _, revision := range revisions {
+		if revision.ProductID == productID {
+			revision.Manifest = nil
+			filtered = append(filtered, revision)
+		}
+	}
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].CreatedAt.After(filtered[j].CreatedAt)
+	})
+	return filtered, nil
+}
+
+func (s *JSONStore) ReadManifestRevision(productID string, revisionID string) (domain.ManifestRevision, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	revisions, err := s.readManifestRevisionsLocked()
+	if err != nil {
+		return domain.ManifestRevision{}, err
+	}
+	for _, revision := range revisions {
+		if revision.ProductID == productID && revision.ID == revisionID {
+			return revision, nil
+		}
+	}
+	return domain.ManifestRevision{}, fmt.Errorf("manifest revision %s not found", revisionID)
+}
+
+func (s *JSONStore) RestoreManifestRevision(productID string, revisionID string) (domain.Product, error) {
+	revision, err := s.ReadManifestRevision(productID, revisionID)
+	if err != nil {
+		return domain.Product{}, err
+	}
+	return s.WriteProductManifest(productID, revision.Manifest)
 }
 
 func (s *JSONStore) ReadOverlay(productID string, kind string, name string) (map[string]any, error) {
@@ -342,6 +392,50 @@ func (s *JSONStore) writeBuildsLocked(builds []domain.Build) error {
 		return err
 	}
 	return os.WriteFile(s.buildsFile, content, 0o644)
+}
+
+func (s *JSONStore) saveManifestRevision(productID string, raw json.RawMessage, summary string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	revisions, err := s.readManifestRevisionsLocked()
+	if err != nil {
+		return err
+	}
+	hash := sha256.Sum256(raw)
+	now := nowUTC()
+	id := fmt.Sprintf("%s-%s", now.Format("20060102150405"), hex.EncodeToString(hash[:])[:10])
+	revisions = append(revisions, domain.ManifestRevision{
+		ID:        id,
+		ProductID: productID,
+		Hash:      hex.EncodeToString(hash[:]),
+		Summary:   summary,
+		Manifest:  append(json.RawMessage(nil), raw...),
+		CreatedAt: now,
+	})
+	return s.writeManifestRevisionsLocked(revisions)
+}
+
+func (s *JSONStore) readManifestRevisionsLocked() ([]domain.ManifestRevision, error) {
+	content, err := os.ReadFile(s.revisionsFile)
+	if errors.Is(err, os.ErrNotExist) {
+		return []domain.ManifestRevision{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var revisions []domain.ManifestRevision
+	if err := json.Unmarshal(content, &revisions); err != nil {
+		return nil, err
+	}
+	return revisions, nil
+}
+
+func (s *JSONStore) writeManifestRevisionsLocked(revisions []domain.ManifestRevision) error {
+	content, err := json.MarshalIndent(revisions, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(s.revisionsFile, content, 0o644)
 }
 
 func (s *JSONStore) readUploadsLocked() ([]domain.UploadRecord, error) {

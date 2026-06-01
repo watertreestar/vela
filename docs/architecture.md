@@ -4,7 +4,7 @@
 
 ```mermaid
 flowchart LR
-  User[Product / Release User] --> UI[HeroUI Web Console]
+  User[Product / Release User] --> UI[Radix Web Console]
   UI --> API[Go Packaging API]
 
   API --> Store[(PostgreSQL<br/>builds, uploads, manifests)]
@@ -60,9 +60,12 @@ sequenceDiagram
   Runner->>API: POST /api/runner/tasks/{id}/complete
   API->>Store: status=succeeded, artifactUri, downloadUrl
 
-  User->>UI: publish
+  User->>UI: validate preview installer
+  UI->>API: POST /api/builds/{id}/validate-preview
+  API->>Store: status=preview_validated
+  User->>UI: promote to release
   UI->>API: POST /api/builds/{id}/publish
-  API->>Store: status=published
+  API->>Store: status=published, releaseChannel=release
 ```
 
 ## Build State Machine
@@ -78,7 +81,8 @@ stateDiagram-v2
   running --> canceled: cancel
   running --> succeeded: runner complete
   running --> failed: runner failed
-  succeeded --> published: publish
+  succeeded --> preview_validated: validate preview
+  preview_validated --> published: promote release
   failed --> queued: retry
   canceled --> queued: retry
   queued --> failed: nomad allocation failed
@@ -152,11 +156,11 @@ Components define where artifacts come from. Workloads define how artifacts run 
 | Requirement | Current status | Notes |
 |---|---:|---|
 | Product list | Implemented | `GET /api/products`, UI product list |
-| Manifest/config management | Implemented | Full JSON editor and typed core build overrides |
+| Manifest/config management | Implemented | JSON editor, schema validation, dry-run resolver preview, revisions and restore |
 | Version selection | Implemented basic | Product manifest has `versions` |
 | Build parameters | Implemented | target/profile/customer/channel/version/config/modules/component sources |
 | Build records | Implemented | PostgreSQL default storage, JSON fallback available |
-| Approval/publish | Implemented | approve/reject/publish/cancel/retry transitions |
+| Preview/release gate | Implemented | preview artifact must be validated before release promotion |
 | Download address | Implemented | `artifactUri`, `downloadUrl`, build download endpoint |
 | Logs | Implemented | runner/system logs and heartbeat |
 | Runner claims task | Implemented | `POST /api/runner/tasks/claim` |
@@ -165,6 +169,8 @@ Components define where artifacts come from. Workloads define how artifacts run 
 | Component repo selection | Implemented MVP | UI and API support repository/manual/fixed/previous-build source kinds |
 | Manual upload | Implemented MVP | Upload endpoint, PostgreSQL upload records, local file storage adapter |
 | Config override without script changes | Implemented MVP | Resolver merges target/profile/customer/build overrides into build lock |
+
+Release gate enforcement is centralized through the build release check API. The same check set powers the admin dashboard, `validate-preview`, and `publish`, so the UI can show exactly why a build is blocked before the backend rejects the action. Preview validation checks artifact availability, Build Lock presence, Build Lock target/profile/version consistency, and required component locks. Release publishing adds fixed build versions, fixed component versions, exact component URIs without wildcards, artifact availability, and no recorded build error.
 
 ## Target Capability
 

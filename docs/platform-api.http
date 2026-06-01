@@ -1,0 +1,321 @@
+### Packaging Platform API Test Requests
+### 用法：
+### 1. 先确认后端已启动：ARTIFACT_STORE=local DRY_RUN=true go run ./cmd/server
+### 2. 可先运行：python scripts/seed_cli.py seed
+### 3. 本文件可在 JetBrains HTTP Client、VS Code REST Client 等工具中执行。
+### 4. runner claim 会改变 queued 构建状态；执行前请确认不会误领真实任务。
+
+@baseUrl = http://127.0.0.1:8080
+@productId = lsap
+@seedNamespace = flow-validation
+
+### 当前 seed_cli.py 生成的 flow-validation 构建 ID。
+### 如果重新使用不同 namespace 生成数据，请先执行“列出构建”，再替换这些变量。
+@pendingBuildId = 659687058f2b
+@queuedBuildId = ead53f6a0abb
+@succeededPreviewBuildId = 98b5402815f7
+@releaseReadyBuildId = f3875e0cd74d
+@releaseBlockedLatestBuildId = b362acd2e262
+@windowsSucceededBuildId = 96e3fd95dc45
+@failedBuildId = 43ef975ef9a3
+
+@runnerId = http-seed-runner-01
+
+### 健康检查
+GET {{baseUrl}}/api/health
+
+### 产品列表
+GET {{baseUrl}}/api/products
+
+### 产品详情
+GET {{baseUrl}}/api/products/{{productId}}
+
+### 产品 Manifest
+GET {{baseUrl}}/api/products/{{productId}}/manifest
+
+### 产品版本
+GET {{baseUrl}}/api/products/{{productId}}/versions
+
+### Profile 覆盖列表
+GET {{baseUrl}}/api/products/{{productId}}/overlays/profiles
+
+### QA Profile 覆盖
+GET {{baseUrl}}/api/products/{{productId}}/overlays/profiles/qa
+
+### 客户覆盖列表
+GET {{baseUrl}}/api/products/{{productId}}/overlays/customers
+
+### example-customer 客户覆盖
+GET {{baseUrl}}/api/products/{{productId}}/overlays/customers/example-customer
+
+### Manifest Dry Run：固定版本，Release 可复现路径
+POST {{baseUrl}}/api/products/{{productId}}/manifest/dry-run
+Content-Type: application/json
+
+{
+  "manifest": {
+    "id": "lsap",
+    "name": "智能定位平台",
+    "targets": ["linux", "windows"],
+    "targetConfig": {
+      "linux": {
+        "installDir": "/opt/lsap",
+        "packageName": "lsap-linux-x86_64"
+      },
+      "windows": {
+        "installDir": "C:\\Program Files\\LSAP",
+        "packageName": "lsap-windows-x64-setup"
+      }
+    },
+    "profiles": ["qa", "prod"],
+    "versions": ["latest", "1.0.0"],
+    "components": [
+      {
+        "id": "location-engine",
+        "type": "docker-image",
+        "required": true,
+        "source": {
+          "kind": "fixed-url",
+          "url": "http://127.0.0.1:8080/seed-artifacts/location-engine-1.0.0.tar.gz"
+        }
+      },
+      {
+        "id": "ui",
+        "type": "archive",
+        "required": true,
+        "source": {
+          "kind": "fixed-url",
+          "url": "http://127.0.0.1:8080/seed-artifacts/ui-1.0.0.zip"
+        }
+      }
+    ],
+    "workloads": [
+      {
+        "id": "location-engine",
+        "runtime": "docker",
+        "component": "location-engine",
+        "docker": {
+          "image": "location-engine:{{version}}",
+          "containerName": "lsap-location-engine",
+          "ports": ["{{ports.web}}:8080"],
+          "restart": "unless-stopped"
+        }
+      }
+    ],
+    "config": {
+      "ports": {
+        "web": 48000
+      },
+      "customer": {
+        "name": "Validation Customer",
+        "license": "enterprise"
+      },
+      "modules": {
+        "map": true
+      }
+    }
+  },
+  "target": "linux",
+  "profile": "prod",
+  "customer": "example-customer",
+  "version": "1.0.0",
+  "releaseChannel": "preview",
+  "configOverrides": {
+    "installDir": "/opt/lsap-validation",
+    "ports": {
+      "web": 49100
+    }
+  },
+  "componentOverrides": {},
+  "variables": {
+    "seedNamespace": "{{seedNamespace}}",
+    "requestedBy": "docs/platform-api.http"
+  }
+}
+
+### 上传列表
+GET {{baseUrl}}/api/uploads
+
+### 上传测试文件
+### REST Client 支持 < ./path/to/file 的工具可直接使用；否则用管理后台或 seed_cli.py 上传。
+POST {{baseUrl}}/api/uploads
+Content-Type: multipart/form-data; boundary=----packaging-http-boundary
+
+------packaging-http-boundary
+Content-Disposition: form-data; name="file"; filename="http-client-validation.txt"
+Content-Type: text/plain
+
+http client validation artifact
+------packaging-http-boundary--
+
+### 列出构建
+GET {{baseUrl}}/api/builds
+
+### 查看待审批 Preview 构建
+GET {{baseUrl}}/api/builds/{{pendingBuildId}}
+
+### 查看排队 Linux 构建
+GET {{baseUrl}}/api/builds/{{queuedBuildId}}
+
+### 查看已成功 Preview 构建
+GET {{baseUrl}}/api/builds/{{succeededPreviewBuildId}}
+
+### 查看已验证且可发布 Release 的构建
+GET {{baseUrl}}/api/builds/{{releaseReadyBuildId}}
+
+### 查看 latest 导致 Release 阻塞的构建
+GET {{baseUrl}}/api/builds/{{releaseBlockedLatestBuildId}}
+
+### 查看 Windows 成功构建
+GET {{baseUrl}}/api/builds/{{windowsSucceededBuildId}}
+
+### 查看失败可重试构建
+GET {{baseUrl}}/api/builds/{{failedBuildId}}
+
+### 查看 Build Lock
+GET {{baseUrl}}/api/builds/{{releaseReadyBuildId}}/lock
+
+### 查看构建日志
+GET {{baseUrl}}/api/builds/{{releaseReadyBuildId}}/logs
+
+### 查看发布门禁：Release Ready 应通过
+GET {{baseUrl}}/api/builds/{{releaseReadyBuildId}}/release-check
+
+### 查看发布门禁：latest 应阻塞 Release
+GET {{baseUrl}}/api/builds/{{releaseBlockedLatestBuildId}}/release-check
+
+### 下载构建产物：有 downloadUrl 时会 302 跳转
+GET {{baseUrl}}/api/builds/{{releaseReadyBuildId}}/download
+
+### 创建新的 Linux Preview 构建：pending_approval
+### 注意：如果要重复运行，建议改 seedScenario 或 namespace。
+POST {{baseUrl}}/api/builds
+Content-Type: application/json
+
+{
+  "productId": "{{productId}}",
+  "target": "linux",
+  "profile": "qa",
+  "customer": "example-customer",
+  "version": "1.0.0",
+  "releaseChannel": "preview",
+  "variables": {
+    "seedNamespace": "{{seedNamespace}}",
+    "seedScenario": "http-client-created-preview",
+    "requestedBy": "docs/platform-api.http"
+  },
+  "configOverrides": {
+    "installDir": "/opt/lsap-http-validation",
+    "ports": {
+      "web": 49200
+    },
+    "customer": {
+      "name": "HTTP Validation Customer",
+      "license": "enterprise"
+    },
+    "database": {
+      "passwordPolicy": "strong"
+    },
+    "modules": {
+      "camera": false,
+      "push": true,
+      "map": true
+    }
+  },
+  "componentOverrides": {
+    "location-engine": {
+      "kind": "fixed-url",
+      "url": "http://127.0.0.1:8080/seed-artifacts/location-engine-1.0.0.tar.gz"
+    },
+    "location-guard": {
+      "kind": "fixed-url",
+      "url": "http://127.0.0.1:8080/seed-artifacts/location-guard-1.0.0.tar.gz"
+    },
+    "location-push": {
+      "kind": "fixed-url",
+      "url": "http://127.0.0.1:8080/seed-artifacts/location-push-1.0.0.tar.gz"
+    },
+    "ui": {
+      "kind": "fixed-url",
+      "url": "http://127.0.0.1:8080/seed-artifacts/ui-1.0.0.zip"
+    }
+  }
+}
+
+### 审批待审批构建：会进入 queued
+### 使用返回的新 build id 替换变量，或用当前 seed 的 pendingBuildId 测试。
+POST {{baseUrl}}/api/builds/{{pendingBuildId}}/approve
+Content-Type: application/json
+
+{}
+
+### Runner Claim：会领取最早 queued 的 linux 构建，并改为 running
+### 注意：这会改变队列状态。建议只在测试库或确认无真实 queued 构建时执行。
+POST {{baseUrl}}/api/runner/tasks/claim
+Content-Type: application/json
+
+{
+  "runnerId": "{{runnerId}}",
+  "target": "linux"
+}
+
+### Runner 写日志
+POST {{baseUrl}}/api/builds/{{queuedBuildId}}/logs
+Content-Type: application/json
+
+{
+  "source": "{{runnerId}}",
+  "message": "http client validation log"
+}
+
+### Runner 心跳
+POST {{baseUrl}}/api/runner/heartbeat
+Content-Type: application/json
+
+{
+  "runnerId": "{{runnerId}}",
+  "buildId": "{{queuedBuildId}}",
+  "target": "linux",
+  "message": "http client heartbeat"
+}
+
+### Runner 完成任务：需要 build 当前是 running
+### 如果直接使用 queuedBuildId 失败，先执行 Runner Claim，并把被 claim 的 id 填到这里。
+POST {{baseUrl}}/api/runner/tasks/{{queuedBuildId}}/complete
+Content-Type: application/json
+
+{
+  "status": "succeeded",
+  "artifactUri": "local-upload://http-client/lsap-linux-1.0.0.tar.gz",
+  "downloadUrl": "http://127.0.0.1:8080/api/uploads/http-client/download"
+}
+
+### Preview 验证：succeeded preview 才能通过
+POST {{baseUrl}}/api/builds/{{succeededPreviewBuildId}}/validate-preview
+Content-Type: application/json
+
+{}
+
+### 发布 Release：releaseReadyBuildId 应通过并变为 published
+POST {{baseUrl}}/api/builds/{{releaseReadyBuildId}}/publish
+Content-Type: application/json
+
+{}
+
+### 发布 Release：latest 阻塞示例，应返回 400
+POST {{baseUrl}}/api/builds/{{releaseBlockedLatestBuildId}}/publish
+Content-Type: application/json
+
+{}
+
+### 重试失败构建：failed -> queued
+POST {{baseUrl}}/api/builds/{{failedBuildId}}/retry
+Content-Type: application/json
+
+{}
+
+### 取消 queued/running/pending 构建
+POST {{baseUrl}}/api/builds/{{queuedBuildId}}/cancel
+Content-Type: application/json
+
+{}

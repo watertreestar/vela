@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type Product struct {
 	ID           string                  `json:"id"`
@@ -14,6 +17,15 @@ type Product struct {
 	Components   []Component             `json:"components"`
 	Workloads    []Workload              `json:"workloads"`
 	Config       map[string]any          `json:"config"`
+}
+
+type ManifestRevision struct {
+	ID        string          `json:"id"`
+	ProductID string          `json:"productId"`
+	Hash      string          `json:"hash"`
+	Summary   string          `json:"summary"`
+	Manifest  json.RawMessage `json:"manifest,omitempty"`
+	CreatedAt time.Time       `json:"createdAt"`
 }
 
 type TargetConfig struct {
@@ -86,15 +98,16 @@ type ResolvedComponent struct {
 }
 
 type BuildLock struct {
-	BuildID    string              `json:"buildId"`
-	ProductID  string              `json:"productId"`
-	Target     string              `json:"target"`
-	Profile    string              `json:"profile"`
-	Customer   string              `json:"customer"`
-	Version    string              `json:"version"`
-	Config     map[string]any      `json:"config"`
-	Components []ResolvedComponent `json:"components"`
-	Workloads  []ResolvedWorkload  `json:"workloads"`
+	BuildID        string              `json:"buildId"`
+	ProductID      string              `json:"productId"`
+	Target         string              `json:"target"`
+	Profile        string              `json:"profile"`
+	Customer       string              `json:"customer"`
+	Version        string              `json:"version"`
+	ReleaseChannel string              `json:"releaseChannel"`
+	Config         map[string]any      `json:"config"`
+	Components     []ResolvedComponent `json:"components"`
+	Workloads      []ResolvedWorkload  `json:"workloads"`
 }
 
 type BuildRequest struct {
@@ -107,6 +120,43 @@ type BuildRequest struct {
 	Variables          map[string]any             `json:"variables"`
 	ConfigOverrides    map[string]any             `json:"configOverrides"`
 	ComponentOverrides map[string]ComponentSource `json:"componentOverrides"`
+}
+
+type ManifestDryRunRequest struct {
+	Manifest           json.RawMessage            `json:"manifest"`
+	Target             string                     `json:"target"`
+	Profile            string                     `json:"profile"`
+	Customer           string                     `json:"customer"`
+	Version            string                     `json:"version"`
+	ReleaseChannel     string                     `json:"releaseChannel"`
+	Variables          map[string]any             `json:"variables"`
+	ConfigOverrides    map[string]any             `json:"configOverrides"`
+	ComponentOverrides map[string]ComponentSource `json:"componentOverrides"`
+}
+
+type ManifestDryRunResult struct {
+	Valid      bool                `json:"valid"`
+	Errors     []string            `json:"errors"`
+	BuildLock  BuildLock           `json:"buildLock,omitempty"`
+	Config     map[string]any      `json:"config,omitempty"`
+	Components []ResolvedComponent `json:"components,omitempty"`
+}
+
+type ReleaseCheckResult struct {
+	BuildID       string             `json:"buildId"`
+	Stage         string             `json:"stage"`
+	PreviewReady  bool               `json:"previewReady"`
+	ReleaseReady  bool               `json:"releaseReady"`
+	BlockingCount int                `json:"blockingCount"`
+	Checks        []ReleaseCheckItem `json:"checks"`
+}
+
+type ReleaseCheckItem struct {
+	ID     string `json:"id"`
+	Stage  string `json:"stage"`
+	Title  string `json:"title"`
+	Status string `json:"status"`
+	Reason string `json:"reason,omitempty"`
 }
 
 type Build struct {
@@ -134,6 +184,7 @@ type Build struct {
 	SchedulerLog   string              `json:"schedulerLog"`
 	Logs           []BuildLog          `json:"logs"`
 	ApprovedAt     *time.Time          `json:"approvedAt,omitempty"`
+	ValidatedAt    *time.Time          `json:"validatedAt,omitempty"`
 	PublishedAt    *time.Time          `json:"publishedAt,omitempty"`
 	CanceledAt     *time.Time          `json:"canceledAt,omitempty"`
 }
@@ -179,12 +230,13 @@ type UploadRecord struct {
 }
 
 const (
-	BuildPendingApproval = "pending_approval"
-	BuildQueued          = "queued"
-	BuildRunning         = "running"
-	BuildSucceeded       = "succeeded"
-	BuildFailed          = "failed"
-	BuildRejected        = "rejected"
-	BuildPublished       = "published"
-	BuildCanceled        = "canceled"
+	BuildPendingApproval  = "pending_approval"
+	BuildQueued           = "queued"
+	BuildRunning          = "running"
+	BuildSucceeded        = "succeeded"
+	BuildPreviewValidated = "preview_validated"
+	BuildFailed           = "failed"
+	BuildRejected         = "rejected"
+	BuildPublished        = "published"
+	BuildCanceled         = "canceled"
 )

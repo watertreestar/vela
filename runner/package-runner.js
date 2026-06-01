@@ -117,6 +117,7 @@ async function prepareWorkspace(build) {
     profile: build.profile,
     customer: build.customer,
     version: build.version,
+    releaseChannel: build.releaseChannel || "preview",
     components: build.components,
     workloads: build.workloads || build.buildLock?.workloads || [],
     runnerId: RUNNER_ID,
@@ -250,7 +251,10 @@ async function writeDaggerPlan(build, workspace) {
     customer: build.customer || "",
     releaseChannel: build.releaseChannel || build.profile || "",
     packageName: `${build.productId}-${build.target}-${build.version}-${build.id}.tar.gz`,
+    baseImageSource: process.env.DAGGER_LINUX_BASE_IMAGE_SOURCE || "registry",
     baseImage: process.env.DAGGER_LINUX_BASE_IMAGE || "alpine:3.20",
+    baseImageTar: process.env.DAGGER_LINUX_BASE_IMAGE_TAR || "",
+    baseImageTarTag: process.env.DAGGER_LINUX_BASE_IMAGE_TAR_TAG || "",
     installToolsCommand:
       process.env.DAGGER_LINUX_INSTALL_TOOLS ||
       "apk add --no-cache tar gzip coreutils bash",

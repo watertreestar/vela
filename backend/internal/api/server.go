@@ -10,6 +10,7 @@ import (
 
 	"packaging-platform/backend/internal/artifact"
 	"packaging-platform/backend/internal/domain"
+	manifestvalidator "packaging-platform/backend/internal/manifest"
 	"packaging-platform/backend/internal/nomad"
 	"packaging-platform/backend/internal/resolver"
 	"packaging-platform/backend/internal/store"
@@ -32,6 +33,9 @@ func (s Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/products/{id}", s.getProduct)
 	mux.HandleFunc("GET /api/products/{id}/manifest", s.getProductManifest)
 	mux.HandleFunc("PUT /api/products/{id}/manifest", s.updateProductManifest)
+	mux.HandleFunc("POST /api/products/{id}/manifest/dry-run", s.dryRunProductManifest)
+	mux.HandleFunc("GET /api/products/{id}/manifest/revisions", s.listProductManifestRevisions)
+	mux.HandleFunc("POST /api/products/{id}/manifest/revisions/{revision}/restore", s.restoreProductManifestRevision)
 	mux.HandleFunc("GET /api/products/{id}/overlays/{kind}", s.listProductOverlays)
 	mux.HandleFunc("GET /api/products/{id}/overlays/{kind}/{name}", s.getProductOverlay)
 	mux.HandleFunc("PUT /api/products/{id}/overlays/{kind}/{name}", s.updateProductOverlay)
@@ -40,9 +44,11 @@ func (s Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/builds", s.createBuild)
 	mux.HandleFunc("GET /api/builds/{id}", s.getBuild)
 	mux.HandleFunc("GET /api/builds/{id}/lock", s.getBuildLock)
+	mux.HandleFunc("GET /api/builds/{id}/release-check", s.getBuildReleaseCheck)
 	mux.HandleFunc("GET /api/builds/{id}/download", s.downloadBuild)
 	mux.HandleFunc("POST /api/builds/{id}/approve", s.approveBuild)
 	mux.HandleFunc("POST /api/builds/{id}/reject", s.rejectBuild)
+	mux.HandleFunc("POST /api/builds/{id}/validate-preview", s.validatePreviewBuild)
 	mux.HandleFunc("POST /api/builds/{id}/publish", s.publishBuild)
 	mux.HandleFunc("POST /api/builds/{id}/retry", s.retryBuild)
 	mux.HandleFunc("POST /api/builds/{id}/cancel", s.cancelBuild)
@@ -94,7 +100,76 @@ func (s Server) updateProductManifest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if _, errors := manifestvalidator.ValidateProduct(raw); len(errors) > 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "manifest validation failed", "errors": errors})
+		return
+	}
 	product, err := s.store.WriteProductManifest(r.PathValue("id"), raw)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, product)
+}
+
+func (s Server) dryRunProductManifest(w http.ResponseWriter, r *http.Request) {
+	var request domain.ManifestDryRunRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if len(request.Manifest) == 0 {
+		raw, err := s.store.ReadProductManifest(r.PathValue("id"))
+		if err != nil {
+			writeError(w, http.StatusNotFound, err)
+			return
+		}
+		request.Manifest = raw
+	}
+	product, errors := manifestvalidator.ValidateProduct(request.Manifest)
+	if len(errors) > 0 {
+		writeJSON(w, http.StatusOK, domain.ManifestDryRunResult{Valid: false, Errors: errors})
+		return
+	}
+	if product.ID == "" {
+		product.ID = r.PathValue("id")
+	}
+	buildRequest := domain.BuildRequest{
+		ProductID:          product.ID,
+		Target:             firstNonEmpty(request.Target, firstString(product.Targets, "linux")),
+		Profile:            firstNonEmpty(request.Profile, firstString(product.Profiles, "")),
+		Customer:           request.Customer,
+		Version:            firstNonEmpty(request.Version, firstString(product.Versions, "latest")),
+		ReleaseChannel:     firstNonEmpty(request.ReleaseChannel, "preview"),
+		Variables:          request.Variables,
+		ConfigOverrides:    request.ConfigOverrides,
+		ComponentOverrides: request.ComponentOverrides,
+	}
+	config, components, lock, err := resolver.ResolveBuild(product, buildRequest, "dry-run", s.store)
+	if err != nil {
+		writeJSON(w, http.StatusOK, domain.ManifestDryRunResult{Valid: false, Errors: []string{err.Error()}})
+		return
+	}
+	writeJSON(w, http.StatusOK, domain.ManifestDryRunResult{
+		Valid:      true,
+		Errors:     []string{},
+		BuildLock:  lock,
+		Config:     config,
+		Components: components,
+	})
+}
+
+func (s Server) listProductManifestRevisions(w http.ResponseWriter, r *http.Request) {
+	revisions, err := s.store.ListManifestRevisions(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, revisions)
+}
+
+func (s Server) restoreProductManifestRevision(w http.ResponseWriter, r *http.Request) {
+	product, err := s.store.RestoreManifestRevision(r.PathValue("id"), r.PathValue("revision"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -229,7 +304,11 @@ func (s Server) createBuild(w http.ResponseWriter, r *http.Request) {
 		build.Version = product.Versions[0]
 	}
 	if build.ReleaseChannel == "" {
-		build.ReleaseChannel = build.Profile
+		build.ReleaseChannel = "preview"
+	}
+	if build.ReleaseChannel == "release" {
+		writeErrorText(w, http.StatusBadRequest, "release builds must be promoted from validated preview builds")
+		return
 	}
 	request.Profile = build.Profile
 	request.Version = build.Version
@@ -261,6 +340,15 @@ func (s Server) getBuildLock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, build.BuildLock)
+}
+
+func (s Server) getBuildReleaseCheck(w http.ResponseWriter, r *http.Request) {
+	build, err := s.store.ReadBuild(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, buildReleaseCheck(build))
 }
 
 func (s Server) approveBuild(w http.ResponseWriter, r *http.Request) {
@@ -328,14 +416,42 @@ func (s Server) rejectBuild(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, updated)
 }
 
+func (s Server) validatePreviewBuild(w http.ResponseWriter, r *http.Request) {
+	now := time.Now().UTC()
+	updated, err := s.store.UpdateBuild(r.PathValue("id"), func(build *domain.Build) error {
+		if build.Status != domain.BuildSucceeded {
+			return errText("only succeeded preview builds can be validated")
+		}
+		check := buildReleaseCheck(*build)
+		if !check.PreviewReady {
+			return firstBlockedCheck(check.Checks, "preview")
+		}
+		build.Status = domain.BuildPreviewValidated
+		build.ReleaseChannel = "preview"
+		build.ValidatedAt = &now
+		build.UpdatedAt = now
+		build.Logs = append(build.Logs, logEntry("system", "preview artifact validated"))
+		return nil
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
 func (s Server) publishBuild(w http.ResponseWriter, r *http.Request) {
 	var request domain.RunnerCompleteRequest
 	_ = json.NewDecoder(r.Body).Decode(&request)
 
 	now := time.Now().UTC()
 	updated, err := s.store.UpdateBuild(r.PathValue("id"), func(build *domain.Build) error {
-		if build.Status != domain.BuildSucceeded && build.Status != domain.BuildPublished {
-			return errText("only succeeded builds can be published")
+		if build.Status != domain.BuildPreviewValidated && build.Status != domain.BuildPublished {
+			return errText("only validated preview builds can be published")
+		}
+		check := buildReleaseCheck(*build)
+		if !check.ReleaseReady {
+			return firstBlockedCheck(check.Checks, "")
 		}
 		if request.ArtifactURI != "" {
 			build.ArtifactURI = request.ArtifactURI
@@ -344,13 +460,10 @@ func (s Server) publishBuild(w http.ResponseWriter, r *http.Request) {
 			build.DownloadURL = request.DownloadURL
 		}
 		build.Status = domain.BuildPublished
+		build.ReleaseChannel = "release"
 		build.PublishedAt = &now
 		build.UpdatedAt = now
-		channel := build.ReleaseChannel
-		if channel == "" {
-			channel = build.Profile
-		}
-		build.Logs = append(build.Logs, logEntry("system", "artifact published to channel "+channel))
+		build.Logs = append(build.Logs, logEntry("system", "validated preview promoted to release"))
 		return nil
 	})
 	if err != nil {
@@ -605,6 +718,136 @@ func cors(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func buildReleaseCheck(build domain.Build) domain.ReleaseCheckResult {
+	components := build.BuildLock.Components
+	if len(components) == 0 {
+		components = build.Components
+	}
+	checks := []domain.ReleaseCheckItem{
+		releaseCheckItem("preview.succeeded", "preview", "Preview 构建已成功", previewStatusReady(build), "only succeeded preview builds can be validated"),
+		releaseCheckItem("preview.channel", "preview", "构建通道为 Preview", build.ReleaseChannel == "preview" || build.Status == domain.BuildPublished, "preview validation requires preview channel"),
+		releaseCheckItem("preview.artifact", "preview", "Preview 制品可下载", build.ArtifactURI != "" || build.DownloadURL != "", "preview artifact is not available"),
+		releaseCheckItem("preview.build-lock", "preview", "Build Lock 已生成", build.BuildLock.BuildID != "", "Build Lock is not available"),
+		releaseCheckItem("preview.lock-identity", "preview", "Build Lock 与构建参数一致", buildLockMatchesBuild(build), "Build Lock does not match build target, profile, or version"),
+		releaseCheckItem("preview.required-components", "preview", "必需组件已锁定 URI", requiredComponentsLocked(components), "preview requires locked required component URIs"),
+		releaseCheckItem("release.preview-validated", "release", "Preview 已验证", build.Status == domain.BuildPreviewValidated || build.Status == domain.BuildPublished, "only validated preview builds can be published"),
+		releaseCheckItem("release.fixed-version", "release", "构建版本固定", build.Version != "" && build.Version != "latest", "release requires a fixed build version"),
+		releaseCheckItem("release.exact-component-uris", "release", "组件 URI 精确", componentURIsExact(components), "release requires exact component URIs without wildcards"),
+		releaseCheckItem("release.fixed-component-versions", "release", "组件版本固定", componentVersionsFixed(components), "release requires fixed component versions"),
+		releaseCheckItem("release.artifact", "release", "Release 制品可下载", build.ArtifactURI != "" || build.DownloadURL != "", "release artifact is not available"),
+		releaseCheckItem("release.no-build-error", "release", "构建无错误记录", strings.TrimSpace(build.Error) == "", "release requires a build without errors"),
+	}
+	previewReady := true
+	releaseReady := true
+	blockingCount := 0
+	for _, check := range checks {
+		if check.Status != "blocked" {
+			continue
+		}
+		blockingCount++
+		if check.Stage == "preview" {
+			previewReady = false
+		}
+		releaseReady = false
+	}
+	stage := "preview"
+	if build.Status == domain.BuildPreviewValidated || build.Status == domain.BuildPublished {
+		stage = "release"
+	}
+	return domain.ReleaseCheckResult{
+		BuildID:       build.ID,
+		Stage:         stage,
+		PreviewReady:  previewReady,
+		ReleaseReady:  releaseReady,
+		BlockingCount: blockingCount,
+		Checks:        checks,
+	}
+}
+
+func releaseCheckItem(id string, stage string, title string, ok bool, reason string) domain.ReleaseCheckItem {
+	item := domain.ReleaseCheckItem{ID: id, Stage: stage, Title: title, Status: "pass"}
+	if !ok {
+		item.Status = "blocked"
+		item.Reason = reason
+	}
+	return item
+}
+
+func firstBlockedCheck(checks []domain.ReleaseCheckItem, stage string) error {
+	for _, check := range checks {
+		if check.Status == "blocked" && (stage == "" || check.Stage == stage) {
+			return errText(check.Reason)
+		}
+	}
+	return errText("release check failed")
+}
+
+func previewStatusReady(build domain.Build) bool {
+	return build.Status == domain.BuildSucceeded ||
+		build.Status == domain.BuildPreviewValidated ||
+		build.Status == domain.BuildPublished
+}
+
+func buildLockMatchesBuild(build domain.Build) bool {
+	lock := build.BuildLock
+	if lock.BuildID == "" {
+		return false
+	}
+	if lock.Target != "" && lock.Target != build.Target {
+		return false
+	}
+	if lock.Profile != "" && lock.Profile != build.Profile {
+		return false
+	}
+	if lock.Version != "" && lock.Version != build.Version {
+		return false
+	}
+	return true
+}
+
+func requiredComponentsLocked(components []domain.ResolvedComponent) bool {
+	for _, component := range components {
+		if component.Required && strings.TrimSpace(component.URI) == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func componentURIsExact(components []domain.ResolvedComponent) bool {
+	for _, component := range components {
+		if strings.Contains(component.URI, "*") {
+			return false
+		}
+	}
+	return true
+}
+
+func componentVersionsFixed(components []domain.ResolvedComponent) bool {
+	for _, component := range components {
+		if component.Version == "latest" {
+			return false
+		}
+	}
+	return true
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstString(values []string, fallback string) string {
+	if len(values) == 0 {
+		return fallback
+	}
+	return values[0]
 }
 
 type errText string

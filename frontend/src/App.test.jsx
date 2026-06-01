@@ -87,6 +87,20 @@ const baseBuildLock = {
   ],
 };
 
+const releaseReadyBuildLock = {
+  ...baseBuildLock,
+  buildId: "build-success-002",
+  target: "windows",
+  profile: "prod",
+  version: "1.0.0",
+  releaseChannel: "preview",
+  components: baseBuildLock.components.map((component) => ({
+    ...component,
+    version: "1.0.0",
+    uri: component.uri.replace("latest", "1.0.0"),
+  })),
+};
+
 const builds = [
   {
     id: "build-pending-001",
@@ -112,15 +126,14 @@ const builds = [
     target: "windows",
     profile: "prod",
     version: "1.0.0",
-    releaseChannel: "prod",
+    releaseChannel: "preview",
     status: "succeeded",
     artifactUri: "minio://packaging/lsap-windows.exe",
-    downloadUrl: "http://localhost:8080/api/builds/build-success-002/download",
     variables: {},
     finalConfig: baseBuildLock.config,
-    components: baseBuildLock.components,
+    components: releaseReadyBuildLock.components,
     workloads: baseBuildLock.workloads,
-    buildLock: { ...baseBuildLock, buildId: "build-success-002", target: "windows" },
+    buildLock: releaseReadyBuildLock,
     createdAt: "2026-05-28T05:00:00Z",
     updatedAt: "2026-05-28T05:30:00Z",
     logs: [],
@@ -138,6 +151,35 @@ const uploads = [
     createdAt: "2026-05-28T06:05:00Z",
   },
 ];
+
+function releaseCheckFor(build) {
+  const fixedVersion = build.version && build.version !== "latest";
+  const previewReady = build.status === "succeeded" || build.status === "preview_validated" || build.status === "published";
+  const releaseReady = build.status === "preview_validated" && fixedVersion;
+  return {
+    buildId: build.id,
+    stage: build.status === "preview_validated" ? "release" : "preview",
+    previewReady,
+    releaseReady,
+    blockingCount: releaseReady ? 0 : 1,
+    checks: [
+      {
+        id: "preview.artifact",
+        stage: "preview",
+        title: "Preview 制品可下载",
+        status: build.artifactUri || build.downloadUrl ? "pass" : "blocked",
+        reason: build.artifactUri || build.downloadUrl ? "" : "preview artifact is not available",
+      },
+      {
+        id: "release.fixed-version",
+        stage: "release",
+        title: "构建版本固定",
+        status: fixedVersion ? "pass" : "blocked",
+        reason: fixedVersion ? "" : "release requires a fixed build version",
+      },
+    ],
+  };
+}
 
 function jsonResponse(payload, status = 200) {
   return Promise.resolve({
@@ -167,6 +209,15 @@ function setupFetch() {
       ],
     },
     createPayloads: [],
+    revisions: [
+      {
+        id: "20260528170000-aabbccddee",
+        productId: "lsap",
+        hash: "aabbccddeeff001122334455",
+        summary: "manifest saved",
+        createdAt: "2026-05-28T07:00:00Z",
+      },
+    ],
   };
 
   global.fetch = vi.fn((url, options = {}) => {
@@ -184,6 +235,28 @@ function setupFetch() {
       return jsonResponse(uploads);
     }
     if (method === "GET" && path === "/api/products/lsap/manifest") {
+      return jsonResponse(product);
+    }
+    if (method === "POST" && path === "/api/products/lsap/manifest/dry-run") {
+      const payload = JSON.parse(options.body);
+      return jsonResponse({
+        valid: true,
+        errors: [],
+        config: { installDir: "/opt/lsap", ports: { web: 48000 } },
+        components: releaseReadyBuildLock.components,
+        buildLock: {
+          ...releaseReadyBuildLock,
+          buildId: "dry-run",
+          target: payload.target,
+          profile: payload.profile,
+          version: payload.version,
+        },
+      });
+    }
+    if (method === "GET" && path === "/api/products/lsap/manifest/revisions") {
+      return jsonResponse(state.revisions);
+    }
+    if (method === "POST" && path === "/api/products/lsap/manifest/revisions/20260528170000-aabbccddee/restore") {
       return jsonResponse(product);
     }
     if (method === "GET" && path === "/api/products/lsap/overlays/profiles") {
@@ -208,6 +281,16 @@ function setupFetch() {
       return jsonResponse(record);
     }
     if (method === "PUT" && path === "/api/products/lsap/manifest") {
+      state.revisions = [
+        {
+          id: "20260528171000-bbccddeeff",
+          productId: "lsap",
+          hash: "bbccddeeff00112233445566",
+          summary: "manifest saved",
+          createdAt: "2026-05-28T07:10:00Z",
+        },
+        ...state.revisions,
+      ];
       return jsonResponse(product);
     }
     if (method === "GET" && path === "/api/builds/build-pending-001/logs") {
@@ -222,6 +305,9 @@ function setupFetch() {
     if (method === "GET" && path === "/api/builds/build-pending-001/lock") {
       return jsonResponse(baseBuildLock);
     }
+    if (method === "GET" && path === "/api/builds/build-pending-001/release-check") {
+      return jsonResponse(releaseCheckFor(state.builds.find((build) => build.id === "build-pending-001")));
+    }
     if (method === "GET" && path === "/api/builds/build-success-002/logs") {
       return jsonResponse([
         {
@@ -232,7 +318,10 @@ function setupFetch() {
       ]);
     }
     if (method === "GET" && path === "/api/builds/build-success-002/lock") {
-      return jsonResponse({ ...baseBuildLock, buildId: "build-success-002", target: "windows" });
+      return jsonResponse(releaseReadyBuildLock);
+    }
+    if (method === "GET" && path === "/api/builds/build-success-002/release-check") {
+      return jsonResponse(releaseCheckFor(state.builds.find((build) => build.id === "build-success-002")));
     }
     if (method === "POST" && path === "/api/builds") {
       const payload = JSON.parse(options.body);
@@ -263,6 +352,9 @@ function setupFetch() {
     if (method === "GET" && path === "/api/builds/build-created-003/lock") {
       return jsonResponse({ ...baseBuildLock, buildId: "build-created-003" });
     }
+    if (method === "GET" && path === "/api/builds/build-created-003/release-check") {
+      return jsonResponse(releaseCheckFor(state.builds.find((build) => build.id === "build-created-003")));
+    }
     if (method === "POST" && path === "/api/builds/build-pending-001/approve") {
       const approved = { ...state.builds.find((build) => build.id === "build-pending-001"), status: "queued" };
       state.builds = state.builds.map((build) => (build.id === approved.id ? approved : build));
@@ -272,6 +364,26 @@ function setupFetch() {
       const canceled = { ...state.builds.find((build) => build.id === "build-pending-001"), status: "canceled" };
       state.builds = state.builds.map((build) => (build.id === canceled.id ? canceled : build));
       return jsonResponse(canceled);
+    }
+    if (method === "POST" && path === "/api/builds/build-success-002/validate-preview") {
+      const validated = {
+        ...state.builds.find((build) => build.id === "build-success-002"),
+        status: "preview_validated",
+        releaseChannel: "preview",
+        validatedAt: "2026-05-28T06:40:00Z",
+      };
+      state.builds = state.builds.map((build) => (build.id === validated.id ? validated : build));
+      return jsonResponse(validated);
+    }
+    if (method === "POST" && path === "/api/builds/build-success-002/publish") {
+      const published = {
+        ...state.builds.find((build) => build.id === "build-success-002"),
+        status: "published",
+        releaseChannel: "release",
+        publishedAt: "2026-05-28T06:45:00Z",
+      };
+      state.builds = state.builds.map((build) => (build.id === published.id ? published : build));
+      return jsonResponse(published);
     }
 
     return jsonResponse({ error: `Unhandled ${method} ${path}` }, 500);
@@ -304,9 +416,12 @@ describe("Packaging dashboard", () => {
     expect(screen.getByText("产品定义")).toBeInTheDocument();
     expect(screen.getByText("活跃任务")).toBeInTheDocument();
     expect(screen.getByText("需要处理")).toBeInTheDocument();
+    expect(screen.getByText("待验证 Preview")).toBeInTheDocument();
+    expect(screen.getByText("可发布 Release")).toBeInTheDocument();
+    expect(screen.getByText("发布阻塞")).toBeInTheDocument();
     expect(screen.getByText("build-pendin")).toBeInTheDocument();
     expect(screen.getAllByText("待审批").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("构建成功").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Preview 已生成").length).toBeGreaterThan(0);
   });
 
   it("opens build detail and displays logs plus build lock data", async () => {
@@ -326,6 +441,25 @@ describe("Packaging dashboard", () => {
 
     await user.click(screen.getByRole("tab", { name: /Build Lock/ }));
     expect(screen.getByText(/minio:\/\/packaging\/location-guard.tar.gz/)).toBeInTheDocument();
+  });
+
+  it("loads backend release checks in the build detail gate tab", async () => {
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "总览" });
+    await user.click(screen.getByRole("button", { name: /构建记录/ }));
+    await user.click(screen.getAllByRole("button", { name: /详情/ })[1]);
+
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: /发布门禁/ }));
+
+    expect(await screen.findByText("Preview 制品可下载")).toBeInTheDocument();
+    expect(screen.getByText("构建版本固定")).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledWith(
+      "http://localhost:8080/api/builds/build-success-002/release-check",
+      expect.objectContaining({ headers: expect.objectContaining({ "Content-Type": "application/json" }) }),
+    );
   });
 
   it("submits a build request with structured config overrides", async () => {
@@ -351,7 +485,7 @@ describe("Packaging dashboard", () => {
       target: "linux",
       profile: "qa",
       customer: "qa-customer",
-      releaseChannel: "qa",
+      releaseChannel: "preview",
       configOverrides: {
         installDir: "/opt/lsap",
         ports: { web: 49000 },
@@ -400,6 +534,47 @@ describe("Packaging dashboard", () => {
     expect(await screen.findByText(/Manifest 校验失败/)).toBeInTheDocument();
   });
 
+  it("edits common manifest fields with the structured editor", async () => {
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "总览" });
+    await user.click(screen.getByRole("button", { name: /产品配置/ }));
+    await user.click(screen.getByRole("tab", { name: /结构化/ }));
+
+    await user.clear(screen.getByLabelText("产品名称"));
+    await user.type(screen.getByLabelText("产品名称"), "定位平台专业版");
+
+    await user.click(screen.getByRole("tab", { name: /^编辑/ }));
+    expect(screen.getByDisplayValue(/定位平台专业版/)).toBeInTheDocument();
+  });
+
+  it("runs manifest dry run and restores a manifest revision", async () => {
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "总览" });
+    await user.click(screen.getByRole("button", { name: /产品配置/ }));
+
+    await user.click(screen.getByRole("tab", { name: /Dry Run/ }));
+    await user.click(screen.getByRole("button", { name: /Dry Run/ }));
+
+    expect(await screen.findByText("Dry Run 通过，Build Lock 可生成。")).toBeInTheDocument();
+    expect(screen.getByText("Build Lock 预览")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: /历史/ }));
+    expect(await screen.findByText("20260528170000-aabbccddee")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "恢复" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "http://localhost:8080/api/products/lsap/manifest/revisions/20260528170000-aabbccddee/restore",
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+    expect(await screen.findByText("Manifest 已恢复到历史版本")).toBeInTheDocument();
+  });
+
   it("requires confirmation before canceling a build", async () => {
     const user = userEvent.setup();
     renderApp();
@@ -417,6 +592,42 @@ describe("Packaging dashboard", () => {
         expect.objectContaining({ method: "POST" }),
       );
     });
+  });
+
+  it("requires preview validation before promoting a build to release", async () => {
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "总览" });
+    await user.click(screen.getByRole("button", { name: /构建记录/ }));
+
+    expect(screen.queryByRole("button", { name: "Release" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "验证" }));
+    expect(await screen.findByText("已验证 Preview")).toBeInTheDocument();
+
+    await user.click(await screen.findByRole("button", { name: "Release" }));
+    expect(await screen.findByRole("dialog")).toHaveTextContent("确认转 Release");
+    await user.click(screen.getByRole("button", { name: "确认转 Release" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "http://localhost:8080/api/builds/build-success-002/publish",
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+    expect(await screen.findByText("已转 Release")).toBeInTheDocument();
+  });
+
+  it("uses backend build download endpoint when only artifact URI is available", async () => {
+    renderApp();
+
+    await screen.findByRole("heading", { name: "总览" });
+    await screen.getByRole("button", { name: /构建记录/ }).click();
+
+    expect(screen.getByRole("link", { name: /下载/ })).toHaveAttribute(
+      "href",
+      "http://localhost:8080/api/builds/build-success-002/download",
+    );
   });
 
   it("filters build logs in the detail panel", async () => {

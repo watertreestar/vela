@@ -63,15 +63,16 @@ func ResolveBuild(
 	}
 
 	lock := domain.BuildLock{
-		BuildID:    buildID,
-		ProductID:  product.ID,
-		Target:     request.Target,
-		Profile:    request.Profile,
-		Customer:   request.Customer,
-		Version:    request.Version,
-		Config:     config,
-		Components: resolved,
-		Workloads:  workloads,
+		BuildID:        buildID,
+		ProductID:      product.ID,
+		Target:         request.Target,
+		Profile:        request.Profile,
+		Customer:       request.Customer,
+		Version:        request.Version,
+		ReleaseChannel: request.ReleaseChannel,
+		Config:         config,
+		Components:     resolved,
+		Workloads:      workloads,
 	}
 	return config, resolved, lock, nil
 }
