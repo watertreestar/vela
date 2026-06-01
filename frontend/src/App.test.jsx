@@ -630,6 +630,25 @@ describe("Packaging dashboard", () => {
     );
   });
 
+  it("filters build records with operator status chips", async () => {
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "总览" });
+    await user.click(screen.getByRole("button", { name: /构建记录/ }));
+
+    expect(screen.getByText("build-pendin")).toBeInTheDocument();
+    expect(screen.getByText("build-succes")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /筛选：待处理/ }));
+    expect(screen.getByText("build-pendin")).toBeInTheDocument();
+    expect(screen.queryByText("build-succes")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /筛选：待验证/ }));
+    expect(screen.queryByText("build-pendin")).not.toBeInTheDocument();
+    expect(screen.getByText("build-succes")).toBeInTheDocument();
+  });
+
   it("filters build logs in the detail panel", async () => {
     const user = userEvent.setup();
     renderApp();

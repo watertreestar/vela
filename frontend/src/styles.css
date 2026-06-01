@@ -213,6 +213,25 @@ textarea {
   font-family: "Bahnschrift SemiBold", "Bahnschrift", "Microsoft YaHei UI", sans-serif;
 }
 
+.topbar-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.topbar-metric {
+  display: inline-grid;
+  min-width: 84px;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: 8px;
+  border: 1px solid rgba(24, 32, 29, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.68);
+  padding: 6px 9px;
+}
+
 .topbar-actions {
   justify-content: flex-end;
 }
@@ -559,6 +578,61 @@ textarea {
   width: min(320px, 100%);
 }
 
+.build-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.build-filter-chip {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid rgba(24, 32, 29, 0.12);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--ink-2);
+  cursor: pointer;
+  font: inherit;
+  padding: 6px 10px;
+  transition:
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    color 150ms ease,
+    background 150ms ease;
+}
+
+.build-filter-chip strong {
+  min-width: 22px;
+  border-radius: 999px;
+  background: #eef3ed;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 20px;
+  text-align: center;
+}
+
+.build-filter-chip:hover,
+.build-filter-chip.is-active {
+  border-color: rgba(11, 143, 131, 0.42);
+  background: var(--teal-soft);
+  color: var(--teal-strong);
+  box-shadow: var(--shadow-tight);
+}
+
+.build-filter-chip.is-active strong {
+  background: #ffffff;
+  color: var(--teal-strong);
+}
+
+.table-scroll {
+  width: 100%;
+  overflow-x: auto;
+  border-radius: 8px;
+}
+
 .build-table {
   min-width: 980px;
 }
@@ -689,6 +763,65 @@ textarea {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
+}
+
+.release-gate-status {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 24px minmax(0, 1fr) minmax(220px, 0.8fr);
+  align-items: stretch;
+  gap: 10px;
+}
+
+.gate-stage,
+.release-gate-verdict {
+  display: grid;
+  min-height: 82px;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  border: 1px solid rgba(24, 32, 29, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+  padding: 12px;
+}
+
+.gate-stage.is-pass {
+  border-color: rgba(11, 143, 131, 0.28);
+}
+
+.gate-stage.is-blocked,
+.release-gate-verdict.is-warn,
+.release-gate-verdict.is-blocked {
+  border-color: rgba(214, 138, 16, 0.34);
+  background: var(--amber-soft);
+}
+
+.release-gate-verdict.is-pass {
+  border-color: rgba(11, 143, 131, 0.28);
+  background: var(--teal-soft);
+  color: var(--teal-strong);
+}
+
+.gate-stage-icon {
+  display: flex;
+  height: 30px;
+  width: 30px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--teal-soft);
+  color: var(--teal-strong);
+}
+
+.gate-stage.is-blocked .gate-stage-icon {
+  background: #ffffff;
+  color: var(--amber);
+}
+
+.release-gate-arrow {
+  align-self: center;
+  color: var(--muted);
+  justify-self: center;
 }
 
 .release-gate-columns {
@@ -894,6 +1027,10 @@ textarea {
     width: 100%;
   }
 
+  .topbar-metric {
+    min-width: calc(50% - 4px);
+  }
+
   .metric-grid,
   .audit-grid,
   .release-gate-summary,
@@ -905,6 +1042,14 @@ textarea {
   .release-gate-columns,
   .detail-grid {
     grid-template-columns: 1fr;
+  }
+
+  .release-gate-status {
+    grid-template-columns: 1fr;
+  }
+
+  .release-gate-arrow {
+    display: none;
   }
 
   .upload-box,

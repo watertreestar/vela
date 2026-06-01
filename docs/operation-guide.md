@@ -1039,7 +1039,60 @@ git diff --check
 | 前端 E2E UI 测试 | 已覆盖 | `npm run test:e2e` |
 | 认证和权限 | 暂不覆盖 | 已按当前需求暂不考虑 |
 
-## 19. 推荐验收流程
+## 19. 一键本地验收流程
+
+本地完整链路建议优先使用 Python 验收脚本：
+
+```bash
+python scripts/acceptance_cli.py run
+```
+
+脚本会执行以下动作：
+
+1. 检查或启动本地 API。默认会启动 Docker 化 API 容器，并加入 `packaging-net`。
+2. 检查 Docker daemon、runner 镜像、Dagger engine 镜像、Dagger 基础镜像和队列隔离。
+3. 上传本地测试组件，作为 `manual-upload` 组件来源。
+4. 创建 Linux Preview 构建，版本固定为 `1.0.0`。
+5. 审批构建，进入 runner 队列。
+6. 运行 Docker runner，runner 内部调用 Dagger 生成 `tar.gz`。
+7. 校验构建状态、制品下载、Preview 验证和 Release gate。
+
+默认前提：
+
+- PostgreSQL 容器 `packaging-postgres` 已启动；脚本会把它连接到 `packaging-net`。
+- Docker 可以运行 Linux 容器。
+- Docker runner 可以挂载 `/var/run/docker.sock`。
+- 本地没有其他 `queued` 的 Linux 构建，避免 runner 领错任务。
+
+常用命令：
+
+```bash
+# 只检查前置条件
+python scripts/acceptance_cli.py check
+
+# 强制重建 runner 镜像
+python scripts/acceptance_cli.py run --rebuild-runner
+
+# 使用宿主机上已有的 API
+python scripts/acceptance_cli.py run \
+  --api-mode host \
+  --runner-api-url http://host.docker.internal:8080
+
+# 复用或指定 Docker API 容器名
+python scripts/acceptance_cli.py run \
+  --api-url http://127.0.0.1:8081 \
+  --api-container packaging-api-docker \
+  --runner-api-url http://packaging-api-docker:8080
+```
+
+成功后应看到：
+
+- build 状态从 `pending_approval -> queued -> running -> succeeded -> preview_validated`。
+- `artifactUri` 指向 `local-upload://...`。
+- `downloadUrl` 可下载。
+- `/api/builds/{id}/release-check` 返回 `releaseReady=true`。
+
+## 20. 手工推荐验收流程
 
 建议按下面顺序验收：
 
@@ -1056,10 +1109,11 @@ git diff --check
 11. 对 Windows target 重复 Preview 构建流程，确认 Windows Runner 或占位包流程正常。
 12. 执行后端 API 测试、前端单测、E2E UI 测试和前端构建。
 
-## 20. 关联文档
+## 21. 关联文档
 
 - [Architecture](architecture.md)
 - [API](api.md)
+- [Local Acceptance](local-acceptance.md)
 - [Nomad Runner Lifecycle](nomad-runner-lifecycle.md)
 - [Runner README](../runner/README.md)
 - [lsapctl Runtime Contract](lsapctl-runtime.md)

@@ -314,11 +314,14 @@ test("dashboard renders production-like release data and opens release gate deta
   await expect(page.getByText("发布阻塞")).toBeVisible();
 
   await page.getByRole("button", { name: /构建记录/ }).click();
+  await page.getByRole("button", { name: /筛选：可发布/ }).click();
+  await expect(page.getByText("build-previe")).toHaveCount(1);
   await page.getByPlaceholder("搜索 ID / 产品 / 状态").fill("preview-ready");
   await expect(page.getByText("build-previe")).toBeVisible();
   await page.getByRole("button", { name: "详情" }).click();
   await page.getByRole("tab", { name: /发布门禁/ }).click();
 
+  await expect(page.getByText("Release 可发布")).toBeVisible();
   await expect(page.getByText("Preview 制品可下载")).toBeVisible();
   await expect(page.getByText("组件 URI 精确")).toBeVisible();
   await expect(page.getByText("0 阻塞")).toHaveCount(2);

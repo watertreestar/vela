@@ -16,6 +16,7 @@ Key docs:
 
 - [Architecture](docs/architecture.md)
 - [Operation Guide](docs/operation-guide.md)
+- [Local Acceptance](docs/local-acceptance.md)
 - [Core Feature Plan](docs/core-feature-plan.md)
 - [API](docs/api.md)
 - [Nomad Runner Lifecycle](docs/nomad-runner-lifecycle.md)
@@ -111,6 +112,27 @@ npm run build
 ```
 
 The E2E suite uses Playwright with mocked API data and runs the admin console flows in desktop Chromium and a mobile Chromium viewport.
+
+One-command local acceptance:
+
+```bash
+python scripts/acceptance_cli.py run
+```
+
+This command starts the local API if it is not already healthy, checks Docker, builds or reuses `packaging-runner:local`, uploads local component artifacts, creates and approves a Linux Preview build, runs the Docker runner through Dagger, verifies the uploaded package download, validates Preview, and checks the Release gate. PostgreSQL must be reachable through `DATABASE_URL`; Docker must be able to run Linux containers and mount `/var/run/docker.sock`.
+
+By default the script starts the API as a Docker container on `packaging-net` so the runner can reach it reliably. It connects the existing `packaging-postgres` container to that network and publishes the API on `http://127.0.0.1:8080`.
+
+Detailed usage: [Local Acceptance](docs/local-acceptance.md).
+
+Useful variants:
+
+```bash
+python scripts/acceptance_cli.py check
+python scripts/acceptance_cli.py run --rebuild-runner
+python scripts/acceptance_cli.py run --api-mode host --runner-api-url http://host.docker.internal:8080
+python scripts/acceptance_cli.py run --api-url http://127.0.0.1:8081 --api-container packaging-api-docker --runner-api-url http://packaging-api-docker:8080
+```
 
 The backend defaults to PostgreSQL storage and dry-run Nomad scheduling. Set `DRY_RUN=false`, `NOMAD_ADDR`, and `PACKAGING_RUNNER_IMAGE` to submit real Nomad jobs.
 

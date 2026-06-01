@@ -104,6 +104,36 @@ const navItems = [
   { key: "logs", label: "日志与锁定", icon: ScrollText },
 ];
 
+const buildFilterOptions = [
+  { key: "all", label: "全部", icon: History, match: () => true },
+  {
+    key: "attention",
+    label: "待处理",
+    icon: AlertCircle,
+    match: (build) => ["pending_approval", "failed", "canceled"].includes(build.status),
+  },
+  {
+    key: "active",
+    label: "执行中",
+    icon: Gauge,
+    match: (build) => ["queued", "running"].includes(build.status),
+  },
+  { key: "preview", label: "待验证", icon: PackageCheck, match: (build) => build.status === "succeeded" },
+  {
+    key: "validated",
+    label: "已验证",
+    icon: ShieldCheck,
+    match: (build) => build.status === "preview_validated",
+  },
+  { key: "releaseReady", label: "可发布", icon: Rocket, match: (build) => getReleaseReadiness(build).ready },
+  {
+    key: "blocked",
+    label: "发布阻塞",
+    icon: Ban,
+    match: (build) => build.status === "preview_validated" && !getReleaseReadiness(build).ready,
+  },
+];
+
 const sourceKindOptions = [
   { key: "artifact-repository", label: "制品仓库" },
   { key: "manual-upload", label: "手动上传" },
@@ -147,6 +177,7 @@ export default function App() {
   const [originalOverlayText, setOriginalOverlayText] = useState("{}");
   const [savingOverlay, setSavingOverlay] = useState(false);
   const [searchText, setSearchText] = useState("");
+  const [buildFilter, setBuildFilter] = useState("all");
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [confirmAction, setConfirmAction] = useState(null);
@@ -179,23 +210,39 @@ export default function App() {
 
   const filteredBuilds = useMemo(() => {
     const keyword = searchText.trim().toLowerCase();
-    if (!keyword) return builds;
-    return builds.filter((build) =>
-      [
+    const filter = buildFilterOptions.find((item) => item.key === buildFilter) || buildFilterOptions[0];
+    return builds.filter((build) => {
+      if (!filter.match(build)) return false;
+      if (!keyword) return true;
+      return [
         build.id,
         build.productId,
         build.target,
         build.profile,
         build.version,
+        statusMeta[build.status]?.label,
         build.status,
         build.runnerId,
         build.releaseChannel,
         build.customer,
       ]
         .filter(Boolean)
-        .some((value) => String(value).toLowerCase().includes(keyword)),
+        .some((value) => String(value).toLowerCase().includes(keyword));
+    });
+  }, [builds, searchText, buildFilter]);
+
+  const buildFilterCounts = useMemo(() => {
+    return Object.fromEntries(
+      buildFilterOptions.map((option) => [
+        option.key,
+        builds.filter((build) => option.match(build)).length,
+      ]),
     );
-  }, [builds, searchText]);
+  }, [builds]);
+
+  const hasBuildSearch = searchText.trim().length > 0;
+  const hasBuildFilter = buildFilter !== "all";
+  const visibleBuildTotal = hasBuildSearch || hasBuildFilter ? filteredBuilds.length : builds.length;
 
   const dashboard = useMemo(() => {
     const counts = Object.fromEntries(Object.keys(statusMeta).map((key) => [key, 0]));
@@ -227,6 +274,16 @@ export default function App() {
       releaseBlocked,
     };
   }, [builds, products.length, uploads.length]);
+
+  const topbarMetrics = useMemo(
+    () => [
+      { label: "运行中", value: dashboard.active },
+      { label: "待验证", value: dashboard.previewPending },
+      { label: "可发布", value: dashboard.releaseReady },
+      { label: "阻塞", value: dashboard.releaseBlocked },
+    ],
+    [dashboard.active, dashboard.previewPending, dashboard.releaseReady, dashboard.releaseBlocked],
+  );
 
   useEffect(() => {
     refresh();
@@ -660,9 +717,14 @@ export default function App() {
     builds: (
       <BuildsSection
         builds={filteredBuilds}
+        totalBuilds={builds.length}
+        visibleBuildTotal={visibleBuildTotal}
         loading={loading}
         searchText={searchText}
         setSearchText={setSearchText}
+        buildFilter={buildFilter}
+        setBuildFilter={setBuildFilter}
+        buildFilterCounts={buildFilterCounts}
         busyAction={busyAction}
         onApprove={(build) => runBuildAction(approveBuild, build, "审批通过")}
         onReject={(build) =>
@@ -790,6 +852,18 @@ export default function App() {
             <Heading as="h1" size="7">
               {navItems.find((item) => item.key === activeSection)?.label}
             </Heading>
+            <div className="topbar-metrics" aria-label="构建运行摘要">
+              {topbarMetrics.map((item) => (
+                <div key={item.label} className="topbar-metric">
+                  <Text size="1" color="gray">
+                    {item.label}
+                  </Text>
+                  <Text size="3" weight="bold">
+                    {item.value}
+                  </Text>
+                </div>
+              ))}
+            </div>
           </Box>
           <Flex className="topbar-actions" gap="3" align="center" wrap="wrap">
             <label className="inline-check">
@@ -1087,9 +1161,14 @@ function CreateBuildSection({
 
 function BuildsSection({
   builds,
+  totalBuilds,
+  visibleBuildTotal,
   loading,
   searchText,
   setSearchText,
+  buildFilter,
+  setBuildFilter,
+  buildFilterCounts,
   busyAction,
   onApprove,
   onReject,
@@ -1102,7 +1181,7 @@ function BuildsSection({
   return (
     <Panel
       title="构建记录"
-      description="审批、发布、取消、重试和查看构建产物"
+      description={`显示 ${visibleBuildTotal} / ${totalBuilds} 条构建`}
       icon={History}
       action={
         <TextField.Root
@@ -1117,6 +1196,26 @@ function BuildsSection({
         </TextField.Root>
       }
     >
+      <div className="build-filter-bar" aria-label="构建筛选">
+        {buildFilterOptions.map((option) => {
+          const Icon = option.icon;
+          const count = buildFilterCounts[option.key] || 0;
+          return (
+            <button
+              key={option.key}
+              type="button"
+              className={`build-filter-chip ${buildFilter === option.key ? "is-active" : ""}`}
+              aria-pressed={buildFilter === option.key}
+              aria-label={`筛选：${option.label}，${count} 条`}
+              onClick={() => setBuildFilter(option.key)}
+            >
+              <Icon size={15} />
+              <span>{option.label}</span>
+              <strong>{count}</strong>
+            </button>
+          );
+        })}
+      </div>
       <BuildsTable
         builds={builds}
         loading={loading}
@@ -2003,73 +2102,75 @@ function BuildsTable({
   onInspect,
 }) {
   return (
-    <Table.Root className="build-table" variant="surface">
-      <Table.Header>
-        <Table.Row>
-          <Table.ColumnHeaderCell>ID</Table.ColumnHeaderCell>
-          <Table.ColumnHeaderCell>产品</Table.ColumnHeaderCell>
-          <Table.ColumnHeaderCell>目标</Table.ColumnHeaderCell>
-          <Table.ColumnHeaderCell>Profile</Table.ColumnHeaderCell>
-          <Table.ColumnHeaderCell>状态</Table.ColumnHeaderCell>
-          <Table.ColumnHeaderCell>更新时间</Table.ColumnHeaderCell>
-          <Table.ColumnHeaderCell>制品</Table.ColumnHeaderCell>
-          <Table.ColumnHeaderCell>操作</Table.ColumnHeaderCell>
-        </Table.Row>
-      </Table.Header>
-      <Table.Body>
-        {builds.length === 0 ? (
+    <div className="table-scroll">
+      <Table.Root className="build-table" variant="surface">
+        <Table.Header>
           <Table.Row>
-            <Table.Cell colSpan={8}>
-              <Text color="gray">{loading ? "正在加载构建记录" : "暂无构建记录"}</Text>
-            </Table.Cell>
+            <Table.ColumnHeaderCell>ID</Table.ColumnHeaderCell>
+            <Table.ColumnHeaderCell>产品</Table.ColumnHeaderCell>
+            <Table.ColumnHeaderCell>目标</Table.ColumnHeaderCell>
+            <Table.ColumnHeaderCell>Profile</Table.ColumnHeaderCell>
+            <Table.ColumnHeaderCell>状态</Table.ColumnHeaderCell>
+            <Table.ColumnHeaderCell>更新时间</Table.ColumnHeaderCell>
+            <Table.ColumnHeaderCell>制品</Table.ColumnHeaderCell>
+            <Table.ColumnHeaderCell>操作</Table.ColumnHeaderCell>
           </Table.Row>
-        ) : (
-          builds.map((build) => (
-            <Table.Row key={build.id}>
-              <Table.Cell>
-                <Code>{shortId(build.id)}</Code>
-              </Table.Cell>
-              <Table.Cell>
-                <div className="cell-main">
-                  <Text weight="medium">{build.productId}</Text>
-                  <Text size="1" color="gray">
-                    {build.version}
-                  </Text>
-                </div>
-              </Table.Cell>
-              <Table.Cell>{build.target}</Table.Cell>
-              <Table.Cell>{build.profile || "-"}</Table.Cell>
-              <Table.Cell>
-                <StatusBadge status={build.status} />
-              </Table.Cell>
-              <Table.Cell>{formatDate(build.updatedAt)}</Table.Cell>
-              <Table.Cell>
-                {build.downloadUrl || build.artifactUri ? (
-                  <Link href={build.downloadUrl || buildDownloadUrl(build.id)} target="_blank">
-                    <Download size={14} /> 下载
-                  </Link>
-                ) : (
-                  <Text color="gray">未生成</Text>
-                )}
-              </Table.Cell>
-              <Table.Cell>
-                <BuildActions
-                  build={build}
-                  busyAction={busyAction}
-                  onApprove={onApprove}
-                  onReject={onReject}
-                  onValidate={onValidate}
-                  onPublish={onPublish}
-                  onCancel={onCancel}
-                  onRetry={onRetry}
-                  onInspect={onInspect}
-                />
+        </Table.Header>
+        <Table.Body>
+          {builds.length === 0 ? (
+            <Table.Row>
+              <Table.Cell colSpan={8}>
+                <Text color="gray">{loading ? "正在加载构建记录" : "没有匹配的构建记录"}</Text>
               </Table.Cell>
             </Table.Row>
-          ))
-        )}
-      </Table.Body>
-    </Table.Root>
+          ) : (
+            builds.map((build) => (
+              <Table.Row key={build.id}>
+                <Table.Cell>
+                  <Code>{shortId(build.id)}</Code>
+                </Table.Cell>
+                <Table.Cell>
+                  <div className="cell-main">
+                    <Text weight="medium">{build.productId}</Text>
+                    <Text size="1" color="gray">
+                      {build.version}
+                    </Text>
+                  </div>
+                </Table.Cell>
+                <Table.Cell>{build.target}</Table.Cell>
+                <Table.Cell>{build.profile || "-"}</Table.Cell>
+                <Table.Cell>
+                  <StatusBadge status={build.status} />
+                </Table.Cell>
+                <Table.Cell>{formatDate(build.updatedAt)}</Table.Cell>
+                <Table.Cell>
+                  {build.downloadUrl || build.artifactUri ? (
+                    <Link href={build.downloadUrl || buildDownloadUrl(build.id)} target="_blank">
+                      <Download size={14} /> 下载
+                    </Link>
+                  ) : (
+                    <Text color="gray">未生成</Text>
+                  )}
+                </Table.Cell>
+                <Table.Cell>
+                  <BuildActions
+                    build={build}
+                    busyAction={busyAction}
+                    onApprove={onApprove}
+                    onReject={onReject}
+                    onValidate={onValidate}
+                    onPublish={onPublish}
+                    onCancel={onCancel}
+                    onRetry={onRetry}
+                    onInspect={onInspect}
+                  />
+                </Table.Cell>
+              </Table.Row>
+            ))
+          )}
+        </Table.Body>
+      </Table.Root>
+    </div>
   );
 }
 
@@ -2331,8 +2432,41 @@ function ReleaseGatePanel({ build, releaseCheck }) {
   const check = releaseCheck || getLocalReleaseCheck(build);
   const previewChecks = (check.checks || []).filter((item) => item.stage === "preview");
   const releaseChecks = (check.checks || []).filter((item) => item.stage === "release");
+  const previewBlocked = previewChecks.filter((item) => item.status === "blocked").length;
+  const releaseBlocked = releaseChecks.filter((item) => item.status === "blocked").length;
+  const verdict = check.releaseReady
+    ? { label: "Release 可发布", text: "门禁已通过", tone: "pass" }
+    : check.previewReady
+      ? { label: "等待 Release 条件", text: `${releaseBlocked} 个发布阻塞项`, tone: "warn" }
+      : { label: "Preview 未就绪", text: `${previewBlocked} 个预览阻塞项`, tone: "blocked" };
   return (
     <div className="section-stack">
+      <div className="release-gate-status">
+        <GateStage
+          label="Preview"
+          title="构建验证"
+          passed={check.previewReady}
+          blockedCount={previewBlocked}
+        />
+        <ChevronRight className="release-gate-arrow" size={18} />
+        <GateStage
+          label="Release"
+          title="发布准入"
+          passed={check.releaseReady}
+          blockedCount={releaseBlocked}
+        />
+        <div className={`release-gate-verdict is-${verdict.tone}`}>
+          {check.releaseReady ? <Check size={18} /> : <AlertCircle size={18} />}
+          <div>
+            <Text as="div" weight="bold">
+              {verdict.label}
+            </Text>
+            <Text as="div" size="1">
+              {verdict.text}
+            </Text>
+          </div>
+        </div>
+      </div>
       <div className="release-gate-summary">
         <AuditMetric label="Preview 门禁" value={check.previewReady ? "通过" : "阻塞"} />
         <AuditMetric label="Release 门禁" value={check.releaseReady ? "通过" : "阻塞"} />
@@ -2342,6 +2476,27 @@ function ReleaseGatePanel({ build, releaseCheck }) {
       <div className="release-gate-columns">
         <ReleaseCheckGroup title="Preview 验证" checks={previewChecks} />
         <ReleaseCheckGroup title="Release 发布" checks={releaseChecks} />
+      </div>
+    </div>
+  );
+}
+
+function GateStage({ label, title, passed, blockedCount }) {
+  return (
+    <div className={`gate-stage ${passed ? "is-pass" : "is-blocked"}`}>
+      <div className="gate-stage-icon">
+        {passed ? <Check size={16} /> : <AlertCircle size={16} />}
+      </div>
+      <div>
+        <Text as="div" size="1" color="gray">
+          {label}
+        </Text>
+        <Text as="div" weight="bold">
+          {title}
+        </Text>
+        <Text as="div" size="1" color="gray">
+          {passed ? "已通过" : `${blockedCount} 个阻塞项`}
+        </Text>
       </div>
     </div>
   );
