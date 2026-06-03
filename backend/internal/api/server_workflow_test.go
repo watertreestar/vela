@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -21,10 +22,15 @@ import (
 type fakeScheduler struct {
 	submitted []string
 	stopped   []string
+	submitErr error
+	stopErr   error
 }
 
 func (s *fakeScheduler) Submit(build domain.Build, _ domain.Product) (string, string, error) {
 	s.submitted = append(s.submitted, build.ID)
+	if s.submitErr != nil {
+		return "", "scheduler failed", s.submitErr
+	}
 	return "job-" + build.ID, "submitted " + build.ID, nil
 }
 
@@ -34,6 +40,9 @@ func (s *fakeScheduler) Inspect(_ string) (nomad.JobStatus, error) {
 
 func (s *fakeScheduler) Stop(jobID string) error {
 	s.stopped = append(s.stopped, jobID)
+	if s.stopErr != nil {
+		return s.stopErr
+	}
 	return nil
 }
 
@@ -61,12 +70,20 @@ func TestAPIHealthProductsUploadsAndRunnerWorkflow(t *testing.T) {
 		t.Fatalf("unexpected products: %#v", products)
 	}
 
-	uploadResponse := uploadRequest(t, server, "license.lic", "license-data")
+	uploadResponse := uploadRequestWithFields(t, server, "license.lic", "license-data", map[string]string{
+		"downloadPolicy":     "restricted",
+		"retentionDays":      "7",
+		"metadata.productId": "lsap",
+		"metadata.purpose":   "license",
+	})
 	assertStatus(t, uploadResponse, http.StatusCreated)
 	var upload domain.UploadRecord
 	decodeJSON(t, uploadResponse, &upload)
 	if upload.ID == "" || upload.SHA256 == "" {
 		t.Fatalf("unexpected upload: %#v", upload)
+	}
+	if upload.DownloadPolicy != "restricted" || upload.RetentionDays != 7 || upload.RetentionStatus != "active" || upload.Metadata["purpose"] != "license" {
+		t.Fatalf("upload metadata was not persisted: %#v", upload)
 	}
 
 	buildBody := `{
@@ -112,6 +129,14 @@ func TestAPIHealthProductsUploadsAndRunnerWorkflow(t *testing.T) {
 	response = doRequest(t, server, http.MethodPost, "/api/runner/heartbeat", `{"runnerId":"runner-1","buildId":"`+build.ID+`","message":"active"}`)
 	assertStatus(t, response, http.StatusOK)
 
+	response = doRequest(t, server, http.MethodGet, "/api/runners", "")
+	assertStatus(t, response, http.StatusOK)
+	var runners []domain.RunnerStatus
+	decodeJSON(t, response, &runners)
+	if len(runners) != 1 || runners[0].RunnerID != "runner-1" || runners[0].Status != "busy" || runners[0].LastHeartbeatAt == nil {
+		t.Fatalf("unexpected runner observability: %#v", runners)
+	}
+
 	response = doRequest(t, server, http.MethodPost, "/api/runner/tasks/"+build.ID+"/complete", `{"status":"succeeded","artifactUri":"local-upload://artifact/package.tar.gz","downloadUrl":"http://api.test/api/uploads/`+upload.ID+`/download"}`)
 	assertStatus(t, response, http.StatusOK)
 	decodeJSON(t, response, &build)
@@ -131,6 +156,18 @@ func TestAPIHealthProductsUploadsAndRunnerWorkflow(t *testing.T) {
 	decodeJSON(t, response, &logs)
 	if len(logs) < 4 {
 		t.Fatalf("expected workflow logs, got %#v", logs)
+	}
+	if logs[0].Sequence == 0 {
+		t.Fatalf("expected sequenced logs, got %#v", logs)
+	}
+
+	response = doRequest(t, server, http.MethodGet, "/api/builds/"+build.ID+"/logs/stream", "")
+	assertStatus(t, response, http.StatusOK)
+	if contentType := response.Header().Get("Content-Type"); !strings.Contains(contentType, "text/event-stream") {
+		t.Fatalf("expected event stream content type, got %s", contentType)
+	}
+	if !strings.Contains(response.Body.String(), "event: log") || !strings.Contains(response.Body.String(), "downloaded components") {
+		t.Fatalf("unexpected log stream body: %s", response.Body.String())
 	}
 
 	if _, err := os.Stat(filepath.Join(productsDir, "lsap", "product.json")); err != nil {
@@ -162,6 +199,16 @@ func TestAPIRetryCancelAndUploadDownload(t *testing.T) {
 	if strings.TrimSpace(response.Body.String()) != "package-data" {
 		t.Fatalf("unexpected download body: %q", response.Body.String())
 	}
+
+	expiredAt := time.Now().UTC().Add(-time.Hour)
+	upload.RetentionDays = 1
+	upload.ExpiresAt = &expiredAt
+	upload.RetentionStatus = "expired"
+	if err := store.SaveUploadRecord(upload); err != nil {
+		t.Fatal(err)
+	}
+	response = doRequest(t, server, http.MethodGet, "/api/uploads/"+upload.ID+"/download", "")
+	assertStatus(t, response, http.StatusGone)
 
 	now := time.Now().UTC()
 	failed := domain.Build{
@@ -195,10 +242,218 @@ func TestAPIRetryCancelAndUploadDownload(t *testing.T) {
 	}
 }
 
+func TestAPIRejectBuild(t *testing.T) {
+	store, _ := newTestServerStore(t)
+	server := NewServer(store, nil, nil).Routes()
+	now := time.Now().UTC()
+	pending := domain.Build{
+		ID:        "pending-reject",
+		ProductID: "lsap",
+		Target:    "linux",
+		Profile:   "qa",
+		Version:   "1.0.0",
+		Status:    domain.BuildPendingApproval,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	queued := domain.Build{
+		ID:        "queued-reject",
+		ProductID: "lsap",
+		Target:    "linux",
+		Profile:   "qa",
+		Version:   "1.0.0",
+		Status:    domain.BuildQueued,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := store.SaveBuild(pending); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveBuild(queued); err != nil {
+		t.Fatal(err)
+	}
+
+	response := doRequest(t, server, http.MethodPost, "/api/builds/pending-reject/reject", "")
+	assertStatus(t, response, http.StatusOK)
+	var rejected domain.Build
+	decodeJSON(t, response, &rejected)
+	if rejected.Status != domain.BuildRejected {
+		t.Fatalf("reject did not mark build rejected: %#v", rejected)
+	}
+	if len(rejected.Logs) == 0 || rejected.Logs[len(rejected.Logs)-1].Message != "build rejected" {
+		t.Fatalf("reject did not append audit log: %#v", rejected.Logs)
+	}
+
+	response = doRequest(t, server, http.MethodPost, "/api/builds/queued-reject/reject", "")
+	assertStatus(t, response, http.StatusConflict)
+	apiErr := decodeAPIError(t, response)
+	if apiErr.Error.Code != "BUILD_STATE_CONFLICT" {
+		t.Fatalf("expected state conflict error, got %#v", apiErr)
+	}
+}
+
+func TestAPISchedulerFailureBranches(t *testing.T) {
+	store, _ := newTestServerStore(t)
+	now := time.Now().UTC()
+	pending := domain.Build{
+		ID:        "approve-fails",
+		ProductID: "lsap",
+		Target:    "linux",
+		Profile:   "qa",
+		Version:   "1.0.0",
+		Status:    domain.BuildPendingApproval,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	failed := domain.Build{
+		ID:        "retry-fails",
+		ProductID: "lsap",
+		Target:    "linux",
+		Profile:   "qa",
+		Version:   "1.0.0",
+		Status:    domain.BuildFailed,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	queued := domain.Build{
+		ID:         "cancel-fails",
+		ProductID:  "lsap",
+		Target:     "linux",
+		Profile:    "qa",
+		Version:    "1.0.0",
+		Status:     domain.BuildQueued,
+		NomadJobID: "job-cancel-fails",
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	for _, build := range []domain.Build{pending, failed, queued} {
+		if err := store.SaveBuild(build); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scheduler := &fakeScheduler{
+		submitErr: errors.New("nomad submit unavailable"),
+		stopErr:   errors.New("nomad stop unavailable"),
+	}
+	server := NewServer(store, scheduler, nil).Routes()
+
+	response := doRequest(t, server, http.MethodPost, "/api/builds/approve-fails/approve", "")
+	assertStatus(t, response, http.StatusBadGateway)
+	var approved domain.Build
+	decodeJSON(t, response, &approved)
+	if approved.Status != domain.BuildFailed || approved.Error != "nomad submit unavailable" {
+		t.Fatalf("approval failure did not mark build failed: %#v", approved)
+	}
+
+	response = doRequest(t, server, http.MethodPost, "/api/builds/retry-fails/retry", "")
+	assertStatus(t, response, http.StatusBadGateway)
+	apiErr := decodeAPIError(t, response)
+	if apiErr.Error.Code != "UPSTREAM_UNAVAILABLE" {
+		t.Fatalf("expected upstream error for retry failure, got %#v", apiErr)
+	}
+
+	response = doRequest(t, server, http.MethodPost, "/api/builds/cancel-fails/cancel", "")
+	assertStatus(t, response, http.StatusBadGateway)
+	apiErr = decodeAPIError(t, response)
+	if apiErr.Error.Code != "UPSTREAM_UNAVAILABLE" {
+		t.Fatalf("expected upstream error for cancel failure, got %#v", apiErr)
+	}
+	if len(scheduler.stopped) != 1 || scheduler.stopped[0] != "job-cancel-fails" {
+		t.Fatalf("expected scheduler stop attempt, got %#v", scheduler.stopped)
+	}
+}
+
+func TestAPIRunnerAndUploadErrorBranches(t *testing.T) {
+	store, _ := newTestServerStore(t)
+	server := NewServer(store, nil, nil).Routes()
+	now := time.Now().UTC()
+	running := domain.Build{
+		ID:        "runner-fails",
+		ProductID: "lsap",
+		Target:    "linux",
+		Profile:   "qa",
+		Version:   "1.0.0",
+		Status:    domain.BuildRunning,
+		RunnerID:  "runner-1",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	succeeded := running
+	succeeded.ID = "already-succeeded"
+	succeeded.Status = domain.BuildSucceeded
+	for _, build := range []domain.Build{running, succeeded} {
+		if err := store.SaveBuild(build); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	response := doRequest(t, server, http.MethodPost, "/api/runner/tasks/claim", `{`)
+	assertStatus(t, response, http.StatusBadRequest)
+
+	response = doRequest(t, server, http.MethodPost, "/api/runner/tasks/claim", `{"target":"linux"}`)
+	assertStatus(t, response, http.StatusBadRequest)
+
+	response = doRequest(t, server, http.MethodPost, "/api/runner/heartbeat", `{"buildId":"runner-fails"}`)
+	assertStatus(t, response, http.StatusBadRequest)
+
+	response = doRequest(t, server, http.MethodPost, "/api/runner/heartbeat", `{"runnerId":"runner-1","buildId":"missing"}`)
+	assertStatus(t, response, http.StatusNotFound)
+
+	response = doRequest(t, server, http.MethodPost, "/api/runner/heartbeat", `{"runnerId":"runner-1"}`)
+	assertStatus(t, response, http.StatusOK)
+
+	response = doRequest(t, server, http.MethodPost, "/api/runner/tasks/runner-fails/complete", `{`)
+	assertStatus(t, response, http.StatusBadRequest)
+
+	response = doRequest(t, server, http.MethodPost, "/api/runner/tasks/already-succeeded/complete", `{"status":"succeeded"}`)
+	assertStatus(t, response, http.StatusConflict)
+	apiErr := decodeAPIError(t, response)
+	if apiErr.Error.Code != "BUILD_STATE_CONFLICT" {
+		t.Fatalf("expected complete state conflict, got %#v", apiErr)
+	}
+
+	response = doRequest(t, server, http.MethodPost, "/api/runner/tasks/runner-fails/complete", `{"status":"failed","error":"unit test failure"}`)
+	assertStatus(t, response, http.StatusOK)
+	var failed domain.Build
+	decodeJSON(t, response, &failed)
+	if failed.Status != domain.BuildFailed || failed.Error != "unit test failure" {
+		t.Fatalf("expected failed completion, got %#v", failed)
+	}
+
+	response = doRequest(t, server, http.MethodPost, "/api/uploads", `{}`)
+	assertStatus(t, response, http.StatusBadRequest)
+}
+
+func TestNormalizeLegacyUploadRecordDefaultsDownloadPolicy(t *testing.T) {
+	now := time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC)
+	record := normalizeUploadRecord(domain.UploadRecord{
+		ID:              "legacy-upload",
+		FileName:        "legacy.tar.gz",
+		RetentionDays:   0,
+		RetentionStatus: "",
+	}, now)
+
+	if record.DownloadPolicy != "platform" {
+		t.Fatalf("expected default platform policy, got %#v", record)
+	}
+	if record.RetentionStatus != "permanent" {
+		t.Fatalf("expected legacy zero retention to remain permanent, got %#v", record)
+	}
+}
+
 func uploadRequest(t *testing.T, handler http.Handler, filename string, content string) *httptest.ResponseRecorder {
+	return uploadRequestWithFields(t, handler, filename, content, nil)
+}
+
+func uploadRequestWithFields(t *testing.T, handler http.Handler, filename string, content string, fields map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
+	for key, value := range fields {
+		if err := writer.WriteField(key, value); err != nil {
+			t.Fatal(err)
+		}
+	}
 	part, err := writer.CreateFormFile("file", filename)
 	if err != nil {
 		t.Fatal(err)

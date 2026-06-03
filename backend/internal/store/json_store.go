@@ -270,7 +270,7 @@ func (s *JSONStore) ClaimBuild(target string, runnerID string) (domain.Build, bo
 		builds[index].UpdatedAt = nowUTC()
 		builds[index].Logs = append(builds[index].Logs, domain.BuildLog{
 			Time:    nowUTC(),
-			Source:  "runner",
+			Source:  runnerID,
 			Message: fmt.Sprintf("claimed by runner %s", runnerID),
 		})
 		if err := s.writeBuildsLocked(builds); err != nil {

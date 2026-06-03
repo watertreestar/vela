@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -90,6 +91,10 @@ func TestManifestRoutesValidateDryRunAndRestore(t *testing.T) {
 	response := doRequest(t, server, http.MethodPut, "/api/products/lsap/manifest", `{"id":"lsap","name":"Broken"}`)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("expected invalid manifest status 400, got %d: %s", response.Code, response.Body.String())
+	}
+	apiErr := decodeAPIError(t, response)
+	if apiErr.Error.Code != "MANIFEST_SCHEMA_INVALID" || len(apiErr.Error.Details) == 0 {
+		t.Fatalf("expected structured manifest error, got %#v", apiErr)
 	}
 
 	updated := `{
@@ -239,6 +244,14 @@ func TestAPIUsesRichFixtureProductsOverlaysAndBuildData(t *testing.T) {
 	if !hasBuildStatus(builds, "vision-running", domain.BuildRunning) {
 		t.Fatalf("expected running build in list, got %#v", builds)
 	}
+	for _, build := range builds {
+		if build.ReleaseCheckSummary == nil || build.ReleaseCheckSummary.BuildID != build.ID {
+			t.Fatalf("expected release check summary for build %s, got %#v", build.ID, build.ReleaseCheckSummary)
+		}
+		if build.ID == "vision-release-ready" && !build.ReleaseCheckSummary.ReleaseReady {
+			t.Fatalf("expected release-ready summary, got %#v", build.ReleaseCheckSummary)
+		}
+	}
 
 	response = doRequest(t, server, http.MethodGet, "/api/builds/vision-release-ready/release-check", "")
 	if response.Code != http.StatusOK {
@@ -251,6 +264,238 @@ func TestAPIUsesRichFixtureProductsOverlaysAndBuildData(t *testing.T) {
 	if !check.ReleaseReady || check.BlockingCount != 0 {
 		t.Fatalf("expected seeded release build to be ready, got %#v", check)
 	}
+}
+
+func TestAPIReadEndpointsExposeProductsBuildsLocksAndUploads(t *testing.T) {
+	store, _ := newTestServerStore(t)
+	server := NewServer(store, nil, nil).Routes()
+	now := time.Now().UTC()
+	build := releaseReadyBuild("read-build", "lsap", "linux", "qa", "1.0.0", now)
+	if err := store.SaveBuild(build); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveUploadRecord(domain.UploadRecord{
+		ID:             "upload-read",
+		FileName:       "read-package.tar.gz",
+		URI:            "local-upload://upload-read/read-package.tar.gz",
+		DownloadURL:    "http://api.test/api/uploads/upload-read/download",
+		SHA256:         "sha256-read",
+		Size:           128,
+		DownloadPolicy: "",
+		RetentionDays:  0,
+		CreatedAt:      now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	response := doRequest(t, server, http.MethodGet, "/api/products/lsap", "")
+	assertStatus(t, response, http.StatusOK)
+	var product domain.Product
+	decodeJSON(t, response, &product)
+	if product.ID != "lsap" || len(product.Targets) != 2 {
+		t.Fatalf("unexpected product response: %#v", product)
+	}
+
+	response = doRequest(t, server, http.MethodGet, "/api/products/lsap/manifest", "")
+	assertStatus(t, response, http.StatusOK)
+	var manifest map[string]any
+	decodeJSON(t, response, &manifest)
+	if manifest["id"] != "lsap" {
+		t.Fatalf("unexpected manifest response: %#v", manifest)
+	}
+
+	response = doRequest(t, server, http.MethodGet, "/api/products/lsap/versions", "")
+	assertStatus(t, response, http.StatusOK)
+	var versionsResponse struct {
+		Versions []string `json:"versions"`
+	}
+	decodeJSON(t, response, &versionsResponse)
+	if len(versionsResponse.Versions) != 2 || versionsResponse.Versions[0] != "latest" {
+		t.Fatalf("unexpected versions response: %#v", versionsResponse)
+	}
+
+	response = doRequest(t, server, http.MethodGet, "/api/builds/read-build", "")
+	assertStatus(t, response, http.StatusOK)
+	var readBuild domain.Build
+	decodeJSON(t, response, &readBuild)
+	if readBuild.ID != "read-build" || readBuild.ReleaseCheckSummary == nil || !readBuild.ReleaseCheckSummary.ReleaseReady {
+		t.Fatalf("unexpected build response: %#v", readBuild)
+	}
+
+	response = doRequest(t, server, http.MethodGet, "/api/builds/read-build/lock", "")
+	assertStatus(t, response, http.StatusOK)
+	var lock domain.BuildLock
+	decodeJSON(t, response, &lock)
+	if lock.BuildID != "read-build" || lock.ProductID != "lsap" {
+		t.Fatalf("unexpected lock response: %#v", lock)
+	}
+
+	response = doRequest(t, server, http.MethodGet, "/api/uploads", "")
+	assertStatus(t, response, http.StatusOK)
+	var uploads []domain.UploadRecord
+	decodeJSON(t, response, &uploads)
+	if len(uploads) != 1 || uploads[0].DownloadPolicy != "platform" || uploads[0].RetentionStatus != "permanent" {
+		t.Fatalf("unexpected uploads response: %#v", uploads)
+	}
+
+	response = doRequest(t, server, http.MethodGet, "/api/products/missing", "")
+	assertStatus(t, response, http.StatusNotFound)
+}
+
+func TestAPIDownloadCreateAndLogStreamBoundaries(t *testing.T) {
+	store, _ := newTestServerStore(t)
+	server := NewServer(store, nil, nil).Routes()
+	now := time.Now().UTC()
+	artifactOnly := domain.Build{
+		ID:          "artifact-only",
+		ProductID:   "lsap",
+		Target:      "linux",
+		Profile:     "qa",
+		Version:     "1.0.0",
+		Status:      domain.BuildSucceeded,
+		ArtifactURI: "minio://packages/artifact-only.tar.gz",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	noArtifact := domain.Build{
+		ID:        "no-artifact",
+		ProductID: "lsap",
+		Target:    "linux",
+		Profile:   "qa",
+		Version:   "1.0.0",
+		Status:    domain.BuildSucceeded,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	logged := domain.Build{
+		ID:        "logged",
+		ProductID: "lsap",
+		Target:    "linux",
+		Profile:   "qa",
+		Version:   "1.0.0",
+		Status:    domain.BuildRunning,
+		Logs:      []domain.BuildLog{{Time: now, Source: "runner-1", Message: "first log"}},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	for _, build := range []domain.Build{artifactOnly, noArtifact, logged} {
+		if err := store.SaveBuild(build); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	response := doRequest(t, server, http.MethodGet, "/api/builds/artifact-only/download", "")
+	assertStatus(t, response, http.StatusOK)
+	var artifact map[string]string
+	decodeJSON(t, response, &artifact)
+	if artifact["artifactUri"] != "minio://packages/artifact-only.tar.gz" {
+		t.Fatalf("unexpected artifact download response: %#v", artifact)
+	}
+
+	response = doRequest(t, server, http.MethodGet, "/api/builds/no-artifact/download", "")
+	assertStatus(t, response, http.StatusNotFound)
+
+	response = doRequest(t, server, http.MethodPost, "/api/builds", `{`)
+	assertStatus(t, response, http.StatusBadRequest)
+	apiErr := decodeAPIError(t, response)
+	if apiErr.Error.Code != "VALIDATION_INVALID_JSON" {
+		t.Fatalf("expected invalid json error, got %#v", apiErr)
+	}
+
+	response = doRequest(t, server, http.MethodPost, "/api/builds", `{"productId":"lsap"}`)
+	assertStatus(t, response, http.StatusBadRequest)
+	apiErr = decodeAPIError(t, response)
+	if apiErr.Error.Code != "VALIDATION_REQUIRED_FIELD" || len(apiErr.Error.Details) != 2 {
+		t.Fatalf("expected required field error, got %#v", apiErr)
+	}
+
+	response = doRequest(t, server, http.MethodPost, "/api/builds/logged/logs", `{"message":"default source"}`)
+	assertStatus(t, response, http.StatusOK)
+	var logs []domain.BuildLog
+	decodeJSON(t, response, &logs)
+	if logs[len(logs)-1].Source != "runner" {
+		t.Fatalf("expected default log source, got %#v", logs)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest(http.MethodGet, "/api/builds/logged/logs/stream?follow=true", nil).WithContext(ctx)
+	response = httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	assertStatus(t, response, http.StatusOK)
+	if !strings.Contains(response.Body.String(), "event: log") {
+		t.Fatalf("expected followed stream to emit existing log, got %s", response.Body.String())
+	}
+
+	response = doRequest(t, server, http.MethodGet, "/api/builds/missing/logs/stream", "")
+	assertStatus(t, response, http.StatusOK)
+	if !strings.Contains(response.Body.String(), "event: error") {
+		t.Fatalf("expected stream error for missing build, got %s", response.Body.String())
+	}
+}
+
+func TestAPIManifestDryRunAndMissingResourceBoundaries(t *testing.T) {
+	store, _ := newTestServerStore(t)
+	server := NewServer(store, nil, nil).Routes()
+
+	response := doRequest(t, server, http.MethodPut, "/api/products/lsap/manifest", `{`)
+	assertStatus(t, response, http.StatusBadRequest)
+	apiErr := decodeAPIError(t, response)
+	if apiErr.Error.Code != "VALIDATION_INVALID_JSON" {
+		t.Fatalf("expected manifest invalid json error, got %#v", apiErr)
+	}
+
+	response = doRequest(t, server, http.MethodPost, "/api/products/lsap/manifest/dry-run", `{`)
+	assertStatus(t, response, http.StatusBadRequest)
+	apiErr = decodeAPIError(t, response)
+	if apiErr.Error.Code != "VALIDATION_INVALID_JSON" {
+		t.Fatalf("expected dry-run invalid json error, got %#v", apiErr)
+	}
+
+	response = doRequest(t, server, http.MethodPost, "/api/products/missing/manifest/dry-run", `{}`)
+	assertStatus(t, response, http.StatusNotFound)
+
+	response = doRequest(t, server, http.MethodPost, "/api/products/lsap/manifest/dry-run", `{"manifest":{"id":"broken"}}`)
+	assertStatus(t, response, http.StatusOK)
+	var dryRun domain.ManifestDryRunResult
+	decodeJSON(t, response, &dryRun)
+	if dryRun.Valid || len(dryRun.Errors) == 0 {
+		t.Fatalf("expected invalid dry-run result, got %#v", dryRun)
+	}
+
+	manualManifest := `{
+	  "id":"lsap",
+	  "name":"LSAP",
+	  "targets":["linux"],
+	  "targetConfig":{"linux":{"installDir":"/opt/lsap","packageName":"lsap-linux"}},
+	  "profiles":["qa"],
+	  "versions":["1.0.0"],
+	  "components":[{"id":"license","type":"file","required":true,"source":{"kind":"manual-upload","uploadId":"missing-upload"}}],
+	  "config":{}
+	}`
+	response = doRequest(t, server, http.MethodPost, "/api/products/lsap/manifest/dry-run", `{"manifest":`+manualManifest+`}`)
+	assertStatus(t, response, http.StatusOK)
+	decodeJSON(t, response, &dryRun)
+	if dryRun.Valid || len(dryRun.Errors) == 0 {
+		t.Fatalf("expected resolver dry-run error, got %#v", dryRun)
+	}
+
+	missingGets := []string{
+		"/api/products/missing/manifest",
+		"/api/products/missing/versions",
+		"/api/products/lsap/overlays/customers/missing",
+		"/api/builds/missing",
+		"/api/builds/missing/lock",
+		"/api/builds/missing/release-check",
+		"/api/builds/missing/logs",
+	}
+	for _, path := range missingGets {
+		response = doRequest(t, server, http.MethodGet, path, "")
+		assertStatus(t, response, http.StatusNotFound)
+	}
+
+	response = doRequest(t, server, http.MethodPost, "/api/products/lsap/manifest/revisions/missing/restore", "")
+	assertStatus(t, response, http.StatusBadRequest)
 }
 
 func TestPreviewValidationRequiredBeforeRelease(t *testing.T) {
@@ -289,8 +534,12 @@ func TestPreviewValidationRequiredBeforeRelease(t *testing.T) {
 	}
 
 	response := doRequest(t, server, http.MethodPost, "/api/builds/build-preview/publish", `{}`)
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("expected publish before validation status 400, got %d: %s", response.Code, response.Body.String())
+	if response.Code != http.StatusConflict {
+		t.Fatalf("expected publish before validation status 409, got %d: %s", response.Code, response.Body.String())
+	}
+	apiErr := decodeAPIError(t, response)
+	if apiErr.Error.Code != "BUILD_STATE_CONFLICT" {
+		t.Fatalf("expected state conflict error, got %#v", apiErr)
 	}
 
 	response = doRequest(t, server, http.MethodPost, "/api/builds/build-preview/validate-preview", "")
@@ -408,11 +657,12 @@ func TestValidatePreviewRejectsMismatchedBuildLock(t *testing.T) {
 	}
 
 	response := doRequest(t, server, http.MethodPost, "/api/builds/build-mismatch/validate-preview", "")
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("expected mismatched lock status 400, got %d: %s", response.Code, response.Body.String())
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected mismatched lock status 422, got %d: %s", response.Code, response.Body.String())
 	}
-	if !strings.Contains(response.Body.String(), "Build Lock") {
-		t.Fatalf("unexpected error: %s", response.Body.String())
+	apiErr := decodeAPIError(t, response)
+	if apiErr.Error.Code != "BUILD_PREVIEW_NOT_READY" || !hasAPIErrorDetail(apiErr.Error.Details, "preview.lock-identity") {
+		t.Fatalf("expected preview gate error details, got %#v", apiErr)
 	}
 }
 
@@ -429,6 +679,10 @@ func TestCreateBuildRejectsDirectReleaseChannel(t *testing.T) {
 	)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("expected direct release create status 400, got %d: %s", response.Code, response.Body.String())
+	}
+	apiErr := decodeAPIError(t, response)
+	if apiErr.Error.Code != "BUILD_CREATE_INVALID_RELEASE_CHANNEL" {
+		t.Fatalf("expected direct release channel error, got %#v", apiErr)
 	}
 }
 
@@ -468,12 +722,77 @@ func TestPublishRejectsNonReproducibleRelease(t *testing.T) {
 	}
 
 	response := doRequest(t, server, http.MethodPost, "/api/builds/build-latest/publish", `{}`)
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("expected non-reproducible publish status 400, got %d: %s", response.Code, response.Body.String())
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected non-reproducible publish status 422, got %d: %s", response.Code, response.Body.String())
 	}
-	if !strings.Contains(response.Body.String(), "fixed build version") {
-		t.Fatalf("unexpected error: %s", response.Body.String())
+	apiErr := decodeAPIError(t, response)
+	if apiErr.Error.Code != "BUILD_RELEASE_GATE_BLOCKED" || !hasAPIErrorDetail(apiErr.Error.Details, "release.fixed-version") {
+		t.Fatalf("expected release gate error details, got %#v", apiErr)
 	}
+}
+
+func TestAPIHelperBoundaries(t *testing.T) {
+	if defaultErrorCode(http.StatusGone) != "ARTIFACT_EXPIRED" {
+		t.Fatalf("unexpected gone error code")
+	}
+	if defaultErrorCode(http.StatusUnprocessableEntity) != "BUSINESS_RULE_FAILED" {
+		t.Fatalf("unexpected unprocessable error code")
+	}
+	if defaultErrorCode(http.StatusServiceUnavailable) != "UPSTREAM_UNAVAILABLE" {
+		t.Fatalf("unexpected upstream error code")
+	}
+	if defaultErrorCode(http.StatusInternalServerError) != "SYSTEM_INTERNAL_ERROR" {
+		t.Fatalf("unexpected internal error code")
+	}
+	if defaultErrorCode(http.StatusTooManyRequests) != "REQUEST_FAILED" {
+		t.Fatalf("unexpected generic error code")
+	}
+
+	now := time.Now().UTC()
+	if runnerAvailability(domain.RunnerStatus{RunningBuilds: 1, LastHeartbeatAt: &now}, now) != "busy" {
+		t.Fatalf("expected busy runner")
+	}
+	staleHeartbeat := now.Add(-10 * time.Minute)
+	if runnerAvailability(domain.RunnerStatus{RunningBuilds: 1, LastHeartbeatAt: &staleHeartbeat}, now) != "stale" {
+		t.Fatalf("expected stale runner")
+	}
+	if runnerAvailability(domain.RunnerStatus{RunningBuilds: 1}, now) != "unknown" {
+		t.Fatalf("expected unknown runner")
+	}
+	if runnerAvailability(domain.RunnerStatus{LastLogAt: &now}, now) != "online" {
+		t.Fatalf("expected online runner")
+	}
+	if runnerAvailability(domain.RunnerStatus{LastHeartbeatAt: &staleHeartbeat}, now) != "offline" {
+		t.Fatalf("expected offline runner")
+	}
+	if runnerAvailability(domain.RunnerStatus{}, now) != "idle" {
+		t.Fatalf("expected idle runner")
+	}
+
+	if normalizedDownloadPolicy("PUBLIC") != "public" || normalizedDownloadPolicy("bad") != "platform" {
+		t.Fatalf("unexpected download policy normalization")
+	}
+	if parseRetentionDays("", -1) != 30 || parseRetentionDays("not-a-number", 7) != 30 || parseRetentionDays("99999", 7) != 3650 {
+		t.Fatalf("unexpected retention day parsing")
+	}
+}
+
+func decodeAPIError(t *testing.T, response *httptest.ResponseRecorder) domain.APIErrorResponse {
+	t.Helper()
+	var apiErr domain.APIErrorResponse
+	if err := json.NewDecoder(response.Body).Decode(&apiErr); err != nil {
+		t.Fatal(err)
+	}
+	return apiErr
+}
+
+func hasAPIErrorDetail(details []domain.APIErrorDetail, code string) bool {
+	for _, detail := range details {
+		if detail.Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 func hasReleaseCheck(checks []domain.ReleaseCheckItem, id string, status string) bool {

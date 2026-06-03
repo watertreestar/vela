@@ -151,6 +151,18 @@ type ReleaseCheckResult struct {
 	Checks        []ReleaseCheckItem `json:"checks"`
 }
 
+type ReleaseCheckSummary struct {
+	BuildID            string `json:"buildId"`
+	Stage              string `json:"stage"`
+	PreviewReady       bool   `json:"previewReady"`
+	ReleaseReady       bool   `json:"releaseReady"`
+	BlockingCount      int    `json:"blockingCount"`
+	FirstBlockedID     string `json:"firstBlockedId,omitempty"`
+	FirstBlockedStage  string `json:"firstBlockedStage,omitempty"`
+	FirstBlockedTitle  string `json:"firstBlockedTitle,omitempty"`
+	FirstBlockedReason string `json:"firstBlockedReason,omitempty"`
+}
+
 type ReleaseCheckItem struct {
 	ID     string `json:"id"`
 	Stage  string `json:"stage"`
@@ -159,40 +171,66 @@ type ReleaseCheckItem struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+type APIErrorDetail struct {
+	Code    string `json:"code,omitempty"`
+	Field   string `json:"field,omitempty"`
+	Stage   string `json:"stage,omitempty"`
+	Title   string `json:"title,omitempty"`
+	Message string `json:"message"`
+}
+
+type APIError struct {
+	Code       string           `json:"code"`
+	Message    string           `json:"message"`
+	Severity   string           `json:"severity"`
+	Category   string           `json:"category"`
+	Retryable  bool             `json:"retryable"`
+	UserAction string           `json:"userAction,omitempty"`
+	RequestID  string           `json:"requestId,omitempty"`
+	Details    []APIErrorDetail `json:"details,omitempty"`
+}
+
+type APIErrorResponse struct {
+	Error  APIError `json:"error"`
+	Errors []string `json:"errors,omitempty"`
+}
+
 type Build struct {
-	ID             string              `json:"id"`
-	ProductID      string              `json:"productId"`
-	Target         string              `json:"target"`
-	Profile        string              `json:"profile"`
-	Customer       string              `json:"customer"`
-	Version        string              `json:"version"`
-	ReleaseChannel string              `json:"releaseChannel"`
-	Status         string              `json:"status"`
-	Attempt        int                 `json:"attempt"`
-	RunnerID       string              `json:"runnerId"`
-	NomadJobID     string              `json:"nomadJobId"`
-	ArtifactURI    string              `json:"artifactUri"`
-	DownloadURL    string              `json:"downloadUrl"`
-	Error          string              `json:"error"`
-	Variables      map[string]any      `json:"variables"`
-	FinalConfig    map[string]any      `json:"finalConfig"`
-	Components     []ResolvedComponent `json:"components"`
-	Workloads      []ResolvedWorkload  `json:"workloads"`
-	BuildLock      BuildLock           `json:"buildLock"`
-	CreatedAt      time.Time           `json:"createdAt"`
-	UpdatedAt      time.Time           `json:"updatedAt"`
-	SchedulerLog   string              `json:"schedulerLog"`
-	Logs           []BuildLog          `json:"logs"`
-	ApprovedAt     *time.Time          `json:"approvedAt,omitempty"`
-	ValidatedAt    *time.Time          `json:"validatedAt,omitempty"`
-	PublishedAt    *time.Time          `json:"publishedAt,omitempty"`
-	CanceledAt     *time.Time          `json:"canceledAt,omitempty"`
+	ID                  string               `json:"id"`
+	ProductID           string               `json:"productId"`
+	Target              string               `json:"target"`
+	Profile             string               `json:"profile"`
+	Customer            string               `json:"customer"`
+	Version             string               `json:"version"`
+	ReleaseChannel      string               `json:"releaseChannel"`
+	Status              string               `json:"status"`
+	Attempt             int                  `json:"attempt"`
+	RunnerID            string               `json:"runnerId"`
+	NomadJobID          string               `json:"nomadJobId"`
+	ArtifactURI         string               `json:"artifactUri"`
+	DownloadURL         string               `json:"downloadUrl"`
+	Error               string               `json:"error"`
+	Variables           map[string]any       `json:"variables"`
+	FinalConfig         map[string]any       `json:"finalConfig"`
+	Components          []ResolvedComponent  `json:"components"`
+	Workloads           []ResolvedWorkload   `json:"workloads"`
+	BuildLock           BuildLock            `json:"buildLock"`
+	CreatedAt           time.Time            `json:"createdAt"`
+	UpdatedAt           time.Time            `json:"updatedAt"`
+	SchedulerLog        string               `json:"schedulerLog"`
+	Logs                []BuildLog           `json:"logs"`
+	ApprovedAt          *time.Time           `json:"approvedAt,omitempty"`
+	ValidatedAt         *time.Time           `json:"validatedAt,omitempty"`
+	PublishedAt         *time.Time           `json:"publishedAt,omitempty"`
+	CanceledAt          *time.Time           `json:"canceledAt,omitempty"`
+	ReleaseCheckSummary *ReleaseCheckSummary `json:"releaseCheckSummary,omitempty"`
 }
 
 type BuildLog struct {
-	Time    time.Time `json:"time"`
-	Source  string    `json:"source"`
-	Message string    `json:"message"`
+	Time     time.Time `json:"time"`
+	Source   string    `json:"source"`
+	Message  string    `json:"message"`
+	Sequence int       `json:"sequence,omitempty"`
 }
 
 type RunnerClaimRequest struct {
@@ -220,13 +258,34 @@ type BuildLogRequest struct {
 }
 
 type UploadRecord struct {
-	ID          string    `json:"id"`
-	FileName    string    `json:"fileName"`
-	URI         string    `json:"uri"`
-	DownloadURL string    `json:"downloadUrl"`
-	SHA256      string    `json:"sha256"`
-	Size        int64     `json:"size"`
-	CreatedAt   time.Time `json:"createdAt"`
+	ID              string            `json:"id"`
+	FileName        string            `json:"fileName"`
+	URI             string            `json:"uri"`
+	DownloadURL     string            `json:"downloadUrl"`
+	SHA256          string            `json:"sha256"`
+	Size            int64             `json:"size"`
+	ContentType     string            `json:"contentType,omitempty"`
+	DownloadPolicy  string            `json:"downloadPolicy"`
+	RetentionDays   int               `json:"retentionDays"`
+	ExpiresAt       *time.Time        `json:"expiresAt,omitempty"`
+	RetentionStatus string            `json:"retentionStatus"`
+	Metadata        map[string]string `json:"metadata,omitempty"`
+	CreatedAt       time.Time         `json:"createdAt"`
+}
+
+type RunnerStatus struct {
+	RunnerID          string     `json:"runnerId"`
+	Target            string     `json:"target,omitempty"`
+	Status            string     `json:"status"`
+	CurrentBuildID    string     `json:"currentBuildId,omitempty"`
+	CurrentBuildState string     `json:"currentBuildState,omitempty"`
+	LastHeartbeatAt   *time.Time `json:"lastHeartbeatAt,omitempty"`
+	LastClaimAt       *time.Time `json:"lastClaimAt,omitempty"`
+	LastLogAt         *time.Time `json:"lastLogAt,omitempty"`
+	RunningBuilds     int        `json:"runningBuilds"`
+	CompletedBuilds   int        `json:"completedBuilds"`
+	FailedBuilds      int        `json:"failedBuilds"`
+	RecentMessages    []BuildLog `json:"recentMessages"`
 }
 
 const (

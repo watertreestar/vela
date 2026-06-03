@@ -101,13 +101,16 @@ func (s *Store) saveLocalUpload(file multipart.File, header *multipart.FileHeade
 	}
 
 	return domain.UploadRecord{
-		ID:          id,
-		FileName:    header.Filename,
-		URI:         fmt.Sprintf("local-upload://%s/%s", id, header.Filename),
-		DownloadURL: fmt.Sprintf("%s/api/uploads/%s/download", s.baseURL, id),
-		SHA256:      hex.EncodeToString(hash.Sum(nil)),
-		Size:        size,
-		CreatedAt:   time.Now().UTC(),
+		ID:             id,
+		FileName:       header.Filename,
+		URI:            fmt.Sprintf("local-upload://%s/%s", id, header.Filename),
+		DownloadURL:    fmt.Sprintf("%s/api/uploads/%s/download", s.baseURL, id),
+		SHA256:         hex.EncodeToString(hash.Sum(nil)),
+		Size:           size,
+		ContentType:    header.Header.Get("Content-Type"),
+		DownloadPolicy: "platform",
+		RetentionDays:  30,
+		CreatedAt:      time.Now().UTC(),
 	}, nil
 }
 
@@ -144,13 +147,16 @@ func (s *Store) saveMinIOUpload(file multipart.File, header *multipart.FileHeade
 	}
 
 	return domain.UploadRecord{
-		ID:          id,
-		FileName:    filename,
-		URI:         fmt.Sprintf("minio://%s/%s", s.bucket, objectName),
-		DownloadURL: fmt.Sprintf("%s/api/uploads/%s/download", s.baseURL, id),
-		SHA256:      hex.EncodeToString(hash.Sum(nil)),
-		Size:        size,
-		CreatedAt:   time.Now().UTC(),
+		ID:             id,
+		FileName:       filename,
+		URI:            fmt.Sprintf("minio://%s/%s", s.bucket, objectName),
+		DownloadURL:    fmt.Sprintf("%s/api/uploads/%s/download", s.baseURL, id),
+		SHA256:         hex.EncodeToString(hash.Sum(nil)),
+		Size:           size,
+		ContentType:    header.Header.Get("Content-Type"),
+		DownloadPolicy: "platform",
+		RetentionDays:  30,
+		CreatedAt:      time.Now().UTC(),
 	}, nil
 }
 

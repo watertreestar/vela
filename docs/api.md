@@ -74,6 +74,7 @@ POST /api/builds
 GET /api/builds/{id}
 GET /api/builds/{id}/download
 GET /api/builds/{id}/logs
+GET /api/builds/{id}/logs/stream
 GET /api/builds/{id}/release-check
 POST /api/builds/{id}/logs
 POST /api/builds/{id}/approve
@@ -142,6 +143,8 @@ Release publishing is gated:
 
 `GET /api/builds/{id}/release-check` returns the shared gate used by preview validation and release publishing:
 
+`GET /api/builds`, `GET /api/builds/{id}`, and build state mutation responses include `releaseCheckSummary` so the admin UI can use the same backend gate for list filters and Release button availability.
+
 ```json
 {
   "buildId": "build-id",
@@ -163,6 +166,19 @@ Release publishing is gated:
 
 Preview validation requires a succeeded preview build, a downloadable artifact, a generated Build Lock whose target/profile/version match the build, and locked URIs for required components. Release publishing additionally requires a validated preview, fixed build and component versions, exact component URIs without wildcards, a downloadable artifact, and no build error.
 
+`GET /api/builds/{id}/logs/stream` returns `text/event-stream` records:
+
+```text
+event: log
+data: {"time":"...","source":"runner-1","message":"downloaded components","sequence":5}
+```
+
+Without query parameters the endpoint emits the current log snapshot and closes. With `?follow=true`, it keeps the connection open and polls for new log records.
+
+## Error Handling
+
+API errors use the structured contract described in [error-handling.md](error-handling.md). New clients should read `error.code`, `error.message`, `error.severity`, and `error.details`; `errors` remains as a compatibility list for validation details.
+
 ## Uploads
 
 ```http
@@ -173,17 +189,74 @@ GET /api/uploads/{id}/download
 
 `POST /api/uploads` accepts multipart field `file` and returns an upload record:
 
+Optional multipart fields:
+
+- `downloadPolicy`: `platform`, `restricted`, or `public`. Authentication is not implemented yet, but the policy is persisted for future enforcement and shown in the admin UI.
+- `retentionDays`: number of days to keep the artifact downloadable. `0` means permanent retention.
+- `metadata.{key}`: arbitrary string metadata, for example `metadata.productId=lsap` or `metadata.purpose=license`.
+
 ```json
 {
   "id": "upload-id",
   "fileName": "license.lic",
   "uri": "local-upload://upload-id/license.lic",
   "downloadUrl": "http://127.0.0.1:8080/api/uploads/upload-id/download",
-  "sha256": "..."
+  "sha256": "...",
+  "size": 2048,
+  "contentType": "application/octet-stream",
+  "downloadPolicy": "restricted",
+  "retentionDays": 7,
+  "expiresAt": "2026-06-10T00:00:00Z",
+  "retentionStatus": "active",
+  "metadata": {
+    "productId": "lsap",
+    "purpose": "license"
+  },
+  "createdAt": "2026-06-03T00:00:00Z"
 }
 ```
 
+`GET /api/uploads` recalculates `retentionStatus` at read time. `GET /api/uploads/{id}/download` returns `410 Gone` with `ARTIFACT_EXPIRED` when the artifact is past `expiresAt`.
+
 ## Runner
+
+Runner observability:
+
+```http
+GET /api/runners
+```
+
+Response is derived from build ownership and job logs:
+
+```json
+[
+  {
+    "runnerId": "linux-builder-01",
+    "target": "linux",
+    "status": "busy",
+    "currentBuildId": "build-id",
+    "currentBuildState": "running",
+    "lastHeartbeatAt": "2026-06-03T00:00:00Z",
+    "lastClaimAt": "2026-06-03T00:00:00Z",
+    "lastLogAt": "2026-06-03T00:00:00Z",
+    "runningBuilds": 1,
+    "completedBuilds": 3,
+    "failedBuilds": 1,
+    "recentMessages": []
+  }
+]
+```
+
+Runner status values:
+
+```text
+busy      running build and heartbeat/log is fresh
+online    no running build but heartbeat/log is fresh
+idle      no heartbeat/log but no active build
+stale     running build without a fresh heartbeat/log
+offline   no active build and heartbeat/log is stale
+unknown   running build without any runner log
+```
 
 Runner claims queued tasks:
 

@@ -148,7 +148,35 @@ const uploads = [
     downloadUrl: "http://localhost:8080/api/uploads/upload-license/download",
     sha256: "abcdef0123456789abcdef0123456789",
     size: 2048,
+    contentType: "application/octet-stream",
+    downloadPolicy: "platform",
+    retentionDays: 30,
+    retentionStatus: "active",
+    metadata: { productId: "lsap", purpose: "license" },
     createdAt: "2026-05-28T06:05:00Z",
+  },
+];
+
+const runners = [
+  {
+    runnerId: "linux-runner-01",
+    target: "linux",
+    status: "busy",
+    currentBuildId: "build-pending-001",
+    currentBuildState: "running",
+    lastHeartbeatAt: "2026-05-28T06:12:00Z",
+    lastLogAt: "2026-05-28T06:12:00Z",
+    runningBuilds: 1,
+    completedBuilds: 2,
+    failedBuilds: 1,
+    recentMessages: [
+      {
+        sequence: 2,
+        time: "2026-05-28T06:12:00Z",
+        source: "linux-runner-01",
+        message: "heartbeat: active",
+      },
+    ],
   },
 ];
 
@@ -178,6 +206,25 @@ function releaseCheckFor(build) {
         reason: fixedVersion ? "" : "release requires a fixed build version",
       },
     ],
+  };
+}
+
+function withReleaseSummary(build) {
+  const check = releaseCheckFor(build);
+  const firstBlocked = check.checks.find((item) => item.status === "blocked");
+  return {
+    ...build,
+    releaseCheckSummary: {
+      buildId: build.id,
+      stage: check.stage,
+      previewReady: check.previewReady,
+      releaseReady: check.releaseReady,
+      blockingCount: check.blockingCount,
+      firstBlockedId: firstBlocked?.id || "",
+      firstBlockedStage: firstBlocked?.stage || "",
+      firstBlockedTitle: firstBlocked?.title || "",
+      firstBlockedReason: firstBlocked?.reason || "",
+    },
   };
 }
 
@@ -229,10 +276,13 @@ function setupFetch() {
       return jsonResponse([product]);
     }
     if (method === "GET" && path === "/api/builds") {
-      return jsonResponse(state.builds);
+      return jsonResponse(state.builds.map(withReleaseSummary));
     }
     if (method === "GET" && path === "/api/uploads") {
       return jsonResponse(uploads);
+    }
+    if (method === "GET" && path === "/api/runners") {
+      return jsonResponse(runners);
     }
     if (method === "GET" && path === "/api/products/lsap/manifest") {
       return jsonResponse(product);
@@ -338,7 +388,7 @@ function setupFetch() {
         buildLock: { ...baseBuildLock, buildId: "build-created-003", config: payload.configOverrides },
       };
       state.builds = [created, ...state.builds];
-      return jsonResponse(created, 202);
+      return jsonResponse(withReleaseSummary(created), 202);
     }
     if (method === "GET" && path === "/api/builds/build-created-003/logs") {
       return jsonResponse([
@@ -358,12 +408,12 @@ function setupFetch() {
     if (method === "POST" && path === "/api/builds/build-pending-001/approve") {
       const approved = { ...state.builds.find((build) => build.id === "build-pending-001"), status: "queued" };
       state.builds = state.builds.map((build) => (build.id === approved.id ? approved : build));
-      return jsonResponse(approved);
+      return jsonResponse(withReleaseSummary(approved));
     }
     if (method === "POST" && path === "/api/builds/build-pending-001/cancel") {
       const canceled = { ...state.builds.find((build) => build.id === "build-pending-001"), status: "canceled" };
       state.builds = state.builds.map((build) => (build.id === canceled.id ? canceled : build));
-      return jsonResponse(canceled);
+      return jsonResponse(withReleaseSummary(canceled));
     }
     if (method === "POST" && path === "/api/builds/build-success-002/validate-preview") {
       const validated = {
@@ -373,7 +423,7 @@ function setupFetch() {
         validatedAt: "2026-05-28T06:40:00Z",
       };
       state.builds = state.builds.map((build) => (build.id === validated.id ? validated : build));
-      return jsonResponse(validated);
+      return jsonResponse(withReleaseSummary(validated));
     }
     if (method === "POST" && path === "/api/builds/build-success-002/publish") {
       const published = {
@@ -383,7 +433,7 @@ function setupFetch() {
         publishedAt: "2026-05-28T06:45:00Z",
       };
       state.builds = state.builds.map((build) => (build.id === published.id ? published : build));
-      return jsonResponse(published);
+      return jsonResponse(withReleaseSummary(published));
     }
 
     return jsonResponse({ error: `Unhandled ${method} ${path}` }, 500);
@@ -424,6 +474,18 @@ describe("Packaging dashboard", () => {
     expect(screen.getAllByText("Preview 已生成").length).toBeGreaterThan(0);
   });
 
+  it("only shows refresh success feedback for manual refresh", async () => {
+    const user = userEvent.setup();
+    renderApp();
+
+    expect(await screen.findByRole("heading", { name: "总览" })).toBeInTheDocument();
+    expect(screen.queryByText("数据已刷新")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /^刷新$/ }));
+
+    expect(await screen.findByText("数据已刷新")).toBeInTheDocument();
+  });
+
   it("opens build detail and displays logs plus build lock data", async () => {
     const user = userEvent.setup();
     renderApp();
@@ -439,7 +501,7 @@ describe("Packaging dashboard", () => {
     await user.click(screen.getByRole("tab", { name: /日志/ }));
     expect(screen.getByText("build request created and waiting for approval")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("tab", { name: /Build Lock/ }));
+    await user.click(screen.getByRole("tab", { name: /构建锁/ }));
     expect(screen.getByText(/minio:\/\/packaging\/location-guard.tar.gz/)).toBeInTheDocument();
   });
 
@@ -476,6 +538,12 @@ describe("Packaging dashboard", () => {
     await user.type(screen.getByLabelText("Web 端口"), "49000");
     await user.clear(screen.getByLabelText("客户名称"));
     await user.type(screen.getByLabelText("客户名称"), "测试客户");
+    const variablesEditor = screen
+      .getAllByRole("textbox")
+      .find((element) => element.tagName === "TEXTAREA" && element.value === "{}");
+    fireEvent.change(variablesEditor, {
+      target: { value: '{"ports":{"web":49999},"releaseNote":"nightly smoke"}' },
+    });
 
     await user.click(screen.getByRole("button", { name: /提交构建申请/ }));
 
@@ -494,7 +562,12 @@ describe("Packaging dashboard", () => {
           license: "community",
         },
       },
+      variables: {
+        ports: { web: 49999 },
+        releaseNote: "nightly smoke",
+      },
     });
+    expect(state.createPayloads[0].configOverrides.ports.web).toBe(49000);
     expect(await screen.findByText("构建请求已创建，等待审批")).toBeInTheDocument();
   });
 
@@ -516,6 +589,41 @@ describe("Packaging dashboard", () => {
     expect(await screen.findByText("Manifest 已保存")).toBeInTheDocument();
   });
 
+  it("renders structured API error details in the page alert", async () => {
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn((url, options = {}) => {
+      const parsed = new URL(String(url));
+      if ((options.method || "GET") === "PUT" && parsed.pathname === "/api/products/lsap/manifest") {
+        return jsonResponse(
+          {
+            error: {
+              code: "MANIFEST_SCHEMA_INVALID",
+              message: "Manifest 校验失败",
+              severity: "error",
+              category: "validation",
+              userAction: "请修复 Manifest 校验错误后再保存",
+              details: [{ code: "manifest.targetConfig", message: "缺少 targetConfig.windows" }],
+            },
+          },
+          400,
+        );
+      }
+      return originalFetch(url, options);
+    });
+
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "总览" });
+    await user.click(screen.getByRole("button", { name: /产品配置/ }));
+    await screen.findByText("Manifest 编辑器");
+    await user.click(screen.getByRole("button", { name: "保存 Manifest" }));
+
+    expect(await screen.findByText("Manifest 校验失败")).toBeInTheDocument();
+    expect(screen.getByText("缺少 targetConfig.windows")).toBeInTheDocument();
+    expect(screen.getByText("请修复 Manifest 校验错误后再保存")).toBeInTheDocument();
+  });
+
   it("shows manifest validation errors before saving invalid JSON structure", async () => {
     const user = userEvent.setup();
     renderApp();
@@ -532,6 +640,23 @@ describe("Packaging dashboard", () => {
     expect(screen.getByText(/缺少必填字段 name/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "保存 Manifest" }));
     expect(await screen.findByText(/Manifest 校验失败/)).toBeInTheDocument();
+  });
+
+  it("shows JSON parse errors in the manifest validation tab", async () => {
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "总览" });
+    await user.click(screen.getByRole("button", { name: /产品配置/ }));
+    const manifestEditor = screen
+      .getAllByRole("textbox")
+      .find((element) => element.value.includes('"id": "lsap"'));
+
+    fireEvent.change(manifestEditor, { target: { value: '{"id":"broken"' } });
+    await user.click(screen.getByRole("tab", { name: /校验/ }));
+
+    expect(screen.getByText(/JSON 解析错误/)).toBeInTheDocument();
+    expect(screen.queryByText(/缺少必填字段 name/)).not.toBeInTheDocument();
   });
 
   it("edits common manifest fields with the structured editor", async () => {
@@ -556,11 +681,11 @@ describe("Packaging dashboard", () => {
     await screen.findByRole("heading", { name: "总览" });
     await user.click(screen.getByRole("button", { name: /产品配置/ }));
 
-    await user.click(screen.getByRole("tab", { name: /Dry Run/ }));
-    await user.click(screen.getByRole("button", { name: /Dry Run/ }));
+    await user.click(screen.getByRole("tab", { name: /试运行/ }));
+    await user.click(screen.getByRole("button", { name: /试运行/ }));
 
-    expect(await screen.findByText("Dry Run 通过，Build Lock 可生成。")).toBeInTheDocument();
-    expect(screen.getByText("Build Lock 预览")).toBeInTheDocument();
+    expect(await screen.findByText("试运行通过，构建锁可生成。")).toBeInTheDocument();
+    expect(screen.getByText("构建锁预览")).toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: /历史/ }));
     expect(await screen.findByText("20260528170000-aabbccddee")).toBeInTheDocument();
@@ -594,6 +719,36 @@ describe("Packaging dashboard", () => {
     });
   });
 
+  it("shows build state conflicts as toast feedback", async () => {
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn((url, options = {}) => {
+      const parsed = new URL(String(url));
+      if ((options.method || "GET") === "POST" && parsed.pathname === "/api/builds/build-pending-001/approve") {
+        return jsonResponse(
+          {
+            error: {
+              code: "BUILD_STATE_CONFLICT",
+              message: "only pending or rejected builds can be approved",
+              severity: "warning",
+              category: "business",
+            },
+          },
+          409,
+        );
+      }
+      return originalFetch(url, options);
+    });
+
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "总览" });
+    await user.click(screen.getByRole("button", { name: /构建记录/ }));
+    await user.click(screen.getAllByRole("button", { name: "通过" })[0]);
+
+    expect(await screen.findByText("only pending or rejected builds can be approved")).toBeInTheDocument();
+  });
+
   it("requires preview validation before promoting a build to release", async () => {
     const user = userEvent.setup();
     renderApp();
@@ -602,10 +757,10 @@ describe("Packaging dashboard", () => {
     await user.click(screen.getByRole("button", { name: /构建记录/ }));
 
     expect(screen.queryByRole("button", { name: "Release" })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "验证" }));
+    await user.click(screen.getAllByRole("button", { name: "验证" })[0]);
     expect(await screen.findByText("已验证 Preview")).toBeInTheDocument();
 
-    await user.click(await screen.findByRole("button", { name: "Release" }));
+    await user.click((await screen.findAllByRole("button", { name: "Release" }))[0]);
     expect(await screen.findByRole("dialog")).toHaveTextContent("确认转 Release");
     await user.click(screen.getByRole("button", { name: "确认转 Release" }));
 
@@ -616,6 +771,49 @@ describe("Packaging dashboard", () => {
       );
     });
     expect(await screen.findByText("已转 Release")).toBeInTheDocument();
+  });
+
+  it("renders backend release gate failures when promotion is rejected", async () => {
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn((url, options = {}) => {
+      const parsed = new URL(String(url));
+      if ((options.method || "GET") === "POST" && parsed.pathname === "/api/builds/build-success-002/publish") {
+        return jsonResponse(
+          {
+            error: {
+              code: "BUILD_RELEASE_GATE_BLOCKED",
+              message: "Release 门禁未通过",
+              severity: "warning",
+              category: "business",
+              userAction: "请先修复阻塞项后再发布",
+              details: [
+                {
+                  code: "release.exact-component-uris",
+                  stage: "release",
+                  title: "组件 URI 精确",
+                  message: "release requires exact component URIs without wildcards",
+                },
+              ],
+            },
+          },
+          422,
+        );
+      }
+      return originalFetch(url, options);
+    });
+
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "总览" });
+    await user.click(screen.getByRole("button", { name: /构建记录/ }));
+    await user.click(screen.getAllByRole("button", { name: "验证" })[0]);
+    await user.click((await screen.findAllByRole("button", { name: "Release" }))[0]);
+    await user.click(screen.getByRole("button", { name: "确认转 Release" }));
+
+    expect(await screen.findByText("Release 门禁未通过")).toBeInTheDocument();
+    expect(screen.getByText(/组件 URI 精确：组件 URI 不能包含通配符/)).toBeInTheDocument();
+    expect(screen.getByText("请先修复阻塞项后再发布")).toBeInTheDocument();
   });
 
   it("uses backend build download endpoint when only artifact URI is available", async () => {
@@ -630,6 +828,24 @@ describe("Packaging dashboard", () => {
     );
   });
 
+  it("shows artifact metadata, retention and runner observability", async () => {
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "总览" });
+    await user.click(screen.getByRole("button", { name: /制品上传/ }));
+
+    expect(await screen.findByText("平台内")).toBeInTheDocument();
+    expect(screen.getByText(/productId=lsap/)).toBeInTheDocument();
+    expect(screen.getByText(/purpose=license/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Runner 监控/ }));
+
+    expect(await screen.findByText("linux-runner-01")).toBeInTheDocument();
+    expect(screen.getByText("忙碌")).toBeInTheDocument();
+    expect(screen.getByText("heartbeat: active")).toBeInTheDocument();
+  });
+
   it("filters build records with operator status chips", async () => {
     const user = userEvent.setup();
     renderApp();
@@ -637,16 +853,16 @@ describe("Packaging dashboard", () => {
     await screen.findByRole("heading", { name: "总览" });
     await user.click(screen.getByRole("button", { name: /构建记录/ }));
 
-    expect(screen.getByText("build-pendin")).toBeInTheDocument();
-    expect(screen.getByText("build-succes")).toBeInTheDocument();
+    expect(screen.getAllByText("build-pendin").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("build-succes").length).toBeGreaterThan(0);
 
     await user.click(screen.getByRole("button", { name: /筛选：待处理/ }));
-    expect(screen.getByText("build-pendin")).toBeInTheDocument();
+    expect(screen.getAllByText("build-pendin").length).toBeGreaterThan(0);
     expect(screen.queryByText("build-succes")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /筛选：待验证/ }));
     expect(screen.queryByText("build-pendin")).not.toBeInTheDocument();
-    expect(screen.getByText("build-succes")).toBeInTheDocument();
+    expect(screen.getAllByText("build-succes").length).toBeGreaterThan(0);
   });
 
   it("filters build logs in the detail panel", async () => {
@@ -705,7 +921,7 @@ describe("Packaging dashboard", () => {
     await screen.findByRole("heading", { name: "总览" });
     await user.click(screen.getByRole("button", { name: /覆盖配置/ }));
 
-    await user.type(screen.getByPlaceholderText("新建 overlay 名称"), "dev");
+    await user.type(screen.getByPlaceholderText("新建覆盖名称"), "dev");
     await user.click(screen.getByRole("button", { name: "新建" }));
 
     const editor = screen
@@ -733,7 +949,7 @@ describe("Packaging dashboard", () => {
     await screen.findByRole("heading", { name: "总览" });
     await user.click(screen.getByRole("button", { name: /覆盖配置/ }));
 
-    await user.type(screen.getByPlaceholderText("新建 overlay 名称"), "../bad");
+    await user.type(screen.getByPlaceholderText("新建覆盖名称"), "../bad");
 
     expect(screen.getByRole("button", { name: "新建" })).toBeDisabled();
     expect(screen.getByText("名称只能包含字母、数字、点、下划线和中划线")).toBeInTheDocument();

@@ -923,7 +923,78 @@ cd frontend
 npm run build
 ```
 
-### 16.5 文档和格式检查
+### 16.5 自动化监测
+
+本地或 CI 可以使用 Python 监测脚本做一次性健康检查：
+
+```bash
+python scripts/monitor_cli.py check --api-url http://127.0.0.1:8080
+```
+
+持续监测：
+
+```bash
+python scripts/monitor_cli.py watch \
+  --api-url http://127.0.0.1:8080 \
+  --interval 30
+```
+
+CI 中建议把告警提升为失败：
+
+```bash
+python scripts/monitor_cli.py check \
+  --api-url http://127.0.0.1:8080 \
+  --fail-on-warning
+```
+
+如果需要给外部监控系统采集结构化结果：
+
+```bash
+python scripts/monitor_cli.py check --json
+```
+
+脚本会输出 confirmation lights：
+
+```text
+[OK]    可继续
+[WARN]  有风险，默认不让命令失败
+[FAIL]  接口不可用或契约损坏，命令返回非 0
+```
+
+当前监测项：
+
+| 检查项 | 失败条件 | 告警条件 |
+|---|---|---|
+| API health | `/api/health` 不可达或不是 `ok` | 无 |
+| Product manifests | `/api/products` 契约错误 | 未加载任何产品 |
+| Build API | `/api/builds` 契约错误 | 队列超过阈值、running build 没有 runner、失败构建超过阈值 |
+| Release gate summary | 无 | 存在阻塞门禁 |
+| Build log stream | 有日志样本但 SSE 契约错误 | 无 |
+| Upload API | `/api/uploads` 契约错误 | 无 |
+| Artifact metadata contract | 缺少 `sha256`、`downloadUrl` 或 `downloadPolicy` | 无 |
+| Artifact retention | 无 | 过期制品超过阈值 |
+| Runner API | `/api/runners` 契约错误 | 无 |
+| Runner availability | 无 | stale、offline、unknown runner 超过阈值 |
+| Active runner heartbeat | 无 | active runner 心跳或日志超过阈值 |
+
+常用阈值参数：
+
+```bash
+python scripts/monitor_cli.py check \
+  --max-queued-builds 20 \
+  --max-failed-builds 50 \
+  --max-expired-artifacts 5 \
+  --max-unhealthy-runners 1 \
+  --runner-stale-minutes 10
+```
+
+监测脚本的单元测试：
+
+```bash
+python -m unittest scripts.monitor_cli_test
+```
+
+### 16.6 文档和格式检查
 
 ```bash
 git diff --check
@@ -1033,6 +1104,7 @@ git diff --check
 | Preview 验证后才能 Release | 已强制 | `publish` 只接受 `preview_validated` |
 | Release 可复现门禁 | 已强制 | fixed version、fixed component version、exact URI、artifact、no error |
 | 发布门禁前后端对齐 | 已覆盖 | UI 和动作使用 `/api/builds/{id}/release-check` |
+| 自动化监测 | 已覆盖 | `python scripts/monitor_cli.py check` |
 | Linux Runner 部署文档 | 已覆盖 | 本文档和 `docs/nomad-runner-lifecycle.md` |
 | Windows Runner 部署文档 | 已覆盖 | 本文档和 `runner/README.md` |
 | API 自动化测试 | 已覆盖 | `go test ./... -count=1` |

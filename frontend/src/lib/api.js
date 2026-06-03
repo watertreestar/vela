@@ -1,5 +1,44 @@
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8080";
 
+export class ApiError extends Error {
+  constructor({ status, code, message, severity, category, retryable, userAction, requestId, details }) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code || "REQUEST_FAILED";
+    this.severity = severity || (status >= 500 ? "critical" : "error");
+    this.category = category || "system";
+    this.retryable = Boolean(retryable);
+    this.userAction = userAction || "";
+    this.requestId = requestId || "";
+    this.details = details || [];
+  }
+}
+
+function toApiError(payload, status, fallback) {
+  const error = payload?.error;
+  if (error && typeof error === "object") {
+    return new ApiError({
+      status,
+      code: error.code,
+      message: error.message || fallback,
+      severity: error.severity,
+      category: error.category,
+      retryable: error.retryable,
+      userAction: error.userAction,
+      requestId: error.requestId,
+      details: error.details || [],
+    });
+  }
+  const details = Array.isArray(payload?.errors)
+    ? payload.errors.map((message) => ({ message }))
+    : [];
+  const message = typeof error === "string"
+    ? `${error}${details.length ? `：${details.map((item) => item.message).join("；")}` : ""}`
+    : fallback;
+  return new ApiError({ status, message, details });
+}
+
 async function request(path, options = {}) {
   const response = await fetch(`${API_URL}${path}`, {
     headers: {
@@ -11,7 +50,7 @@ async function request(path, options = {}) {
 
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
-    throw new Error(payload?.error || `Request failed: ${response.status}`);
+    throw toApiError(payload, response.status, `Request failed: ${response.status}`);
   }
   return payload;
 }
@@ -98,6 +137,10 @@ export function listUploads() {
   return request("/api/uploads");
 }
 
+export function listRunners() {
+  return request("/api/runners");
+}
+
 export function getBuildLogs(id) {
   return request(`/api/builds/${id}/logs`);
 }
@@ -114,16 +157,31 @@ export function buildDownloadUrl(id) {
   return `${API_URL}/api/builds/${id}/download`;
 }
 
-export async function uploadArtifact(file) {
+export function buildLogStreamUrl(id, follow = true) {
+  return `${API_URL}/api/builds/${id}/logs/stream${follow ? "?follow=true" : ""}`;
+}
+
+export async function uploadArtifact(file, options = {}) {
   const form = new FormData();
   form.append("file", file);
+  if (options.downloadPolicy) {
+    form.append("downloadPolicy", options.downloadPolicy);
+  }
+  if (options.retentionDays !== undefined && options.retentionDays !== "") {
+    form.append("retentionDays", String(options.retentionDays));
+  }
+  for (const [key, value] of Object.entries(options.metadata || {})) {
+    if (value !== undefined && value !== "") {
+      form.append(`metadata.${key}`, String(value));
+    }
+  }
   const response = await fetch(`${API_URL}/api/uploads`, {
     method: "POST",
     body: form,
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
-    throw new Error(payload?.error || `Upload failed: ${response.status}`);
+    throw toApiError(payload, response.status, `Upload failed: ${response.status}`);
   }
   return payload;
 }

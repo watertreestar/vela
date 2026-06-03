@@ -200,6 +200,11 @@ const uploads = [
     downloadUrl: "http://localhost:8080/api/uploads/upload-license/download",
     sha256: "abcdef0123456789abcdef0123456789",
     size: 2048,
+    contentType: "application/octet-stream",
+    downloadPolicy: "platform",
+    retentionDays: 30,
+    retentionStatus: "active",
+    metadata: { productId: "lsap", purpose: "license" },
     createdAt: "2026-05-28T06:05:00Z",
   },
   {
@@ -209,7 +214,28 @@ const uploads = [
     downloadUrl: "http://localhost:8080/api/uploads/upload-ui-hotfix/download",
     sha256: "fedcba9876543210fedcba9876543210",
     size: 8_388_608,
+    contentType: "application/zip",
+    downloadPolicy: "restricted",
+    retentionDays: 7,
+    retentionStatus: "active",
+    metadata: { productId: "lsap", purpose: "hotfix" },
     createdAt: "2026-05-28T06:08:00Z",
+  },
+];
+
+const runners = [
+  {
+    runnerId: "linux-runner-01",
+    target: "linux",
+    status: "busy",
+    currentBuildId: "build-running-001",
+    currentBuildState: "running",
+    lastHeartbeatAt: "2026-05-28T06:12:00Z",
+    lastLogAt: "2026-05-28T06:12:00Z",
+    runningBuilds: 1,
+    completedBuilds: 3,
+    failedBuilds: 1,
+    recentMessages: [{ sequence: 3, time: "2026-05-28T06:12:00Z", source: "linux-runner-01", message: "heartbeat: active" }],
   },
 ];
 
@@ -237,6 +263,25 @@ function releaseCheckFor(build) {
   };
 }
 
+function withReleaseSummary(build) {
+  const check = releaseCheckFor(build);
+  const firstBlocked = check.checks.find((item) => item.status === "blocked");
+  return {
+    ...build,
+    releaseCheckSummary: {
+      buildId: build.id,
+      stage: check.stage,
+      previewReady: check.previewReady,
+      releaseReady: check.releaseReady,
+      blockingCount: check.blockingCount,
+      firstBlockedId: firstBlocked?.id || "",
+      firstBlockedStage: firstBlocked?.stage || "",
+      firstBlockedTitle: firstBlocked?.title || "",
+      firstBlockedReason: firstBlocked?.reason || "",
+    },
+  };
+}
+
 async function mockApi(page) {
   const state = {
     builds: [...builds],
@@ -255,12 +300,19 @@ async function mockApi(page) {
       route.fulfill({ status, contentType: "application/json", body: JSON.stringify(payload) });
 
     if (method === "GET" && path === "/api/products") return json([product]);
-    if (method === "GET" && path === "/api/builds") return json(state.builds);
+    if (method === "GET" && path === "/api/builds") return json(state.builds.map(withReleaseSummary));
     if (method === "GET" && path === "/api/uploads") return json(uploads);
+    if (method === "GET" && path === "/api/runners") return json(runners);
     if (method === "GET" && path === "/api/products/lsap/manifest") return json(product);
     if (method === "GET" && path === "/api/products/lsap/manifest/revisions") return json([]);
     if (method === "GET" && path === "/api/products/lsap/overlays/profiles") return json(state.overlays.profiles);
     if (method === "GET" && path === "/api/products/lsap/overlays/customers") return json(state.overlays.customers);
+    const overlayMatch = path.match(/^\/api\/products\/lsap\/overlays\/(profiles|customers)\/([^/]+)$/);
+    if (method === "GET" && overlayMatch) {
+      const [, kind, name] = overlayMatch;
+      const record = state.overlays[kind].find((item) => item.name === name);
+      return record ? json(record) : json({ error: "not found" }, 404);
+    }
     if (method === "POST" && path === "/api/builds") {
       const payload = JSON.parse(request.postData() || "{}");
       state.createPayloads.push(payload);
@@ -275,14 +327,14 @@ async function mockApi(page) {
         buildLock: { ...baseLock, buildId: "build-created-e2e", target: payload.target, version: payload.version, config: payload.configOverrides },
       };
       state.builds = [created, ...state.builds];
-      return json(created, 202);
+      return json(withReleaseSummary(created), 202);
     }
     const buildMatch = path.match(/^\/api\/builds\/([^/]+)(?:\/([^/]+))?$/);
     if (buildMatch) {
       const [, buildId, action] = buildMatch;
       const build = state.builds.find((item) => item.id === buildId);
       if (!build) return json({ error: "not found" }, 404);
-      if (method === "GET" && !action) return json(build);
+      if (method === "GET" && !action) return json(withReleaseSummary(build));
       if (method === "GET" && action === "logs") {
         return json([{ time: "2026-05-28T06:10:00Z", source: "runner", message: `logs for ${buildId}` }]);
       }
@@ -291,12 +343,12 @@ async function mockApi(page) {
       if (method === "POST" && action === "validate-preview") {
         const updated = { ...build, status: "preview_validated", validatedAt: "2026-05-28T07:00:00Z" };
         state.builds = state.builds.map((item) => (item.id === build.id ? updated : item));
-        return json(updated);
+        return json(withReleaseSummary(updated));
       }
       if (method === "POST" && action === "publish") {
         const updated = { ...build, status: "published", releaseChannel: "release", publishedAt: "2026-05-28T07:05:00Z" };
         state.builds = state.builds.map((item) => (item.id === build.id ? updated : item));
-        return json(updated);
+        return json(withReleaseSummary(updated));
       }
     }
     return json({ error: `Unhandled ${method} ${path}` }, 500);
@@ -315,10 +367,11 @@ test("dashboard renders production-like release data and opens release gate deta
 
   await page.getByRole("button", { name: /构建记录/ }).click();
   await page.getByRole("button", { name: /筛选：可发布/ }).click();
-  await expect(page.getByText("build-previe")).toHaveCount(1);
+  await expect(page.getByText("build-previe").filter({ visible: true })).toHaveCount(1);
   await page.getByPlaceholder("搜索 ID / 产品 / 状态").fill("preview-ready");
-  await expect(page.getByText("build-previe")).toBeVisible();
-  await page.getByRole("button", { name: "详情" }).click();
+  await expect(page.getByText("build-previe").filter({ visible: true })).toBeVisible();
+  await page.getByRole("button", { name: "详情" }).focus();
+  await page.keyboard.press("Enter");
   await page.getByRole("tab", { name: /发布门禁/ }).click();
 
   await expect(page.getByText("Release 可发布")).toBeVisible();
@@ -336,7 +389,9 @@ test("create build form accepts richer component and customer data", async ({ pa
   await page.getByLabel("Web 端口").fill("49100");
   await page.getByLabel("客户名称").fill("城市银行");
   await page.getByText("选择已有上传记录").first().waitFor();
-  await page.getByRole("button", { name: /提交构建申请/ }).click();
+  const submitButton = page.getByRole("button", { name: /提交构建申请/ });
+  await submitButton.focus();
+  await page.keyboard.press("Enter");
 
   await expect(page.getByText("构建请求已创建，等待审批")).toBeVisible();
   expect(state.createPayloads).toHaveLength(1);

@@ -377,7 +377,7 @@ limit 1`
 	build.UpdatedAt = nowUTC()
 	build.Logs = append(build.Logs, domain.BuildLog{
 		Time:    nowUTC(),
-		Source:  "runner",
+		Source:  runnerID,
 		Message: fmt.Sprintf("claimed by runner %s", runnerID),
 	})
 	if err := s.saveBuild(ctx, tx, build); err != nil {
