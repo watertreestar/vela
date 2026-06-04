@@ -14,6 +14,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"packaging-platform/backend/internal/apperr"
 	"packaging-platform/backend/internal/domain"
 )
 
@@ -185,6 +186,9 @@ func (s *PostgresStore) ReadProduct(id string) (domain.Product, error) {
 func (s *PostgresStore) ReadProductManifest(id string) (json.RawMessage, error) {
 	var raw []byte
 	if err := s.db.QueryRow(`select manifest from products where id = $1`, id).Scan(&raw); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, apperr.NotFound("product", id)
+		}
 		return nil, err
 	}
 	return json.RawMessage(raw), nil
@@ -199,7 +203,10 @@ func (s *PostgresStore) WriteProductManifest(id string, raw json.RawMessage) (do
 		product.ID = id
 	}
 	if product.ID != id {
-		return domain.Product{}, fmt.Errorf("manifest id %q does not match product %q", product.ID, id)
+		return domain.Product{}, apperr.Validation("VALIDATION_INVALID_REQUEST", fmt.Sprintf("manifest id %q does not match product %q", product.ID, id)).
+			WithField("id").
+			WithParam("manifestId", product.ID).
+			WithParam("productId", id)
 	}
 	content, err := json.Marshal(product)
 	if err != nil {
@@ -249,6 +256,9 @@ select id, product_id, hash, summary, manifest, created_at
 from manifest_revisions
 where product_id = $1 and id = $2
 `, productID, revisionID).Scan(&revision.ID, &revision.ProductID, &revision.Hash, &revision.Summary, &raw, &revision.CreatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return domain.ManifestRevision{}, apperr.NotFound("manifest_revision", revisionID)
+		}
 		return domain.ManifestRevision{}, err
 	}
 	revision.Manifest = json.RawMessage(raw)
@@ -308,6 +318,9 @@ func (s *PostgresStore) ListBuilds() ([]domain.Build, error) {
 func (s *PostgresStore) ReadBuild(id string) (domain.Build, error) {
 	var raw []byte
 	if err := s.db.QueryRow(`select payload from builds where id = $1`, id).Scan(&raw); err != nil {
+		if err == sql.ErrNoRows {
+			return domain.Build{}, apperr.NotFound("build", id)
+		}
 		return domain.Build{}, err
 	}
 	var build domain.Build
@@ -392,7 +405,7 @@ limit 1`
 func (s *PostgresStore) RetryBuild(id string) (domain.Build, error) {
 	return s.UpdateBuild(id, func(build *domain.Build) error {
 		if build.Status != domain.BuildFailed && build.Status != domain.BuildCanceled {
-			return fmt.Errorf("only failed or canceled builds can be retried")
+			return apperr.Conflict("BUILD_STATE_CONFLICT", "only failed or canceled builds can be retried")
 		}
 		build.Status = domain.BuildQueued
 		build.Error = ""
@@ -422,7 +435,7 @@ func (s *PostgresStore) CancelBuild(id string) (domain.Build, error) {
 			})
 			return nil
 		default:
-			return fmt.Errorf("only pending, queued, or running builds can be canceled")
+			return apperr.Conflict("BUILD_STATE_CONFLICT", "only pending, queued, or running builds can be canceled")
 		}
 	})
 }
@@ -471,6 +484,9 @@ func (s *PostgresStore) ListUploads() ([]domain.UploadRecord, error) {
 func (s *PostgresStore) ReadUpload(id string) (domain.UploadRecord, error) {
 	var raw []byte
 	if err := s.db.QueryRow(`select payload from uploads where id = $1`, id).Scan(&raw); err != nil {
+		if err == sql.ErrNoRows {
+			return domain.UploadRecord{}, apperr.NotFound("upload", id)
+		}
 		return domain.UploadRecord{}, err
 	}
 	var record domain.UploadRecord
@@ -483,6 +499,9 @@ func (s *PostgresStore) ReadUpload(id string) (domain.UploadRecord, error) {
 func (s *PostgresStore) readBuildForUpdate(ctx context.Context, tx *sql.Tx, id string) (domain.Build, error) {
 	var raw []byte
 	if err := tx.QueryRowContext(ctx, `select payload from builds where id = $1 for update`, id).Scan(&raw); err != nil {
+		if err == sql.ErrNoRows {
+			return domain.Build{}, apperr.NotFound("build", id)
+		}
 		return domain.Build{}, err
 	}
 	var build domain.Build

@@ -388,7 +388,8 @@ test("create build form accepts richer component and customer data", async ({ pa
   await page.getByLabel("客户标识").fill("city-bank");
   await page.getByLabel("Web 端口").fill("49100");
   await page.getByLabel("客户名称").fill("城市银行");
-  await page.getByText("选择已有上传记录").first().waitFor();
+  await page.getByText("组件总数").first().waitFor();
+  await page.getByText("已有上传").first().waitFor();
   const submitButton = page.getByRole("button", { name: /提交构建申请/ });
   await submitButton.focus();
   await page.keyboard.press("Enter");

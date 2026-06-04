@@ -82,6 +82,13 @@ import {
   uploadArtifact,
   validatePreviewBuild,
 } from "./lib/api";
+import {
+  errorSurface,
+  translateError,
+  translateErrorDetail,
+  translateLegacyReason,
+  translateUserAction,
+} from "./lib/i18n";
 import productManifestSchema from "../../docs/product-manifest.schema.json";
 
 const statusMeta = {
@@ -105,6 +112,12 @@ const navItems = [
   { key: "overlays", label: "覆盖配置", icon: GitCompare },
   { key: "uploads", label: "制品上传", icon: FileUp },
   { key: "logs", label: "日志与锁定", icon: ScrollText },
+];
+
+const navGroups = [
+  { label: "运行", keys: ["overview", "create", "builds"] },
+  { label: "交付", keys: ["runners", "uploads", "logs"] },
+  { label: "配置", keys: ["products", "overlays"] },
 ];
 
 const buildFilterOptions = [
@@ -859,21 +872,33 @@ export default function App() {
         </div>
 
         <nav className="sidebar-nav">
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            return (
-              <button
-                key={item.key}
-                className={`nav-item ${activeSection === item.key ? "is-active" : ""}`}
-                aria-current={activeSection === item.key ? "page" : undefined}
-                onClick={() => setActiveSection(item.key)}
-              >
-                <Icon size={18} />
-                <span>{item.label}</span>
-                {activeSection === item.key && <ChevronRight size={16} />}
-              </button>
-            );
-          })}
+          {navGroups.map((group) => (
+            <div key={group.label} className="nav-group">
+              <div className="nav-group-label">{group.label}</div>
+              <div className="nav-group-items">
+                {group.keys.map((key) => {
+                  const item = navItems.find((candidate) => candidate.key === key);
+                  if (!item) return null;
+                  const Icon = item.icon;
+                  const active = activeSection === item.key;
+                  return (
+                    <button
+                      key={item.key}
+                      className={`nav-item ${active ? "is-active" : ""}`}
+                      aria-current={active ? "page" : undefined}
+                      onClick={() => setActiveSection(item.key)}
+                    >
+                      <span className="nav-item-icon">
+                        <Icon size={17} />
+                      </span>
+                      <span className="nav-item-label">{item.label}</span>
+                      <ChevronRight className="nav-item-arrow" size={15} />
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
         </nav>
 
         <div className="sidebar-status">
@@ -1743,6 +1768,32 @@ function ManifestStructuredEditor({ manifest, onChange }) {
     });
   }
 
+  function updateTargetTemplate(target, key, value) {
+    const current = manifest.targetConfig?.[target] || {};
+    updateTarget(target, {
+      templates: {
+        ...(current.templates || {}),
+        [key]: value,
+      },
+    });
+  }
+
+  function updateConfig(section, patch) {
+    update({
+      config: {
+        ...(manifest.config || {}),
+        [section]: {
+          ...(manifest.config?.[section] || {}),
+          ...patch,
+        },
+      },
+    });
+  }
+
+  function updateModule(name, enabled) {
+    updateConfig("modules", { [name]: enabled });
+  }
+
   function toggleTarget(target, enabled) {
     const nextTargets = new Set(manifest.targets || []);
     if (enabled) {
@@ -1780,6 +1831,37 @@ function ManifestStructuredEditor({ manifest, onChange }) {
   function removeComponent(index) {
     update({ components: (manifest.components || []).filter((_, itemIndex) => itemIndex !== index) });
   }
+
+  function updateWorkload(index, patch) {
+    const workloads = [...(manifest.workloads || [])];
+    workloads[index] = {
+      ...workloads[index],
+      ...patch,
+    };
+    update({ workloads });
+  }
+
+  function addWorkload() {
+    update({
+      workloads: [
+        ...(manifest.workloads || []),
+        {
+          id: "new-workload",
+          runtime: "docker",
+          component: manifest.components?.[0]?.id || "",
+          enabled: true,
+        },
+      ],
+    });
+  }
+
+  function removeWorkload(index) {
+    update({ workloads: (manifest.workloads || []).filter((_, itemIndex) => itemIndex !== index) });
+  }
+
+  const config = manifest.config || {};
+  const modules = config.modules || {};
+  const moduleNames = Array.from(new Set(["camera", "push", "map", ...Object.keys(modules)]));
 
   return (
     <div className="section-stack">
@@ -1823,9 +1905,76 @@ function ManifestStructuredEditor({ manifest, onChange }) {
                 value={targetConfig.packageName || ""}
                 onChange={(packageName) => updateTarget(target, { packageName })}
               />
+              <LabeledInput
+                label="安装清单模板"
+                value={targetConfig.templates?.manifest || ""}
+                onChange={(value) => updateTargetTemplate(target, "manifest", value)}
+                placeholder={`${target}/manifest.template.json`}
+              />
+              <LabeledInput
+                label="配置模板目录"
+                value={targetConfig.templates?.configDir || ""}
+                onChange={(value) => updateTargetTemplate(target, "configDir", value)}
+                placeholder={`${target}/templates`}
+              />
             </div>
           );
         })}
+      </div>
+
+      <Flex justify="between" align="center" gap="3" wrap="wrap">
+        <Text weight="bold">默认配置</Text>
+        <Badge variant="soft">会参与最终配置合并</Badge>
+      </Flex>
+      <div className="structured-grid">
+        <div className="structured-block">
+          <Text weight="bold">运行参数</Text>
+          <LabeledInput
+            label="Web 端口"
+            type="number"
+            value={String(config.ports?.web ?? "")}
+            onChange={(value) => updateConfig("ports", { web: Number(value) || 0 })}
+          />
+          <FieldSelect
+            label="数据库密码策略"
+            value={config.database?.passwordPolicy || "strong"}
+            onValueChange={(passwordPolicy) => updateConfig("database", { passwordPolicy })}
+            options={[
+              { value: "strong", label: "强策略" },
+              { value: "relaxed", label: "宽松策略" },
+              { value: "custom", label: "自定义" },
+            ]}
+          />
+        </div>
+        <div className="structured-block">
+          <Text weight="bold">客户默认值</Text>
+          <LabeledInput
+            label="客户名称"
+            value={config.customer?.name || ""}
+            onChange={(name) => updateConfig("customer", { name })}
+          />
+          <LabeledInput
+            label="许可证"
+            value={config.customer?.license || ""}
+            onChange={(license) => updateConfig("customer", { license })}
+          />
+        </div>
+      </div>
+      <div className="structured-block">
+        <Flex justify="between" align="center" gap="3" wrap="wrap">
+          <Text weight="bold">模块开关</Text>
+          <Text size="1" color="gray">
+            workload 可通过 module 字段读取这些开关
+          </Text>
+        </Flex>
+        <Flex gap="4" wrap="wrap">
+          {moduleNames.map((name) => (
+            <label key={name} className="inline-check">
+              <Checkbox checked={modules[name] !== false} onCheckedChange={(value) => updateModule(name, value === true)} />
+              <Text size="2">模块 {name}</Text>
+            </label>
+          ))}
+        </Flex>
       </div>
 
       <Flex justify="between" align="center" gap="3" wrap="wrap">
@@ -1866,6 +2015,76 @@ function ManifestStructuredEditor({ manifest, onChange }) {
             )}
           </div>
         ))}
+      </div>
+
+      <Flex justify="between" align="center" gap="3" wrap="wrap">
+        <Text weight="bold">工作负载</Text>
+        <Button variant="soft" onClick={addWorkload}>
+          <Server size={16} />
+          添加 Workload
+        </Button>
+      </Flex>
+      <div className="workload-grid">
+        {(manifest.workloads || []).map((workload, index) => (
+          <div key={`${workload.id}-${index}`} className="workload-card">
+            <Flex justify="between" align="start" gap="3">
+              <LabeledInput label="Workload ID" value={workload.id || ""} onChange={(id) => updateWorkload(index, { id })} />
+              <Button size="1" color="red" variant="soft" onClick={() => removeWorkload(index)}>
+                删除
+              </Button>
+            </Flex>
+            <div className="field-grid two">
+              <FieldSelect
+                label="运行时"
+                value={workload.runtime || "docker"}
+                onValueChange={(runtime) => updateWorkload(index, { runtime })}
+                options={[
+                  { value: "docker", label: "Docker" },
+                  { value: "systemd", label: "systemd" },
+                ]}
+              />
+              <FieldSelect
+                label="绑定组件"
+                value={workload.component || "__none__"}
+                onValueChange={(component) => updateWorkload(index, { component: component === "__none__" ? "" : component })}
+                options={[
+                  { value: "__none__", label: "不绑定组件" },
+                  ...(manifest.components || []).map((component) => ({ value: component.id, label: component.id })),
+                ]}
+              />
+              <LabeledInput label="模块开关" value={workload.module || ""} onChange={(module) => updateWorkload(index, { module })} />
+              <label className="inline-check">
+                <Checkbox checked={workload.enabled !== false} onCheckedChange={(value) => updateWorkload(index, { enabled: value === true })} />
+                <Text size="2">默认启用</Text>
+              </label>
+            </div>
+            {workload.runtime === "systemd" && (
+              <LabeledInput
+                label="ExecStart"
+                value={workload.systemd?.execStart || ""}
+                onChange={(execStart) =>
+                  updateWorkload(index, {
+                    systemd: { ...(workload.systemd || {}), execStart },
+                  })
+                }
+              />
+            )}
+            {workload.runtime === "docker" && (
+              <LabeledInput
+                label="Docker 镜像"
+                value={workload.docker?.image || ""}
+                onChange={(image) =>
+                  updateWorkload(index, {
+                    docker: { ...(workload.docker || {}), image },
+                  })
+                }
+              />
+            )}
+          </div>
+        ))}
+        {(manifest.workloads || []).length === 0 && (
+          <EmptyState icon={Server} title="暂无工作负载" text="添加 workload 后可声明安装包内需要部署的服务。" />
+        )}
       </div>
     </div>
   );
@@ -2156,14 +2375,46 @@ function UploadsSection({ uploads, uploadForm, setUploadForm, uploading, onUploa
 
 function RunnersSection({ runners, builds, onInspect }) {
   const activeBuilds = builds.filter((build) => build.status === "running" || build.status === "queued");
+  const queuedBuilds = builds.filter((build) => build.status === "queued");
+  const runningBuilds = builds.filter((build) => build.status === "running");
+  const staleRunners = runners.filter((runner) => ["stale", "offline", "unknown"].includes(runner.status));
   return (
     <div className="section-stack">
       <Grid className="metric-grid" gap="4">
         <MetricCard icon={Server} label="Runner 数量" value={runners.length} hint="已观测到的 runner" color="teal" />
         <MetricCard icon={Gauge} label="忙碌 Runner" value={runners.filter((runner) => runner.status === "busy").length} hint="正在执行构建" color="blue" />
-        <MetricCard icon={AlertCircle} label="异常 Runner" value={runners.filter((runner) => ["stale", "offline", "unknown"].includes(runner.status)).length} hint="心跳异常或状态未知" color="amber" />
+        <MetricCard icon={AlertCircle} label="异常 Runner" value={staleRunners.length} hint="心跳异常或状态未知" color="amber" />
         <MetricCard icon={ClipboardList} label="活跃任务" value={activeBuilds.length} hint="排队中 + 构建中" color="green" />
       </Grid>
+      <Panel title="Runner 执行链路" description="用于确认队列是否被 runner 消费，以及当前卡在哪个阶段" icon={Gauge}>
+        <div className="runner-flow-grid">
+          <AuditMetric label="排队中" value={queuedBuilds.length} />
+          <AuditMetric label="构建中" value={runningBuilds.length} />
+          <AuditMetric label="心跳异常" value={staleRunners.length} />
+          <AuditMetric label="最近日志" value={latestRunnerLogTime(runners)} />
+        </div>
+        <div className="runner-flow-list">
+          {activeBuilds.length === 0 ? (
+            <Text size="2" color="gray">
+              当前没有 queued 或 running 构建。
+            </Text>
+          ) : (
+            activeBuilds.slice(0, 6).map((build) => (
+              <button key={build.id} type="button" className="runner-flow-row" onClick={() => onInspect(build)}>
+                <StatusBadge status={build.status} />
+                <Code>{shortId(build.id)}</Code>
+                <Text size="2">{build.productId}</Text>
+                <Text size="2" color="gray">
+                  {build.target} / {build.version}
+                </Text>
+                <Text size="2" color="gray">
+                  {build.runnerId || "等待 runner"}
+                </Text>
+              </button>
+            ))
+          )}
+        </div>
+      </Panel>
       <Panel title="Runner 状态" description="由 claim、heartbeat、complete 和构建日志聚合生成" icon={Server}>
         {runners.length === 0 ? (
           <EmptyState icon={Server} title="暂无 Runner" text="Runner claim 或 heartbeat 后会在这里出现。" />
@@ -2188,11 +2439,19 @@ function RunnersSection({ runners, builds, onInspect }) {
                   </Flex>
                   <div className="runner-metrics">
                     <AssetLine label="当前构建" value={runner.currentBuildId ? shortId(runner.currentBuildId) : "-"} />
+                    <AssetLine label="当前状态" value={runner.currentBuildState || "-"} />
                     <AssetLine label="运行中" value={runner.runningBuilds} />
                     <AssetLine label="完成" value={runner.completedBuilds} />
                     <AssetLine label="失败" value={runner.failedBuilds} />
                     <AssetLine label="最后心跳" value={runner.lastHeartbeatAt ? formatDate(runner.lastHeartbeatAt) : "-"} />
                     <AssetLine label="最后日志" value={runner.lastLogAt ? formatDate(runner.lastLogAt) : "-"} />
+                  </div>
+                  <div className="runner-stage-strip" aria-label={`${runner.runnerId} 当前阶段`}>
+                    {["claim", "package", "upload", "complete"].map((stage) => (
+                      <div key={stage} className={`runner-stage ${runnerStageState(runner, stage)}`}>
+                        {stage}
+                      </div>
+                    ))}
                   </div>
                   {currentBuild && (
                     <Button size="1" variant="soft" onClick={() => onInspect(currentBuild)}>
@@ -2217,6 +2476,25 @@ function RunnersSection({ runners, builds, onInspect }) {
       </Panel>
     </div>
   );
+}
+
+function latestRunnerLogTime(runners) {
+  const latest = runners
+    .map((runner) => dateValue(runner.lastLogAt || runner.lastHeartbeatAt))
+    .filter((value) => value > 0)
+    .sort((a, b) => b - a)[0];
+  return latest ? formatDate(new Date(latest).toISOString()) : "-";
+}
+
+function runnerStageState(runner, stage) {
+  if (runner.status === "offline" || runner.status === "stale") return "is-muted";
+  if (!runner.currentBuildId) return stage === "claim" ? "is-pass" : "is-pending";
+  if (runner.currentBuildState === "running") {
+    return stage === "claim" || stage === "package" ? "is-pass" : "is-pending";
+  }
+  if (["succeeded", "preview_validated", "published"].includes(runner.currentBuildState)) return "is-pass";
+  if (runner.currentBuildState === "failed") return stage === "complete" ? "is-fail" : "is-pass";
+  return stage === "claim" ? "is-pass" : "is-pending";
 }
 
 function LogsAndLockSection({ build, logs, buildLock, releaseCheck, onRefresh }) {
@@ -2253,113 +2531,181 @@ function ComponentSourceEditor({ components, uploads, overridesText, onUpdate, o
     return <EmptyState icon={Boxes} title="暂无组件" text="当前产品 manifest 没有定义 components。" />;
   }
 
+  const rows = components.map((component) => {
+    const override = overrides[component.id] || {};
+    const source = { ...component.source, ...override };
+    const kind = source.kind || "artifact-repository";
+    return {
+      component,
+      source,
+      kind,
+      health: componentSourceHealth(component, source),
+    };
+  });
+  const readyCount = rows.filter((row) => row.health.tone === "ready").length;
+  const warningCount = rows.filter((row) => row.health.tone === "warn").length;
+  const blockedCount = rows.filter((row) => row.health.tone === "blocked").length;
+
   return (
-    <div className="component-grid">
-      {components.map((component) => {
-        const override = overrides[component.id] || {};
-        const source = { ...component.source, ...override };
-        const kind = source.kind || "artifact-repository";
-        return (
-          <div key={component.id} className="component-card">
-            <Flex align="start" justify="between" gap="3">
-              <Box>
-                <Text as="div" weight="bold">
-                  {component.id}
-                </Text>
-                <Text as="div" size="1" color="gray">
-                  {component.type}
-                </Text>
-              </Box>
-              <Badge color={component.required ? "red" : "gray"} variant="soft">
-                {component.required ? "必需" : "可选"}
-              </Badge>
-            </Flex>
-            <FieldSelect
-              label="来源类型"
-              value={kind}
-              onValueChange={(nextKind) => onUpdate(component.id, defaultComponentSource(nextKind, source))}
-              options={sourceKindOptions.map((option) => ({
-                value: option.key,
-                label: option.label,
-              }))}
-            />
-            {kind === "artifact-repository" && (
-              <LabeledInput
-                label="仓库路径"
-                value={source.path || ""}
-                onChange={(value) =>
-                  onUpdate(component.id, {
-                    kind: "artifact-repository",
-                    repository: source.repository || "minio",
-                    path: value,
-                  })
-                }
-              />
-            )}
-            {kind === "fixed-url" && (
-              <LabeledInput
-                label="URL"
-                value={source.url || ""}
-                onChange={(value) => onUpdate(component.id, { kind: "fixed-url", url: value })}
-              />
-            )}
-            {kind === "previous-build" && (
-              <LabeledInput
-                label="制品 URI"
-                value={source.uri || ""}
-                onChange={(value) => onUpdate(component.id, { kind: "previous-build", uri: value })}
-              />
-            )}
-            {kind === "manual-upload" && (
-              <div className="field-grid">
-                <FieldSelect
-                  label="选择已有上传记录"
-                  value={source.uploadId || "__none__"}
-                  onValueChange={(uploadId) => {
-                    if (uploadId === "__none__") {
-                      onUpdate(component.id, { kind: "manual-upload", uploadId: "", uri: "" });
-                      return;
-                    }
-                    const upload = uploads.find((item) => item.id === uploadId);
-                    onUpdate(component.id, {
-                      kind: "manual-upload",
-                      uploadId,
-                      uri: upload?.uri || "",
-                    });
-                  }}
-                  options={[
-                    { value: "__none__", label: "不复用上传记录" },
-                    ...uploads.map((upload) => ({
-                      value: upload.id,
-                      label: `${upload.fileName} (${formatBytes(upload.size)})`,
-                    })),
-                  ]}
-                />
-                <label className="field">
-                  <Text size="2" weight="medium">
-                    或上传新文件
-                  </Text>
-                  <input
-                    className="file-input"
-                    type="file"
-                    onChange={(event) => onUpload(component.id, event.target.files?.[0])}
+    <div className="section-stack">
+      <div className="component-health-strip">
+        <AuditMetric label="组件总数" value={components.length} />
+        <AuditMetric label="来源就绪" value={readyCount} />
+        <AuditMetric label="需确认" value={warningCount} />
+        <AuditMetric label="阻塞" value={blockedCount} />
+      </div>
+      <div className="table-scroll">
+        <Table.Root className="component-source-table" variant="surface">
+          <Table.Header>
+            <Table.Row>
+              <Table.ColumnHeaderCell>组件</Table.ColumnHeaderCell>
+              <Table.ColumnHeaderCell>来源</Table.ColumnHeaderCell>
+              <Table.ColumnHeaderCell>定位信息</Table.ColumnHeaderCell>
+              <Table.ColumnHeaderCell>上传</Table.ColumnHeaderCell>
+              <Table.ColumnHeaderCell>状态</Table.ColumnHeaderCell>
+            </Table.Row>
+          </Table.Header>
+          <Table.Body>
+            {rows.map(({ component, source, kind, health }) => (
+              <Table.Row key={component.id}>
+                <Table.Cell>
+                  <div className="cell-main">
+                    <Flex gap="2" align="center" wrap="wrap">
+                      <Text weight="bold">{component.id}</Text>
+                      <Badge color={component.required ? "red" : "gray"} variant="soft">
+                        {component.required ? "必需" : "可选"}
+                      </Badge>
+                    </Flex>
+                    <Text size="1" color="gray">
+                      {component.type}
+                    </Text>
+                  </div>
+                </Table.Cell>
+                <Table.Cell>
+                  <FieldSelect
+                    label="来源类型"
+                    value={kind}
+                    onValueChange={(nextKind) => onUpdate(component.id, defaultComponentSource(nextKind, source))}
+                    options={sourceKindOptions.map((option) => ({
+                      value: option.key,
+                      label: option.label,
+                    }))}
                   />
-                </label>
-              </div>
-            )}
-            <Flex justify="between" gap="3">
-              <Text size="1" color="gray">
-                当前来源
-              </Text>
-              <Text size="1" weight="bold">
-                {sourceKindLabels[kind] || kind}
-              </Text>
-            </Flex>
-          </div>
-        );
-      })}
+                </Table.Cell>
+                <Table.Cell>
+                  {kind === "artifact-repository" && (
+                    <LabeledInput
+                      label="仓库路径"
+                      value={source.path || ""}
+                      onChange={(value) =>
+                        onUpdate(component.id, {
+                          kind: "artifact-repository",
+                          repository: source.repository || "minio",
+                          path: value,
+                        })
+                      }
+                    />
+                  )}
+                  {kind === "fixed-url" && (
+                    <LabeledInput
+                      label="URL"
+                      value={source.url || ""}
+                      onChange={(value) => onUpdate(component.id, { kind: "fixed-url", url: value })}
+                    />
+                  )}
+                  {kind === "previous-build" && (
+                    <LabeledInput
+                      label="制品 URI"
+                      value={source.uri || ""}
+                      onChange={(value) => onUpdate(component.id, { kind: "previous-build", uri: value })}
+                    />
+                  )}
+                  {kind === "manual-upload" && (
+                    <Code>{source.uri || "等待选择上传记录"}</Code>
+                  )}
+                </Table.Cell>
+                <Table.Cell>
+                  {kind === "manual-upload" ? (
+                    <div className="field-grid">
+                      <FieldSelect
+                        label="已有上传"
+                        value={source.uploadId || "__none__"}
+                        onValueChange={(uploadId) => {
+                          if (uploadId === "__none__") {
+                            onUpdate(component.id, { kind: "manual-upload", uploadId: "", uri: "" });
+                            return;
+                          }
+                          const upload = uploads.find((item) => item.id === uploadId);
+                          onUpdate(component.id, {
+                            kind: "manual-upload",
+                            uploadId,
+                            uri: upload?.uri || "",
+                          });
+                        }}
+                        options={[
+                          { value: "__none__", label: "不复用上传记录" },
+                          ...uploads.map((upload) => ({
+                            value: upload.id,
+                            label: `${upload.fileName} (${formatBytes(upload.size)})`,
+                          })),
+                        ]}
+                      />
+                      <input
+                        className="file-input"
+                        aria-label={`上传 ${component.id} 组件文件`}
+                        type="file"
+                        onChange={(event) => onUpload(component.id, event.target.files?.[0])}
+                      />
+                    </div>
+                  ) : (
+                    <Text size="2" color="gray">
+                      不需要上传
+                    </Text>
+                  )}
+                </Table.Cell>
+                <Table.Cell>
+                  <div className={`component-health is-${health.tone}`}>
+                    {health.tone === "ready" ? <Check size={15} /> : <AlertCircle size={15} />}
+                    <span>{health.text}</span>
+                  </div>
+                </Table.Cell>
+              </Table.Row>
+            ))}
+          </Table.Body>
+        </Table.Root>
+      </div>
     </div>
   );
+}
+
+function componentSourceHealth(component, source) {
+  const kind = source.kind || "artifact-repository";
+  if (kind === "manual-upload") {
+    if (source.uploadId || source.uri) {
+      return { tone: "ready", text: "已绑定上传制品" };
+    }
+    return component.required
+      ? { tone: "blocked", text: "必需组件未绑定上传" }
+      : { tone: "warn", text: "可选组件未绑定上传" };
+  }
+  if (kind === "artifact-repository") {
+    if (!source.path) return { tone: "blocked", text: "缺少仓库路径" };
+    if (String(source.path).includes("*")) return { tone: "warn", text: "Preview 可用，Release 需精确 URI" };
+    if (String(source.path).includes("{{version}}")) return { tone: "warn", text: "依赖构建版本解析" };
+    return { tone: "ready", text: "仓库路径已配置" };
+  }
+  if (kind === "fixed-url") {
+    if (!source.url) return { tone: "blocked", text: "缺少固定 URL" };
+    return String(source.url).includes("*")
+      ? { tone: "warn", text: "URL 包含通配符" }
+      : { tone: "ready", text: "固定 URL 已配置" };
+  }
+  if (kind === "previous-build") {
+    return source.uri
+      ? { tone: "ready", text: "历史制品 URI 已配置" }
+      : { tone: "blocked", text: "缺少历史制品 URI" };
+  }
+  return { tone: "warn", text: "未知来源类型" };
 }
 
 function BuildsTable({
@@ -2633,6 +2979,7 @@ function BuildInspectTabs({ build, logs, buildLock, releaseCheck }) {
       </Tabs.List>
       <Box pt="4">
         <Tabs.Content value="summary">
+          <BuildExecutionSummary build={build} buildLock={buildLock || build.buildLock} releaseCheck={releaseCheck} />
           <div className="detail-grid">
             <DetailItem label="构建 ID" value={build.id} mono />
             <DetailItem label="产品" value={build.productId} />
@@ -2685,36 +3032,103 @@ function ResolvedComponents({ components }) {
   if (!components.length) {
     return <EmptyState icon={Boxes} title="暂无组件锁定信息" text="构建创建后会生成组件来源和 URI。" />;
   }
+  const summary = componentLockSummary(components);
   return (
-    <div className="table-scroll">
-      <Table.Root className="component-lock-table" variant="surface">
-        <Table.Header>
-          <Table.Row>
-            <Table.ColumnHeaderCell>组件</Table.ColumnHeaderCell>
-            <Table.ColumnHeaderCell>类型</Table.ColumnHeaderCell>
-            <Table.ColumnHeaderCell>来源</Table.ColumnHeaderCell>
-            <Table.ColumnHeaderCell>URI</Table.ColumnHeaderCell>
-            <Table.ColumnHeaderCell>SHA256</Table.ColumnHeaderCell>
-          </Table.Row>
-        </Table.Header>
-        <Table.Body>
-          {components.map((component) => (
-            <Table.Row key={component.id}>
-              <Table.Cell>{component.id}</Table.Cell>
-              <Table.Cell>{component.type}</Table.Cell>
-              <Table.Cell>{sourceKindLabels[component.source?.kind] || component.source?.kind}</Table.Cell>
-              <Table.Cell>
-                <Code>{component.uri || component.source?.uri || "-"}</Code>
-              </Table.Cell>
-              <Table.Cell>
-                <Code>{shortHash(component.sha256)}</Code>
-              </Table.Cell>
+    <div className="section-stack">
+      <div className="component-health-strip">
+        <AuditMetric label="锁定组件" value={components.length} />
+        <AuditMetric label="精确 URI" value={summary.exactUris} />
+        <AuditMetric label="固定版本" value={summary.fixedVersions} />
+        <AuditMetric label="缺少 URI" value={summary.missingUris} />
+      </div>
+      {summary.risks.length > 0 && (
+        <Callout.Root color="amber" variant="soft">
+          <Callout.Icon>
+            <AlertCircle size={18} />
+          </Callout.Icon>
+          <Callout.Text>{summary.risks.join("；")}</Callout.Text>
+        </Callout.Root>
+      )}
+      <div className="table-scroll">
+        <Table.Root className="component-lock-table" variant="surface">
+          <Table.Header>
+            <Table.Row>
+              <Table.ColumnHeaderCell>组件</Table.ColumnHeaderCell>
+              <Table.ColumnHeaderCell>类型</Table.ColumnHeaderCell>
+              <Table.ColumnHeaderCell>来源</Table.ColumnHeaderCell>
+              <Table.ColumnHeaderCell>版本</Table.ColumnHeaderCell>
+              <Table.ColumnHeaderCell>URI</Table.ColumnHeaderCell>
+              <Table.ColumnHeaderCell>SHA256</Table.ColumnHeaderCell>
             </Table.Row>
-          ))}
-        </Table.Body>
-      </Table.Root>
+          </Table.Header>
+          <Table.Body>
+            {components.map((component) => {
+              const uri = component.uri || component.source?.uri || "";
+              return (
+                <Table.Row key={component.id}>
+                  <Table.Cell>
+                    <Flex gap="2" align="center" wrap="wrap">
+                      <Text>{component.id}</Text>
+                      {component.required && <Badge variant="soft" color="red">必需</Badge>}
+                    </Flex>
+                  </Table.Cell>
+                  <Table.Cell>{component.type}</Table.Cell>
+                  <Table.Cell>{sourceKindLabels[component.source?.kind] || component.source?.kind}</Table.Cell>
+                  <Table.Cell>
+                    <Badge color={component.version === "latest" ? "amber" : "green"} variant="soft">
+                      {component.version || "-"}
+                    </Badge>
+                  </Table.Cell>
+                  <Table.Cell>
+                    <Code>{uri || "-"}</Code>
+                  </Table.Cell>
+                  <Table.Cell>
+                    <Code>{shortHash(component.sha256)}</Code>
+                  </Table.Cell>
+                </Table.Row>
+              );
+            })}
+          </Table.Body>
+        </Table.Root>
+      </div>
     </div>
   );
+}
+
+function BuildExecutionSummary({ build, buildLock, releaseCheck }) {
+  const check = releaseCheck || getLocalReleaseCheck(build);
+  return (
+    <div className="execution-summary">
+      <AuditMetric label="当前状态" value={statusMeta[build.status]?.label || build.status || "-"} />
+      <AuditMetric label="Runner" value={build.runnerId || "未分配"} />
+      <AuditMetric label="Build Lock" value={buildLock?.buildId ? "已生成" : "缺失"} />
+      <AuditMetric label="Release 门禁" value={check.releaseReady ? "通过" : `${check.blockingCount || 0} 阻塞`} />
+    </div>
+  );
+}
+
+function componentLockSummary(components) {
+  const risks = [];
+  let exactUris = 0;
+  let fixedVersions = 0;
+  let missingUris = 0;
+  for (const component of components) {
+    const uri = String(component.uri || component.source?.uri || "");
+    if (!uri) {
+      missingUris++;
+      risks.push(`${component.id} 缺少 URI`);
+    } else if (!uri.includes("*")) {
+      exactUris++;
+    } else {
+      risks.push(`${component.id} URI 包含通配符`);
+    }
+    if (component.version && component.version !== "latest") {
+      fixedVersions++;
+    } else {
+      risks.push(`${component.id} 版本未固定`);
+    }
+  }
+  return { exactUris, fixedVersions, missingUris, risks };
 }
 
 function ResolvedWorkloads({ workloads }) {
@@ -3073,19 +3487,16 @@ function getReleaseReadiness(build) {
 
 function normalizeError(error) {
   if (error?.name === "ApiError") {
-    const details = (error.details || []).map((detail) => ({
-      ...detail,
-      message: releaseReasonText(detail.message || ""),
-    }));
-    const message = releaseReasonText(error.message || "操作失败");
+    const details = (error.details || []).map((detail) => translateErrorDetail(detail));
+    const message = translateError(error);
     const tone = error.severity === "warning" ? "warning" : "error";
     return {
       message,
       details,
-      userAction: error.userAction || "",
+      userAction: translateUserAction(error),
       color: error.severity === "warning" ? "amber" : "red",
       tone,
-      surface: error.status === 409 ? "toast" : "alert",
+      surface: errorSurface(error),
     };
   }
   return {
@@ -3099,23 +3510,7 @@ function normalizeError(error) {
 }
 
 function releaseReasonText(reason) {
-  const normalized = String(reason || "").trim();
-  if (!normalized) return "";
-  const labels = {
-    "only succeeded preview builds can be validated": "需要先完成 Preview 构建",
-    "preview validation requires preview channel": "Preview 验证只接受 preview 通道",
-    "preview artifact is not available": "Preview 制品不可下载",
-    "Build Lock is not available": "构建锁未生成",
-    "Build Lock does not match build target, profile, or version": "构建锁与构建参数不一致",
-    "preview requires locked required component URIs": "必需组件还没有锁定 URI",
-    "only validated preview builds can be published": "需要先验证 Preview",
-    "release requires a fixed build version": "Release 需要固定版本，不能使用 latest",
-    "release requires exact component URIs without wildcards": "组件 URI 不能包含通配符",
-    "release requires fixed component versions": "组件版本不能使用 latest",
-    "release artifact is not available": "Release 制品不可下载",
-    "release requires a build without errors": "构建存在错误记录",
-  };
-  return labels[normalized] || normalized;
+  return translateLegacyReason(reason);
 }
 
 function MetricCard({ icon: Icon, label, value, hint, color }) {

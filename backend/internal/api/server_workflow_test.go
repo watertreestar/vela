@@ -339,24 +339,30 @@ func TestAPISchedulerFailureBranches(t *testing.T) {
 
 	response := doRequest(t, server, http.MethodPost, "/api/builds/approve-fails/approve", "")
 	assertStatus(t, response, http.StatusBadGateway)
-	var approved domain.Build
-	decodeJSON(t, response, &approved)
+	apiErr := decodeAPIError(t, response)
+	if apiErr.Error.Code != "SCHEDULER_SUBMIT_FAILED" || apiErr.Error.Status != http.StatusBadGateway || !apiErr.Error.Retryable {
+		t.Fatalf("expected scheduler submit error, got %#v", apiErr)
+	}
+	approved, err := store.ReadBuild("approve-fails")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if approved.Status != domain.BuildFailed || approved.Error != "nomad submit unavailable" {
 		t.Fatalf("approval failure did not mark build failed: %#v", approved)
 	}
 
 	response = doRequest(t, server, http.MethodPost, "/api/builds/retry-fails/retry", "")
 	assertStatus(t, response, http.StatusBadGateway)
-	apiErr := decodeAPIError(t, response)
-	if apiErr.Error.Code != "UPSTREAM_UNAVAILABLE" {
-		t.Fatalf("expected upstream error for retry failure, got %#v", apiErr)
+	apiErr = decodeAPIError(t, response)
+	if apiErr.Error.Code != "SCHEDULER_SUBMIT_FAILED" {
+		t.Fatalf("expected scheduler submit error for retry failure, got %#v", apiErr)
 	}
 
 	response = doRequest(t, server, http.MethodPost, "/api/builds/cancel-fails/cancel", "")
 	assertStatus(t, response, http.StatusBadGateway)
 	apiErr = decodeAPIError(t, response)
-	if apiErr.Error.Code != "UPSTREAM_UNAVAILABLE" {
-		t.Fatalf("expected upstream error for cancel failure, got %#v", apiErr)
+	if apiErr.Error.Code != "SCHEDULER_STOP_FAILED" {
+		t.Fatalf("expected scheduler stop error for cancel failure, got %#v", apiErr)
 	}
 	if len(scheduler.stopped) != 1 || scheduler.stopped[0] != "job-cancel-fails" {
 		t.Fatalf("expected scheduler stop attempt, got %#v", scheduler.stopped)

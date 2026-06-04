@@ -1000,6 +1000,18 @@ python -m unittest scripts.monitor_cli_test
 git diff --check
 ```
 
+### 16.7 错误提示、日志和国际化
+
+错误处理设计见 [Error Handling](error-handling.md)。
+
+当前约定：
+
+- 前端用户提示使用中文，后续通过 `error.code` 和 `error.details[].code` 做国际化。
+- 后端服务日志、Runner 日志和构建技术日志可以使用英文。
+- API 错误返回结构化字段，包括 `status`、`code`、`messageKey`、`severity`、`category`、`retryable`、`requestId`、`correlationId` 和 `details`。
+- 前端不能依赖后端 `message` 或英文 `reason` 判断错误类型；这些文本只作为 fallback 或技术详情。
+- 后续需要补齐 correlationId 持久化、notification center、服务端 access log 和独立 audit event。
+
 ## 17. 常见故障处理
 
 ### 17.1 Manifest 保存失败

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"packaging-platform/backend/internal/apperr"
 	"packaging-platform/backend/internal/domain"
 	storepkg "packaging-platform/backend/internal/store"
 )
@@ -429,7 +430,9 @@ func TestAPIDownloadCreateAndLogStreamBoundaries(t *testing.T) {
 
 	response = doRequest(t, server, http.MethodGet, "/api/builds/missing/logs/stream", "")
 	assertStatus(t, response, http.StatusOK)
-	if !strings.Contains(response.Body.String(), "event: error") {
+	if !strings.Contains(response.Body.String(), "event: error") ||
+		!strings.Contains(response.Body.String(), `"code":"RESOURCE_NOT_FOUND"`) ||
+		!strings.Contains(response.Body.String(), `"requestId":"req_`) {
 		t.Fatalf("expected stream error for missing build, got %s", response.Body.String())
 	}
 }
@@ -495,7 +498,7 @@ func TestAPIManifestDryRunAndMissingResourceBoundaries(t *testing.T) {
 	}
 
 	response = doRequest(t, server, http.MethodPost, "/api/products/lsap/manifest/revisions/missing/restore", "")
-	assertStatus(t, response, http.StatusBadRequest)
+	assertStatus(t, response, http.StatusNotFound)
 }
 
 func TestPreviewValidationRequiredBeforeRelease(t *testing.T) {
@@ -683,6 +686,57 @@ func TestCreateBuildRejectsDirectReleaseChannel(t *testing.T) {
 	apiErr := decodeAPIError(t, response)
 	if apiErr.Error.Code != "BUILD_CREATE_INVALID_RELEASE_CHANNEL" {
 		t.Fatalf("expected direct release channel error, got %#v", apiErr)
+	}
+}
+
+func TestAPIErrorIncludesI18nKeysAndRequestContext(t *testing.T) {
+	store, _ := newTestServerStore(t)
+	server := NewServer(store, nil, nil).Routes()
+
+	response := doRequestWithHeaders(
+		t,
+		server,
+		http.MethodPost,
+		"/api/builds",
+		`{"productId":"lsap","target":"linux","version":"1.0.0","releaseChannel":"release"}`,
+		map[string]string{
+			"X-Request-Id":     "req-test-123",
+			"X-Correlation-Id": "corr-test-123",
+		},
+	)
+	assertStatus(t, response, http.StatusBadRequest)
+	if response.Header().Get("X-Request-Id") != "req-test-123" || response.Header().Get("X-Correlation-Id") != "corr-test-123" {
+		t.Fatalf("request context headers were not propagated: %#v", response.Header())
+	}
+	apiErr := decodeAPIError(t, response)
+	if apiErr.Error.Status != http.StatusBadRequest ||
+		apiErr.Error.MessageKey != "errors.build.invalidReleaseChannel" ||
+		apiErr.Error.UserActionKey != "actions.createPreviewFirst" ||
+		apiErr.Error.RequestID != "req-test-123" ||
+		apiErr.Error.CorrelationID != "corr-test-123" {
+		t.Fatalf("unexpected i18n error contract: %#v", apiErr)
+	}
+}
+
+func TestWriteErrorMapsAppErrorKindAndDetails(t *testing.T) {
+	response := httptest.NewRecorder()
+	err := apperr.Validation("VALIDATION_INVALID_REQUEST", "target is not supported").
+		WithField("target").
+		WithParam("target", "darwin")
+
+	writeError(response, http.StatusInternalServerError, err)
+
+	assertStatus(t, response, http.StatusBadRequest)
+	apiErr := decodeAPIError(t, response)
+	if apiErr.Error.Code != "VALIDATION_INVALID_REQUEST" ||
+		apiErr.Error.Status != http.StatusBadRequest ||
+		apiErr.Error.MessageKey != "errors.validation.invalidRequest" {
+		t.Fatalf("unexpected mapped app error: %#v", apiErr)
+	}
+	if len(apiErr.Error.Details) != 1 ||
+		apiErr.Error.Details[0].Field != "target" ||
+		apiErr.Error.Details[0].Params["target"] != "darwin" {
+		t.Fatalf("expected field and params to become error details, got %#v", apiErr.Error.Details)
 	}
 }
 
@@ -981,9 +1035,17 @@ func newTestServerStore(t *testing.T) (*storepkg.JSONStore, string) {
 
 func doRequest(t *testing.T, handler http.Handler, method string, path string, body string) *httptest.ResponseRecorder {
 	t.Helper()
+	return doRequestWithHeaders(t, handler, method, path, body, nil)
+}
+
+func doRequestWithHeaders(t *testing.T, handler http.Handler, method string, path string, body string, headers map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	if body != "" {
 		request.Header.Set("Content-Type", "application/json")
+	}
+	for key, value := range headers {
+		request.Header.Set(key, value)
 	}
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)

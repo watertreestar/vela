@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"packaging-platform/backend/internal/apperr"
 	"packaging-platform/backend/internal/domain"
 )
 
@@ -113,7 +114,12 @@ func resolveComponent(component domain.Component, source domain.ComponentSource,
 			if source.UploadID != "" && uploads != nil {
 				record, err := uploads.ReadUpload(source.UploadID)
 				if err != nil {
-					return domain.ResolvedComponent{}, fmt.Errorf("component %s upload %s not found", component.ID, source.UploadID)
+					return domain.ResolvedComponent{}, apperr.Wrap(
+						err,
+						apperr.KindNotFound,
+						"RESOURCE_NOT_FOUND",
+						fmt.Sprintf("component %s upload %s not found", component.ID, source.UploadID),
+					).WithParam("componentId", component.ID).WithParam("uploadId", source.UploadID)
 				}
 				uri = record.URI
 				sha256 = record.SHA256
@@ -123,7 +129,9 @@ func resolveComponent(component domain.Component, source domain.ComponentSource,
 				break
 			}
 			if source.URI == "" {
-				return domain.ResolvedComponent{}, fmt.Errorf("component %s requires upload uri", component.ID)
+				return domain.ResolvedComponent{}, apperr.Validation("VALIDATION_REQUIRED_FIELD", fmt.Sprintf("component %s requires upload uri", component.ID)).
+					WithField("components.source.uri").
+					WithParam("componentId", component.ID)
 			}
 			uri = source.URI
 		case "fixed-url":
@@ -131,7 +139,10 @@ func resolveComponent(component domain.Component, source domain.ComponentSource,
 		case "previous-build":
 			uri = source.URI
 		default:
-			return domain.ResolvedComponent{}, fmt.Errorf("unsupported source kind %q for component %s", source.Kind, component.ID)
+			return domain.ResolvedComponent{}, apperr.Validation("VALIDATION_INVALID_REQUEST", fmt.Sprintf("unsupported source kind %q for component %s", source.Kind, component.ID)).
+				WithField("components.source.kind").
+				WithParam("kind", source.Kind).
+				WithParam("componentId", component.ID)
 		}
 	}
 	return domain.ResolvedComponent{
@@ -154,14 +165,19 @@ func resolveWorkloads(workloads []domain.Workload, config map[string]any, compon
 	resolved := make([]domain.ResolvedWorkload, 0, len(workloads))
 	for _, workload := range workloads {
 		if workload.ID == "" {
-			return nil, fmt.Errorf("workload id is required")
+			return nil, apperr.Validation("VALIDATION_REQUIRED_FIELD", "workload id is required").WithField("workloads.id")
 		}
 		if workload.Runtime == "" {
-			return nil, fmt.Errorf("workload %s runtime is required", workload.ID)
+			return nil, apperr.Validation("VALIDATION_REQUIRED_FIELD", fmt.Sprintf("workload %s runtime is required", workload.ID)).
+				WithField("workloads.runtime").
+				WithParam("workloadId", workload.ID)
 		}
 		enabled := workloadEnabled(workload, config)
 		if enabled && workload.Component != "" && !componentIDs[workload.Component] {
-			return nil, fmt.Errorf("workload %s references unknown component %s", workload.ID, workload.Component)
+			return nil, apperr.Validation("VALIDATION_INVALID_REQUEST", fmt.Sprintf("workload %s references unknown component %s", workload.ID, workload.Component)).
+				WithField("workloads.component").
+				WithParam("workloadId", workload.ID).
+				WithParam("componentId", workload.Component)
 		}
 		resolved = append(resolved, domain.ResolvedWorkload{
 			ID:        workload.ID,

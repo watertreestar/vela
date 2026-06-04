@@ -143,6 +143,18 @@ cd runner
 docker build -t packaging-runner:local .
 ```
 
+## Development Conventions
+
+Naming style:
+
+- Go identifiers use MixedCaps, for example `RequestID`, `CorrelationID`, and `BuildLock`.
+- API JSON request and response fields use camelCase, for example `requestId`, `correlationId`, `productId`, and `messageKey`.
+- Structured log and monitoring fields use snake_case, for example `request_id`, `correlation_id`, `error_code`, and `duration_ms`.
+- Error codes use SCREAMING_SNAKE_CASE, for example `BUILD_STATE_CONFLICT` and `RESOURCE_NOT_FOUND`.
+- Release gate and error detail IDs use dotted kebab-case, for example `release.fixed-version` and `preview.build-lock`.
+
+Go code should not use snake_case for ordinary identifiers. Keep snake_case for logs, metrics, database-style fields, or external systems that expect it. The current public API contract uses camelCase JSON and should remain stable for frontend and client compatibility.
+
 ## Environment
 
 Backend variables:

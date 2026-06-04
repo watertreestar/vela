@@ -7,20 +7,26 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+
+	"packaging-platform/backend/internal/apperr"
 )
 
 var overlayNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 func validateOverlayKind(kind string) error {
 	if kind != "profiles" && kind != "customers" {
-		return fmt.Errorf("unsupported overlay kind %q", kind)
+		return apperr.Validation("VALIDATION_INVALID_REQUEST", fmt.Sprintf("unsupported overlay kind %q", kind)).
+			WithField("kind").
+			WithParam("kind", kind)
 	}
 	return nil
 }
 
 func validateOverlayName(name string) error {
 	if name == "" || !overlayNamePattern.MatchString(name) {
-		return fmt.Errorf("invalid overlay name %q", name)
+		return apperr.Validation("VALIDATION_INVALID_REQUEST", fmt.Sprintf("invalid overlay name %q", name)).
+			WithField("name").
+			WithParam("name", name)
 	}
 	return nil
 }

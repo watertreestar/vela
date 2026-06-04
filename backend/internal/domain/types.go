@@ -172,22 +172,29 @@ type ReleaseCheckItem struct {
 }
 
 type APIErrorDetail struct {
-	Code    string `json:"code,omitempty"`
-	Field   string `json:"field,omitempty"`
-	Stage   string `json:"stage,omitempty"`
-	Title   string `json:"title,omitempty"`
-	Message string `json:"message"`
+	Code       string            `json:"code,omitempty"`
+	Field      string            `json:"field,omitempty"`
+	Stage      string            `json:"stage,omitempty"`
+	Title      string            `json:"title,omitempty"`
+	TitleKey   string            `json:"titleKey,omitempty"`
+	MessageKey string            `json:"messageKey,omitempty"`
+	Message    string            `json:"message"`
+	Params     map[string]string `json:"params,omitempty"`
 }
 
 type APIError struct {
-	Code       string           `json:"code"`
-	Message    string           `json:"message"`
-	Severity   string           `json:"severity"`
-	Category   string           `json:"category"`
-	Retryable  bool             `json:"retryable"`
-	UserAction string           `json:"userAction,omitempty"`
-	RequestID  string           `json:"requestId,omitempty"`
-	Details    []APIErrorDetail `json:"details,omitempty"`
+	Code          string           `json:"code"`
+	Status        int              `json:"status"`
+	MessageKey    string           `json:"messageKey,omitempty"`
+	Message       string           `json:"message"`
+	Severity      string           `json:"severity"`
+	Category      string           `json:"category"`
+	Retryable     bool             `json:"retryable"`
+	UserActionKey string           `json:"userActionKey,omitempty"`
+	UserAction    string           `json:"userAction,omitempty"`
+	RequestID     string           `json:"requestId,omitempty"`
+	CorrelationID string           `json:"correlationId,omitempty"`
+	Details       []APIErrorDetail `json:"details,omitempty"`
 }
 
 type APIErrorResponse struct {

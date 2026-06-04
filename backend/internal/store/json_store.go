@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"packaging-platform/backend/internal/apperr"
 	"packaging-platform/backend/internal/domain"
 )
 
@@ -64,6 +65,9 @@ func (s *JSONStore) ReadProduct(id string) (domain.Product, error) {
 	file := filepath.Join(s.productsDir, id, "product.json")
 	content, err := os.ReadFile(file)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return domain.Product{}, apperr.NotFound("product", id)
+		}
 		return domain.Product{}, err
 	}
 
@@ -81,6 +85,9 @@ func (s *JSONStore) ReadProductManifest(id string) (json.RawMessage, error) {
 	file := filepath.Join(s.productsDir, id, "product.json")
 	content, err := os.ReadFile(file)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, apperr.NotFound("product", id)
+		}
 		return nil, err
 	}
 	var raw json.RawMessage
@@ -99,7 +106,10 @@ func (s *JSONStore) WriteProductManifest(id string, raw json.RawMessage) (domain
 		product.ID = id
 	}
 	if product.ID != id {
-		return domain.Product{}, fmt.Errorf("manifest id %q does not match product %q", product.ID, id)
+		return domain.Product{}, apperr.Validation("VALIDATION_INVALID_REQUEST", fmt.Sprintf("manifest id %q does not match product %q", product.ID, id)).
+			WithField("id").
+			WithParam("manifestId", product.ID).
+			WithParam("productId", id)
 	}
 
 	dir := filepath.Join(s.productsDir, id)
@@ -151,7 +161,7 @@ func (s *JSONStore) ReadManifestRevision(productID string, revisionID string) (d
 			return revision, nil
 		}
 	}
-	return domain.ManifestRevision{}, fmt.Errorf("manifest revision %s not found", revisionID)
+	return domain.ManifestRevision{}, apperr.NotFound("manifest_revision", revisionID)
 }
 
 func (s *JSONStore) RestoreManifestRevision(productID string, revisionID string) (domain.Product, error) {
@@ -201,7 +211,7 @@ func (s *JSONStore) ReadBuild(id string) (domain.Build, error) {
 			return build, nil
 		}
 	}
-	return domain.Build{}, fmt.Errorf("build %s not found", id)
+	return domain.Build{}, apperr.NotFound("build", id)
 }
 
 func (s *JSONStore) SaveBuild(build domain.Build) error {
@@ -246,7 +256,7 @@ func (s *JSONStore) UpdateBuild(id string, update func(*domain.Build) error) (do
 		}
 		return builds[index], nil
 	}
-	return domain.Build{}, fmt.Errorf("build %s not found", id)
+	return domain.Build{}, apperr.NotFound("build", id)
 }
 
 func (s *JSONStore) ClaimBuild(target string, runnerID string) (domain.Build, bool, error) {
@@ -284,7 +294,7 @@ func (s *JSONStore) ClaimBuild(target string, runnerID string) (domain.Build, bo
 func (s *JSONStore) RetryBuild(id string) (domain.Build, error) {
 	return s.UpdateBuild(id, func(build *domain.Build) error {
 		if build.Status != domain.BuildFailed && build.Status != domain.BuildCanceled {
-			return fmt.Errorf("only failed or canceled builds can be retried")
+			return apperr.Conflict("BUILD_STATE_CONFLICT", "only failed or canceled builds can be retried")
 		}
 		build.Status = domain.BuildQueued
 		build.Error = ""
@@ -314,7 +324,7 @@ func (s *JSONStore) CancelBuild(id string) (domain.Build, error) {
 			})
 			return nil
 		default:
-			return fmt.Errorf("only pending, queued, or running builds can be canceled")
+			return apperr.Conflict("BUILD_STATE_CONFLICT", "only pending, queued, or running builds can be canceled")
 		}
 	})
 }
@@ -368,7 +378,7 @@ func (s *JSONStore) ReadUpload(id string) (domain.UploadRecord, error) {
 			return record, nil
 		}
 	}
-	return domain.UploadRecord{}, fmt.Errorf("upload %s not found", id)
+	return domain.UploadRecord{}, apperr.NotFound("upload", id)
 }
 
 func (s *JSONStore) readBuildsLocked() ([]domain.Build, error) {

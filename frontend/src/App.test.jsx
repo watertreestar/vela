@@ -746,7 +746,7 @@ describe("Packaging dashboard", () => {
     await user.click(screen.getByRole("button", { name: /构建记录/ }));
     await user.click(screen.getAllByRole("button", { name: "通过" })[0]);
 
-    expect(await screen.findByText("only pending or rejected builds can be approved")).toBeInTheDocument();
+    expect(await screen.findByText("当前构建状态不允许执行该操作")).toBeInTheDocument();
   });
 
   it("requires preview validation before promoting a build to release", async () => {
@@ -782,15 +782,18 @@ describe("Packaging dashboard", () => {
           {
             error: {
               code: "BUILD_RELEASE_GATE_BLOCKED",
-              message: "Release 门禁未通过",
+              messageKey: "errors.build.releaseGateBlocked",
+              message: "release gate blocked",
               severity: "warning",
               category: "business",
-              userAction: "请先修复阻塞项后再发布",
+              userActionKey: "actions.fixReleaseGate",
+              userAction: "fix release gate blockers before publishing",
               details: [
                 {
                   code: "release.exact-component-uris",
                   stage: "release",
-                  title: "组件 URI 精确",
+                  titleKey: "release.check.exactComponentUris.title",
+                  messageKey: "release.check.exactComponentUris.reason",
                   message: "release requires exact component URIs without wildcards",
                 },
               ],
@@ -886,7 +889,9 @@ describe("Packaging dashboard", () => {
     await screen.findByRole("heading", { name: "总览" });
     await user.click(screen.getAllByRole("button", { name: /创建构建/ })[0]);
 
-    expect(screen.getByText("选择已有上传记录")).toBeInTheDocument();
+    expect(screen.getByText("已有上传")).toBeInTheDocument();
+    expect(screen.getByText("组件总数")).toBeInTheDocument();
+    expect(screen.getByText("来源就绪")).toBeInTheDocument();
     expect(screen.getAllByText("不复用上传记录").length).toBeGreaterThan(0);
   });
 

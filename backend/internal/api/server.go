@@ -5,12 +5,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"packaging-platform/backend/internal/apperr"
 	"packaging-platform/backend/internal/artifact"
 	"packaging-platform/backend/internal/domain"
 	manifestvalidator "packaging-platform/backend/internal/manifest"
@@ -65,7 +67,7 @@ func (s Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/uploads", s.uploadArtifact)
 	mux.HandleFunc("GET /api/uploads", s.listUploads)
 	mux.HandleFunc("GET /api/uploads/{id}/download", s.downloadUpload)
-	return cors(mux)
+	return requestContext(cors(mux))
 }
 
 func (s Server) health(w http.ResponseWriter, r *http.Request) {
@@ -102,11 +104,11 @@ func (s Server) getProductManifest(w http.ResponseWriter, r *http.Request) {
 func (s Server) updateProductManifest(w http.ResponseWriter, r *http.Request) {
 	var raw json.RawMessage
 	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
-		writeAPIError(w, http.StatusBadRequest, "VALIDATION_INVALID_JSON", "请求 JSON 无法解析", nil)
+		writeAPIError(w, http.StatusBadRequest, "VALIDATION_INVALID_JSON", "", nil)
 		return
 	}
 	if _, errors := manifestvalidator.ValidateProduct(raw); len(errors) > 0 {
-		writeAPIError(w, http.StatusBadRequest, "MANIFEST_SCHEMA_INVALID", "Manifest 校验失败", errorDetails(errors))
+		writeAPIError(w, http.StatusBadRequest, "MANIFEST_SCHEMA_INVALID", "", errorDetails(errors))
 		return
 	}
 	product, err := s.store.WriteProductManifest(r.PathValue("id"), raw)
@@ -120,7 +122,7 @@ func (s Server) updateProductManifest(w http.ResponseWriter, r *http.Request) {
 func (s Server) dryRunProductManifest(w http.ResponseWriter, r *http.Request) {
 	var request domain.ManifestDryRunRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		writeAPIError(w, http.StatusBadRequest, "VALIDATION_INVALID_JSON", "请求 JSON 无法解析", nil)
+		writeAPIError(w, http.StatusBadRequest, "VALIDATION_INVALID_JSON", "", nil)
 		return
 	}
 	if len(request.Manifest) == 0 {
@@ -260,7 +262,7 @@ func (s Server) downloadBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if build.ArtifactURI == "" {
-		writeErrorText(w, http.StatusNotFound, "build artifact is not available")
+		writeAPIError(w, http.StatusNotFound, "BUILD_ARTIFACT_NOT_AVAILABLE", "", nil)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"artifactUri": build.ArtifactURI})
@@ -269,7 +271,7 @@ func (s Server) downloadBuild(w http.ResponseWriter, r *http.Request) {
 func (s Server) createBuild(w http.ResponseWriter, r *http.Request) {
 	var request domain.BuildRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		writeAPIError(w, http.StatusBadRequest, "VALIDATION_INVALID_JSON", "请求 JSON 无法解析", nil)
+		writeAPIError(w, http.StatusBadRequest, "VALIDATION_INVALID_JSON", "", nil)
 		return
 	}
 	if strings.TrimSpace(request.ProductID) == "" || strings.TrimSpace(request.Target) == "" {
@@ -315,7 +317,7 @@ func (s Server) createBuild(w http.ResponseWriter, r *http.Request) {
 		build.ReleaseChannel = "preview"
 	}
 	if build.ReleaseChannel == "release" {
-		writeAPIError(w, http.StatusBadRequest, "BUILD_CREATE_INVALID_RELEASE_CHANNEL", "release builds must be promoted from validated preview builds", nil)
+		writeAPIError(w, http.StatusBadRequest, "BUILD_CREATE_INVALID_RELEASE_CHANNEL", "", nil)
 		return
 	}
 	request.Profile = build.Profile
@@ -378,7 +380,7 @@ func (s Server) approveBuild(w http.ResponseWriter, r *http.Request) {
 
 	jobID, schedulerLog, err := s.scheduler.Submit(current, product)
 	if err != nil {
-		updated, _ := s.store.UpdateBuild(id, func(build *domain.Build) error {
+		_, _ = s.store.UpdateBuild(id, func(build *domain.Build) error {
 			build.Status = domain.BuildFailed
 			build.Error = err.Error()
 			build.SchedulerLog = schedulerLog
@@ -386,7 +388,9 @@ func (s Server) approveBuild(w http.ResponseWriter, r *http.Request) {
 			build.Logs = append(build.Logs, logEntry("system", "approval failed: "+err.Error()))
 			return nil
 		})
-		writeJSON(w, http.StatusBadGateway, withReleaseCheckSummary(updated))
+		writeAPIErrorWithCause(w, http.StatusBadGateway, "SCHEDULER_SUBMIT_FAILED", "", []domain.APIErrorDetail{
+			{Message: "scheduler failed to submit build"},
+		}, err)
 		return
 	}
 
@@ -432,7 +436,7 @@ func (s Server) validatePreviewBuild(w http.ResponseWriter, r *http.Request) {
 		}
 		check := buildReleaseCheck(*build)
 		if !check.PreviewReady {
-			return releaseGateError("BUILD_PREVIEW_NOT_READY", "Preview 验证门禁未通过", check, "preview")
+			return releaseGateError("BUILD_PREVIEW_NOT_READY", "", check, "preview")
 		}
 		build.Status = domain.BuildPreviewValidated
 		build.ReleaseChannel = "preview"
@@ -450,7 +454,12 @@ func (s Server) validatePreviewBuild(w http.ResponseWriter, r *http.Request) {
 
 func (s Server) publishBuild(w http.ResponseWriter, r *http.Request) {
 	var request domain.RunnerCompleteRequest
-	_ = json.NewDecoder(r.Body).Decode(&request)
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "VALIDATION_INVALID_JSON", "", nil)
+			return
+		}
+	}
 
 	now := time.Now().UTC()
 	updated, err := s.store.UpdateBuild(r.PathValue("id"), func(build *domain.Build) error {
@@ -459,7 +468,7 @@ func (s Server) publishBuild(w http.ResponseWriter, r *http.Request) {
 		}
 		check := buildReleaseCheck(*build)
 		if !check.ReleaseReady {
-			return releaseGateError("BUILD_RELEASE_GATE_BLOCKED", "Release 门禁未通过", check, "")
+			return releaseGateError("BUILD_RELEASE_GATE_BLOCKED", "", check, "")
 		}
 		if request.ArtifactURI != "" {
 			build.ArtifactURI = request.ArtifactURI
@@ -499,7 +508,9 @@ func (s Server) retryBuild(w http.ResponseWriter, r *http.Request) {
 	}
 	jobID, schedulerLog, err := s.scheduler.Submit(current, product)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
+		writeAPIErrorWithCause(w, http.StatusBadGateway, "SCHEDULER_SUBMIT_FAILED", "", []domain.APIErrorDetail{
+			{Message: "scheduler failed to submit build"},
+		}, err)
 		return
 	}
 	updated, err := s.store.UpdateBuild(id, func(build *domain.Build) error {
@@ -527,7 +538,9 @@ func (s Server) cancelBuild(w http.ResponseWriter, r *http.Request) {
 	}
 	if current.NomadJobID != "" && (current.Status == domain.BuildQueued || current.Status == domain.BuildRunning) {
 		if err := s.scheduler.Stop(current.NomadJobID); err != nil {
-			writeError(w, http.StatusBadGateway, err)
+			writeAPIErrorWithCause(w, http.StatusBadGateway, "SCHEDULER_STOP_FAILED", "", []domain.APIErrorDetail{
+				{Message: "scheduler failed to stop build"},
+			}, err)
 			return
 		}
 	}
@@ -603,8 +616,7 @@ func (s Server) streamBuildLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := sendNew(); err != nil {
-		_, _ = w.Write([]byte("event: error\n"))
-		_, _ = w.Write([]byte("data: " + strconv.Quote(err.Error()) + "\n\n"))
+		writeSSEError(w, http.StatusNotFound, "RESOURCE_NOT_FOUND", err.Error())
 		flusher.Flush()
 		return
 	}
@@ -619,8 +631,7 @@ func (s Server) streamBuildLogs(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-ticker.C:
 			if err := sendNew(); err != nil {
-				_, _ = w.Write([]byte("event: error\n"))
-				_, _ = w.Write([]byte("data: " + strconv.Quote(err.Error()) + "\n\n"))
+				writeSSEError(w, http.StatusNotFound, "RESOURCE_NOT_FOUND", err.Error())
 				flusher.Flush()
 				return
 			}
@@ -768,7 +779,7 @@ func (s Server) downloadUpload(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	record = normalizeUploadRecord(record, now)
 	if uploadRetentionStatus(record, now) == "expired" {
-		writeAPIError(w, http.StatusGone, "ARTIFACT_EXPIRED", "制品已超过保留期限，不能下载", nil)
+		writeAPIError(w, http.StatusGone, "ARTIFACT_EXPIRED", "", nil)
 		return
 	}
 	if err := s.artifacts.ServeUpload(w, r, r.PathValue("id")); err != nil {
@@ -792,32 +803,61 @@ func writeRawJSON(w http.ResponseWriter, status int, payload json.RawMessage) {
 }
 
 func writeError(w http.ResponseWriter, status int, err error) {
-	var apiErr apiError
-	if errors.As(err, &apiErr) {
-		if apiErr.Status != 0 {
-			status = apiErr.Status
-		}
-		writeAPIError(w, status, apiErr.Code, apiErr.Message, apiErr.Details)
+	var appErr *apperr.AppError
+	if errors.As(err, &appErr) {
+		status = appErrorStatus(appErr, status)
+		code := firstNonEmpty(appErr.Code, defaultErrorCode(status))
+		logAPIError(w, status, code, err)
+		writeAPIError(w, status, code, appErr.Message, appErrorDetails(appErr))
 		return
 	}
-	writeErrorText(w, status, err.Error())
+	code := defaultErrorCode(status)
+	logAPIError(w, status, code, err)
+	writeAPIError(w, status, code, "", nil)
 }
 
 func writeErrorText(w http.ResponseWriter, status int, message string) {
 	writeAPIError(w, status, defaultErrorCode(status), message, nil)
 }
 
+func writeAPIErrorWithCause(w http.ResponseWriter, status int, code string, message string, details []domain.APIErrorDetail, cause error) {
+	logAPIError(w, status, code, cause)
+	writeAPIError(w, status, code, message, details)
+}
+
 func writeAPIError(w http.ResponseWriter, status int, code string, message string, details []domain.APIErrorDetail) {
+	spec := errorSpecFor(code, status)
+	if strings.TrimSpace(message) == "" {
+		message = spec.Message
+	}
+	if code == "" {
+		code = spec.Code
+	}
+	details = enrichErrorDetails(details)
+	requestID := w.Header().Get("X-Request-Id")
+	if requestID == "" {
+		requestID = "req_" + randomID()
+		w.Header().Set("X-Request-Id", requestID)
+	}
+	correlationID := w.Header().Get("X-Correlation-Id")
+	if correlationID == "" {
+		correlationID = "corr_" + randomID()
+		w.Header().Set("X-Correlation-Id", correlationID)
+	}
 	response := domain.APIErrorResponse{
 		Error: domain.APIError{
-			Code:       code,
-			Message:    message,
-			Severity:   errorSeverity(status),
-			Category:   errorCategory(status, code),
-			Retryable:  errorRetryable(status),
-			UserAction: errorUserAction(code),
-			RequestID:  "req_" + randomID(),
-			Details:    details,
+			Code:          code,
+			Status:        status,
+			MessageKey:    spec.MessageKey,
+			Message:       message,
+			Severity:      spec.Severity,
+			Category:      spec.Category,
+			Retryable:     spec.Retryable,
+			UserActionKey: spec.UserActionKey,
+			UserAction:    spec.UserAction,
+			RequestID:     requestID,
+			CorrelationID: correlationID,
+			Details:       details,
 		},
 	}
 	for _, detail := range details {
@@ -826,15 +866,287 @@ func writeAPIError(w http.ResponseWriter, status int, code string, message strin
 	writeJSON(w, status, response)
 }
 
-type apiError struct {
-	Status  int
-	Code    string
-	Message string
-	Details []domain.APIErrorDetail
+func logAPIError(w http.ResponseWriter, status int, code string, err error) {
+	if err == nil || !shouldLogAPIError(status) {
+		return
+	}
+	slog.Error("api request failed",
+		"error", err,
+		"status", status,
+		"error_code", code,
+		"request_id", w.Header().Get("X-Request-Id"),
+		"correlation_id", w.Header().Get("X-Correlation-Id"),
+	)
 }
 
-func (err apiError) Error() string {
-	return err.Message
+func shouldLogAPIError(status int) bool {
+	return status >= http.StatusInternalServerError ||
+		status == http.StatusBadGateway ||
+		status == http.StatusServiceUnavailable ||
+		status == http.StatusGatewayTimeout
+}
+
+func writeSSEError(w http.ResponseWriter, status int, code string, message string) {
+	spec := errorSpecFor(code, status)
+	requestID := w.Header().Get("X-Request-Id")
+	if requestID == "" {
+		requestID = "req_" + randomID()
+	}
+	correlationID := w.Header().Get("X-Correlation-Id")
+	if correlationID == "" {
+		correlationID = "corr_" + strings.TrimPrefix(requestID, "req_")
+	}
+	payload := domain.APIErrorResponse{
+		Error: domain.APIError{
+			Code:          spec.Code,
+			Status:        status,
+			MessageKey:    spec.MessageKey,
+			Message:       firstNonEmpty(message, spec.Message),
+			Severity:      spec.Severity,
+			Category:      spec.Category,
+			Retryable:     spec.Retryable,
+			RequestID:     requestID,
+			CorrelationID: correlationID,
+		},
+	}
+	data, _ := json.Marshal(payload)
+	_, _ = w.Write([]byte("event: error\n"))
+	_, _ = w.Write([]byte("data: "))
+	_, _ = w.Write(data)
+	_, _ = w.Write([]byte("\n\n"))
+}
+
+type errorSpec struct {
+	Code          string
+	MessageKey    string
+	Message       string
+	Severity      string
+	Category      string
+	Retryable     bool
+	UserActionKey string
+	UserAction    string
+}
+
+var errorSpecs = map[string]errorSpec{
+	"VALIDATION_INVALID_JSON": {
+		Code:       "VALIDATION_INVALID_JSON",
+		MessageKey: "errors.validation.invalidJson",
+		Message:    "request JSON cannot be parsed",
+		Severity:   "error",
+		Category:   "validation",
+	},
+	"VALIDATION_REQUIRED_FIELD": {
+		Code:       "VALIDATION_REQUIRED_FIELD",
+		MessageKey: "errors.validation.requiredField",
+		Message:    "required fields are missing",
+		Severity:   "error",
+		Category:   "validation",
+	},
+	"VALIDATION_INVALID_REQUEST": {
+		Code:       "VALIDATION_INVALID_REQUEST",
+		MessageKey: "errors.validation.invalidRequest",
+		Message:    "request is invalid",
+		Severity:   "error",
+		Category:   "validation",
+	},
+	"MANIFEST_SCHEMA_INVALID": {
+		Code:          "MANIFEST_SCHEMA_INVALID",
+		MessageKey:    "errors.manifest.schemaInvalid",
+		Message:       "manifest validation failed",
+		Severity:      "error",
+		Category:      "validation",
+		UserActionKey: "actions.fixManifestSchema",
+		UserAction:    "fix manifest validation errors before saving",
+	},
+	"BUILD_STATE_CONFLICT": {
+		Code:       "BUILD_STATE_CONFLICT",
+		MessageKey: "errors.build.stateConflict",
+		Message:    "build state does not allow this action",
+		Severity:   "warning",
+		Category:   "business",
+	},
+	"BUILD_CREATE_INVALID_RELEASE_CHANNEL": {
+		Code:          "BUILD_CREATE_INVALID_RELEASE_CHANNEL",
+		MessageKey:    "errors.build.invalidReleaseChannel",
+		Message:       "release builds must be promoted from validated preview builds",
+		Severity:      "error",
+		Category:      "business",
+		UserActionKey: "actions.createPreviewFirst",
+		UserAction:    "create a preview build and validate it before publishing a release",
+	},
+	"BUILD_RELEASE_GATE_BLOCKED": {
+		Code:          "BUILD_RELEASE_GATE_BLOCKED",
+		MessageKey:    "errors.build.releaseGateBlocked",
+		Message:       "release gate blocked",
+		Severity:      "warning",
+		Category:      "business",
+		UserActionKey: "actions.fixReleaseGate",
+		UserAction:    "fix release gate blockers before publishing",
+	},
+	"BUILD_PREVIEW_NOT_READY": {
+		Code:          "BUILD_PREVIEW_NOT_READY",
+		MessageKey:    "errors.build.previewNotReady",
+		Message:       "preview validation gate blocked",
+		Severity:      "warning",
+		Category:      "business",
+		UserActionKey: "actions.validatePreview",
+		UserAction:    "complete preview build validation before continuing",
+	},
+	"BUILD_ARTIFACT_NOT_AVAILABLE": {
+		Code:       "BUILD_ARTIFACT_NOT_AVAILABLE",
+		MessageKey: "errors.build.artifactNotAvailable",
+		Message:    "build artifact is not available",
+		Severity:   "error",
+		Category:   "resource",
+	},
+	"ARTIFACT_EXPIRED": {
+		Code:       "ARTIFACT_EXPIRED",
+		MessageKey: "errors.artifact.expired",
+		Message:    "artifact retention period has expired",
+		Severity:   "error",
+		Category:   "resource",
+	},
+	"RESOURCE_NOT_FOUND": {
+		Code:       "RESOURCE_NOT_FOUND",
+		MessageKey: "errors.resource.notFound",
+		Message:    "resource not found",
+		Severity:   "error",
+		Category:   "resource",
+	},
+	"SCHEDULER_SUBMIT_FAILED": {
+		Code:       "SCHEDULER_SUBMIT_FAILED",
+		MessageKey: "errors.scheduler.submitFailed",
+		Message:    "scheduler submit failed",
+		Severity:   "critical",
+		Category:   "system",
+		Retryable:  true,
+	},
+	"SCHEDULER_STOP_FAILED": {
+		Code:       "SCHEDULER_STOP_FAILED",
+		MessageKey: "errors.scheduler.stopFailed",
+		Message:    "scheduler stop failed",
+		Severity:   "critical",
+		Category:   "system",
+		Retryable:  true,
+	},
+	"UPSTREAM_UNAVAILABLE": {
+		Code:       "UPSTREAM_UNAVAILABLE",
+		MessageKey: "errors.upstream.unavailable",
+		Message:    "upstream dependency is unavailable",
+		Severity:   "critical",
+		Category:   "system",
+		Retryable:  true,
+	},
+	"SYSTEM_INTERNAL_ERROR": {
+		Code:       "SYSTEM_INTERNAL_ERROR",
+		MessageKey: "errors.system.internal",
+		Message:    "internal server error",
+		Severity:   "critical",
+		Category:   "system",
+		Retryable:  true,
+	},
+	"REQUEST_FAILED": {
+		Code:       "REQUEST_FAILED",
+		MessageKey: "errors.request.failed",
+		Message:    "request failed",
+		Severity:   "error",
+		Category:   "system",
+	},
+}
+
+func errorSpecFor(code string, status int) errorSpec {
+	if spec, ok := errorSpecs[code]; ok {
+		return spec
+	}
+	fallbackCode := code
+	if fallbackCode == "" {
+		fallbackCode = defaultErrorCode(status)
+	}
+	spec := errorSpecs[fallbackCode]
+	if spec.Code == "" {
+		spec = errorSpecs["REQUEST_FAILED"]
+	}
+	spec.Code = fallbackCode
+	spec.Severity = firstNonEmpty(spec.Severity, errorSeverity(status))
+	spec.Category = firstNonEmpty(spec.Category, errorCategory(status, fallbackCode))
+	spec.Retryable = spec.Retryable || errorRetryable(status)
+	return spec
+}
+
+var errorDetailKeys = map[string]struct {
+	TitleKey   string
+	MessageKey string
+}{
+	"preview.succeeded":                {"release.check.previewSucceeded.title", "release.check.previewSucceeded.reason"},
+	"preview.channel":                  {"release.check.previewChannel.title", "release.check.previewChannel.reason"},
+	"preview.artifact":                 {"release.check.previewArtifact.title", "release.check.previewArtifact.reason"},
+	"preview.build-lock":               {"release.check.previewBuildLock.title", "release.check.previewBuildLock.reason"},
+	"preview.lock-identity":            {"release.check.previewLockIdentity.title", "release.check.previewLockIdentity.reason"},
+	"preview.required-components":      {"release.check.previewRequiredComponents.title", "release.check.previewRequiredComponents.reason"},
+	"release.preview-validated":        {"release.check.previewValidated.title", "release.check.previewValidated.reason"},
+	"release.fixed-version":            {"release.check.fixedVersion.title", "release.check.fixedVersion.reason"},
+	"release.exact-component-uris":     {"release.check.exactComponentUris.title", "release.check.exactComponentUris.reason"},
+	"release.fixed-component-versions": {"release.check.fixedComponentVersions.title", "release.check.fixedComponentVersions.reason"},
+	"release.artifact":                 {"release.check.releaseArtifact.title", "release.check.releaseArtifact.reason"},
+	"release.no-build-error":           {"release.check.noBuildError.title", "release.check.noBuildError.reason"},
+}
+
+func enrichErrorDetails(details []domain.APIErrorDetail) []domain.APIErrorDetail {
+	for index := range details {
+		if details[index].Code == "" {
+			continue
+		}
+		keys, ok := errorDetailKeys[details[index].Code]
+		if !ok {
+			continue
+		}
+		if details[index].TitleKey == "" {
+			details[index].TitleKey = keys.TitleKey
+		}
+		if details[index].MessageKey == "" {
+			details[index].MessageKey = keys.MessageKey
+		}
+	}
+	return details
+}
+
+func appErrorStatus(err *apperr.AppError, fallback int) int {
+	switch err.Kind {
+	case apperr.KindValidation:
+		return http.StatusBadRequest
+	case apperr.KindNotFound:
+		return http.StatusNotFound
+	case apperr.KindConflict:
+		return http.StatusConflict
+	case apperr.KindBusiness:
+		return http.StatusUnprocessableEntity
+	case apperr.KindResource:
+		if fallback == http.StatusGone {
+			return http.StatusGone
+		}
+		return http.StatusNotFound
+	case apperr.KindDependency:
+		return http.StatusBadGateway
+	case apperr.KindSystem:
+		return http.StatusInternalServerError
+	default:
+		return fallback
+	}
+}
+
+func appErrorDetails(err *apperr.AppError) []domain.APIErrorDetail {
+	if len(err.Details) > 0 {
+		return err.Details
+	}
+	if err.Field == "" && len(err.Params) == 0 {
+		return nil
+	}
+	return []domain.APIErrorDetail{{
+		Code:    err.Code,
+		Field:   err.Field,
+		Message: err.Message,
+		Params:  err.Params,
+	}}
 }
 
 func releaseGateError(code string, message string, check domain.ReleaseCheckResult, stage string) error {
@@ -850,11 +1162,11 @@ func releaseGateError(code string, message string, check domain.ReleaseCheckResu
 			Message: item.Reason,
 		})
 	}
-	return apiError{Status: http.StatusUnprocessableEntity, Code: code, Message: message, Details: details}
+	return apperr.Business(code, message).WithDetails(details)
 }
 
 func buildStateConflict(message string) error {
-	return apiError{Status: http.StatusConflict, Code: "BUILD_STATE_CONFLICT", Message: message}
+	return apperr.Conflict("BUILD_STATE_CONFLICT", message)
 }
 
 func errorDetails(messages []string) []domain.APIErrorDetail {
@@ -1117,10 +1429,55 @@ func appendBuildLog(logs []domain.BuildLog, source string, message string) []dom
 	return append(logs, entry)
 }
 
+func requestContext(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		startedAt := time.Now()
+		requestID := strings.TrimSpace(r.Header.Get("X-Request-Id"))
+		if requestID == "" {
+			requestID = "req_" + randomID()
+		}
+		correlationID := strings.TrimSpace(r.Header.Get("X-Correlation-Id"))
+		if correlationID == "" {
+			correlationID = requestID
+			if !strings.HasPrefix(correlationID, "corr_") {
+				correlationID = "corr_" + strings.TrimPrefix(requestID, "req_")
+			}
+		}
+		w.Header().Set("X-Request-Id", requestID)
+		w.Header().Set("X-Correlation-Id", correlationID)
+		recorder := &statusResponseWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(recorder, r)
+		slog.Info("http request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", recorder.status,
+			"duration_ms", time.Since(startedAt).Milliseconds(),
+			"request_id", requestID,
+			"correlation_id", correlationID,
+		)
+	})
+}
+
+type statusResponseWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusResponseWriter) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusResponseWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
 func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type,X-Request-Id,X-Correlation-Id")
 		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)

@@ -1,16 +1,32 @@
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8080";
 
 export class ApiError extends Error {
-  constructor({ status, code, message, severity, category, retryable, userAction, requestId, details }) {
+  constructor({
+    status,
+    code,
+    messageKey,
+    message,
+    severity,
+    category,
+    retryable,
+    userActionKey,
+    userAction,
+    requestId,
+    correlationId,
+    details,
+  }) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code || "REQUEST_FAILED";
+    this.messageKey = messageKey || "";
     this.severity = severity || (status >= 500 ? "critical" : "error");
     this.category = category || "system";
     this.retryable = Boolean(retryable);
+    this.userActionKey = userActionKey || "";
     this.userAction = userAction || "";
     this.requestId = requestId || "";
+    this.correlationId = correlationId || "";
     this.details = details || [];
   }
 }
@@ -21,12 +37,15 @@ function toApiError(payload, status, fallback) {
     return new ApiError({
       status,
       code: error.code,
+      messageKey: error.messageKey,
       message: error.message || fallback,
       severity: error.severity,
       category: error.category,
       retryable: error.retryable,
+      userActionKey: error.userActionKey,
       userAction: error.userAction,
       requestId: error.requestId,
+      correlationId: error.correlationId,
       details: error.details || [],
     });
   }
