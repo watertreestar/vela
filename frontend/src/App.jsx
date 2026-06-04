@@ -2740,7 +2740,10 @@ function BuildsTable({
               <div className="build-card-meta">
                 <AssetLine label="版本" value={build.version || "-"} />
                 <AssetLine label="更新" value={formatDate(build.updatedAt)} />
-                <AssetLine label="门禁" value={getReleaseReadiness(build).ready ? "可发布" : getReleaseReadiness(build).reason || "未通过"} />
+                <Flex justify="between" gap="3" className="asset-line">
+                  <Text color="gray">门禁</Text>
+                  <BuildReleaseGateInline build={build} />
+                </Flex>
               </div>
               <BuildActions
                 build={build}
@@ -2766,6 +2769,7 @@ function BuildsTable({
               <Table.ColumnHeaderCell>目标</Table.ColumnHeaderCell>
               <Table.ColumnHeaderCell>Profile</Table.ColumnHeaderCell>
               <Table.ColumnHeaderCell>状态</Table.ColumnHeaderCell>
+              <Table.ColumnHeaderCell>发布门禁</Table.ColumnHeaderCell>
               <Table.ColumnHeaderCell>更新时间</Table.ColumnHeaderCell>
               <Table.ColumnHeaderCell>制品</Table.ColumnHeaderCell>
               <Table.ColumnHeaderCell>操作</Table.ColumnHeaderCell>
@@ -2774,7 +2778,7 @@ function BuildsTable({
           <Table.Body>
             {builds.length === 0 ? (
               <Table.Row>
-                <Table.Cell colSpan={8}>
+                <Table.Cell colSpan={9}>
                   <Text color="gray">{loading ? "正在加载构建记录" : "没有匹配的构建记录"}</Text>
                 </Table.Cell>
               </Table.Row>
@@ -2796,6 +2800,9 @@ function BuildsTable({
                   <Table.Cell>{build.profile || "-"}</Table.Cell>
                   <Table.Cell>
                     <StatusBadge status={build.status} />
+                  </Table.Cell>
+                  <Table.Cell>
+                    <BuildReleaseGateInline build={build} />
                   </Table.Cell>
                   <Table.Cell>{formatDate(build.updatedAt)}</Table.Cell>
                   <Table.Cell>
@@ -2827,6 +2834,46 @@ function BuildsTable({
         </Table.Root>
       </div>
     </>
+  );
+}
+
+function BuildReleaseGateInline({ build }) {
+  const readiness = getReleaseReadiness(build);
+  if (build.status === "published") {
+    return (
+      <div className="release-readiness is-pass">
+        <Check size={14} />
+        <span>已发布</span>
+      </div>
+    );
+  }
+  if (build.status === "preview_validated") {
+    return readiness.ready ? (
+      <div className="release-readiness is-pass">
+        <Rocket size={14} />
+        <span>可发布</span>
+      </div>
+    ) : (
+      <div className="release-readiness is-blocked">
+        <AlertCircle size={14} />
+        <span>{readiness.blockingCount || 1} 阻塞</span>
+        <small>{readiness.reason || "发布门禁未通过"}</small>
+      </div>
+    );
+  }
+  if (build.status === "succeeded") {
+    return (
+      <div className="release-readiness is-waiting">
+        <ShieldCheck size={14} />
+        <span>待验证 Preview</span>
+      </div>
+    );
+  }
+  return (
+    <div className="release-readiness is-muted">
+      <CircleDot size={14} />
+      <span>等待构建成功</span>
+    </div>
   );
 }
 

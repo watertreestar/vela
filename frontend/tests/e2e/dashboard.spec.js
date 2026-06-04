@@ -380,6 +380,18 @@ test("dashboard renders production-like release data and opens release gate deta
   await expect(page.getByText("0 阻塞")).toHaveCount(2);
 });
 
+test("build list exposes release gate blockers without opening details", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/");
+
+  await page.getByRole("button", { name: /构建记录/ }).click();
+  await page.getByRole("button", { name: /筛选：发布阻塞/ }).click();
+
+  await expect(page.getByText("build-previe").filter({ visible: true })).toHaveCount(1);
+  await expect(page.getByText("1 阻塞").filter({ visible: true })).toHaveCount(1);
+  await expect(page.getByText("Release 需要固定版本，不能使用 latest").filter({ visible: true })).toHaveCount(1);
+});
+
 test("create build form accepts richer component and customer data", async ({ page }) => {
   const state = await mockApi(page);
   await page.goto("/");
