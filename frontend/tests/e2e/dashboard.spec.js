@@ -221,6 +221,23 @@ const uploads = [
     metadata: { productId: "lsap", purpose: "hotfix" },
     createdAt: "2026-05-28T06:08:00Z",
   },
+  ...Array.from({ length: 26 }, (_, index) => {
+    const sequence = String(index + 1).padStart(2, "0");
+    return {
+      id: `upload-acceptance-${sequence}`,
+      fileName: `acceptance-package-${sequence}.tar.gz`,
+      uri: `local-upload://upload-acceptance-${sequence}/acceptance-package-${sequence}.tar.gz`,
+      downloadUrl: `http://localhost:8080/api/uploads/upload-acceptance-${sequence}/download`,
+      sha256: `${sequence.repeat(8)}abcdef0123456789abcdef0123456789`,
+      size: 1024 + index,
+      contentType: "application/gzip",
+      downloadPolicy: index % 2 === 0 ? "platform" : "restricted",
+      retentionDays: index % 3 === 0 ? 7 : 30,
+      retentionStatus: "active",
+      metadata: { productId: "lsap", purpose: `acceptance-${sequence}` },
+      createdAt: `2026-05-28T06:${String(10 + index).padStart(2, "0")}:00Z`,
+    };
+  }),
 ];
 
 const runners = [
@@ -392,16 +409,49 @@ test("build list exposes release gate blockers without opening details", async (
   await expect(page.getByText("Release 需要固定版本，不能使用 latest").filter({ visible: true })).toHaveCount(1);
 });
 
+test("upload records stay usable with a large artifact history", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/");
+
+  await page.getByRole("button", { name: /制品上传/ }).click();
+  const uploadTableScroll = page.locator(".upload-table-scroll");
+  const lastUploadFile = page.getByText("acceptance-package-26.tar.gz", { exact: true });
+  await expect(uploadTableScroll).toBeVisible();
+  await uploadTableScroll.scrollIntoViewIfNeeded();
+  await expect(lastUploadFile).not.toBeInViewport();
+
+  const scrollMetrics = await uploadTableScroll.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+    tableTop: element.getBoundingClientRect().top,
+    headerTop: element.querySelector("thead")?.getBoundingClientRect().top,
+  }));
+  expect(scrollMetrics.scrollHeight).toBeGreaterThan(scrollMetrics.clientHeight);
+  expect(Math.abs((scrollMetrics.headerTop || 0) - scrollMetrics.tableTop)).toBeLessThan(2);
+
+  await uploadTableScroll.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await expect(lastUploadFile).toBeInViewport();
+  await expect(page.getByRole("columnheader", { name: "文件" })).toBeInViewport();
+});
+
 test("create build form accepts richer component and customer data", async ({ page }) => {
   const state = await mockApi(page);
   await page.goto("/");
 
   await page.getByRole("button", { name: /创建构建/ }).first().click();
   await page.getByLabel("客户标识").fill("city-bank");
+  await page.getByRole("button", { name: /下一步/ }).focus();
+  await page.keyboard.press("Enter");
   await page.getByLabel("Web 端口").fill("49100");
   await page.getByLabel("客户名称").fill("城市银行");
+  await page.getByRole("button", { name: /组件/ }).focus();
+  await page.keyboard.press("Enter");
   await page.getByText("组件总数").first().waitFor();
   await page.getByText("已有上传").first().waitFor();
+  await page.getByRole("button", { name: /确认/ }).focus();
+  await page.keyboard.press("Enter");
   const submitButton = page.getByRole("button", { name: /提交构建申请/ });
   await submitButton.focus();
   await page.keyboard.press("Enter");

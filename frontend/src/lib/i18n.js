@@ -20,6 +20,7 @@ const errorMessages = {
   STORAGE_UNAVAILABLE: "存储服务不可用",
   UPSTREAM_UNAVAILABLE: "上游依赖不可用",
   SYSTEM_INTERNAL_ERROR: "服务端内部错误",
+  API_UNAVAILABLE: "无法连接后端 API",
   REQUEST_FAILED: "请求失败",
 };
 
@@ -38,6 +39,7 @@ const messageKeys = {
   "errors.scheduler.stopFailed": "调度器停止任务失败",
   "errors.upstream.unavailable": "上游依赖不可用",
   "errors.system.internal": "服务端内部错误",
+  "errors.api.unavailable": "无法连接后端 API",
   "errors.request.failed": "请求失败",
 };
 
@@ -46,6 +48,7 @@ const userActionKeys = {
   "actions.createPreviewFirst": "请先创建 Preview 构建，验证通过后再转 Release",
   "actions.fixReleaseGate": "请先修复阻塞项后再发布",
   "actions.validatePreview": "请先完成 Preview 构建并确认制品可下载",
+  "actions.checkApiService": "请确认后端服务、PostgreSQL 和对象存储依赖已启动后重试",
 };
 
 const detailMessages = {
@@ -104,6 +107,7 @@ const errorSurfaces = {
   SCHEDULER_STOP_FAILED: "alert",
   STORAGE_UNAVAILABLE: "alert",
   UPSTREAM_UNAVAILABLE: "alert",
+  API_UNAVAILABLE: "alert",
 };
 
 export function translateError(error) {

@@ -7,6 +7,7 @@ import {
   Checkbox,
   Code,
   Dialog,
+  Field,
   Flex,
   Grid,
   Heading,
@@ -20,7 +21,7 @@ import {
   TextArea,
   TextField,
   Tooltip,
-} from "@radix-ui/themes";
+} from "./components/admin/primitives";
 import {
   AlertCircle,
   Ban,
@@ -42,6 +43,7 @@ import {
   LayoutDashboard,
   ListChecks,
   PackageCheck,
+  PanelLeft,
   Play,
   RefreshCcw,
   RotateCcw,
@@ -54,8 +56,9 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
+  API_URL,
   approveBuild,
   buildDownloadUrl,
   buildLogStreamUrl,
@@ -91,13 +94,17 @@ import {
 } from "./lib/i18n";
 import productManifestSchema from "../../docs/product-manifest.schema.json";
 
+const ansiEscapePattern =
+  /[\u001b\u009b][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[a-zA-Z\d]*)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g;
+const unsafeLogControlPattern = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
+
 const statusMeta = {
   pending_approval: { label: "待审批", color: "orange" },
   queued: { label: "排队中", color: "blue" },
   running: { label: "构建中", color: "purple" },
-  succeeded: { label: "Preview 已生成", color: "green" },
-  preview_validated: { label: "Preview 已验证", color: "teal" },
-  published: { label: "Release 已发布", color: "green" },
+  succeeded: { label: "Preview 已生成", color: "gray" },
+  preview_validated: { label: "Preview 已验证", color: "gray" },
+  published: { label: "Release 已发布", color: "gray" },
   rejected: { label: "已拒绝", color: "gray" },
   failed: { label: "失败", color: "red" },
   canceled: { label: "已取消", color: "amber" },
@@ -165,6 +172,10 @@ const overlayNamePattern = /^[A-Za-z0-9._-]+$/;
 
 export default function App() {
   const [activeSection, setActiveSection] = useState("overview");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage?.getItem("packaging.sidebarCollapsed") === "true";
+  });
   const [products, setProducts] = useState([]);
   const [builds, setBuilds] = useState([]);
   const [uploads, setUploads] = useState([]);
@@ -174,6 +185,7 @@ export default function App() {
   const [savingManifest, setSavingManifest] = useState(false);
   const [uploadingStandalone, setUploadingStandalone] = useState(false);
   const [busyAction, setBusyAction] = useState("");
+  const busyActionRef = useRef("");
   const [pageAlert, setPageAlert] = useState(null);
   const [toasts, setToasts] = useState([]);
   const [selectedBuild, setSelectedBuild] = useState(null);
@@ -225,15 +237,30 @@ export default function App() {
     productId: "",
     purpose: "manual-upload",
   });
+  const globalSearchRef = useRef(null);
+  const apiEnvironment = apiEnvironmentLabel(API_URL);
 
   function dismissToast(id) {
     setToasts((current) => current.filter((toast) => toast.id !== id));
   }
 
+  function toggleSidebar() {
+    setSidebarCollapsed((current) => {
+      const next = !current;
+      window.localStorage?.setItem("packaging.sidebarCollapsed", String(next));
+      return next;
+    });
+  }
+
   function setNotice(message, tone = "success") {
     if (!message) return;
     const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    setToasts((current) => [...current.slice(-3), { id, message, tone }]);
+    setToasts((current) => {
+      if (current.some((toast) => toast.message === message && toast.tone === tone)) {
+        return current;
+      }
+      return [...current.slice(-3), { id, message, tone }];
+    });
     window.setTimeout(() => dismissToast(id), 4200);
   }
 
@@ -253,6 +280,10 @@ export default function App() {
   const selectedProduct = useMemo(
     () => products.find((product) => product.id === form.productId),
     [products, form.productId],
+  );
+  const advancedJsonValidation = useMemo(
+    () => validateAdvancedJson(form.variablesText, form.componentOverridesText),
+    [form.variablesText, form.componentOverridesText],
   );
 
   const filteredBuilds = useMemo(() => {
@@ -337,6 +368,18 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    function handleGlobalShortcut(event) {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        globalSearchRef.current?.focus();
+        globalSearchRef.current?.select();
+      }
+    }
+    window.addEventListener("keydown", handleGlobalShortcut);
+    return () => window.removeEventListener("keydown", handleGlobalShortcut);
+  }, []);
+
+  useEffect(() => {
     if (!autoRefresh) return undefined;
     const timer = window.setInterval(() => refresh({ silent: true }), 10000);
     return () => window.clearInterval(timer);
@@ -360,11 +403,15 @@ export default function App() {
       setRunners(nextRunners);
       if (!form.productId && nextProducts[0]) {
         applyProductDefaults(nextProducts[0], false);
-        const manifest = JSON.stringify(await getProductManifest(nextProducts[0].id), null, 2);
-        setManifestText(manifest);
-        setOriginalManifestText(manifest);
-        await loadManifestRevisions(nextProducts[0].id);
-        await loadOverlays(nextProducts[0].id);
+        try {
+          const manifest = JSON.stringify(await getProductManifest(nextProducts[0].id), null, 2);
+          setManifestText(manifest);
+          setOriginalManifestText(manifest);
+          await loadManifestRevisions(nextProducts[0].id, { quiet: true });
+          await loadOverlays(nextProducts[0].id, { quiet: true });
+        } catch (err) {
+          reportOptionalLoadError(err, "产品配置未加载");
+        }
       }
       if (selectedBuild) {
         const fresh = nextBuilds.find((build) => build.id === selectedBuild.id);
@@ -379,6 +426,18 @@ export default function App() {
       setError(err);
     } finally {
       setLoading(false);
+    }
+  }
+
+  function handleGlobalSearchKeyDown(event) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      setActiveSection("builds");
+      return;
+    }
+    if (event.key === "Escape" && searchText) {
+      event.preventDefault();
+      setSearchText("");
     }
   }
 
@@ -422,7 +481,12 @@ export default function App() {
     await loadOverlays(product.id);
   }
 
-  async function loadOverlays(productId = form.productId) {
+  function reportOptionalLoadError(error, prefix = "附加配置未加载") {
+    const alert = normalizeError(error);
+    setNotice(`${prefix}：${alert.message}`, "warning");
+  }
+
+  async function loadOverlays(productId = form.productId, options = {}) {
     if (!productId) return;
     try {
       const [profiles, customers] = await Promise.all([
@@ -434,20 +498,26 @@ export default function App() {
       const currentList = overlayKind === "profiles" ? profiles : customers;
       const nextName = currentList.find((item) => item.name === overlayName)?.name || currentList[0]?.name || "";
       if (nextName) {
-        await loadOverlay(productId, overlayKind, nextName);
+        await loadOverlay(productId, overlayKind, nextName, options);
       } else {
         setOverlayName("");
         setOverlayText("{}");
         setOriginalOverlayText("{}");
       }
     } catch (err) {
+      if (options.quiet) {
+        reportOptionalLoadError(err, "覆盖配置未加载");
+        return;
+      }
       setError(err);
     }
   }
 
-  async function loadOverlay(productId = form.productId, kind = overlayKind, name = overlayName) {
+  async function loadOverlay(productId = form.productId, kind = overlayKind, name = overlayName, options = {}) {
     if (!productId || !name) return;
-    setError("");
+    if (!options.quiet) {
+      setError("");
+    }
     try {
       const record = await getProductOverlay(productId, kind, name);
       const text = JSON.stringify(record.data || {}, null, 2);
@@ -456,6 +526,10 @@ export default function App() {
       setOverlayText(text);
       setOriginalOverlayText(text);
     } catch (err) {
+      if (options.quiet) {
+        reportOptionalLoadError(err, "覆盖配置未加载");
+        return;
+      }
       setError(err);
     }
   }
@@ -470,7 +544,9 @@ export default function App() {
       }
       const parsed = JSON.parse(overlayText);
       await updateProductOverlay(form.productId, overlayKind, overlayName, parsed);
-      setOriginalOverlayText(JSON.stringify(parsed, null, 2));
+      const normalized = JSON.stringify(parsed, null, 2);
+      setOverlayText(normalized);
+      setOriginalOverlayText(normalized);
       await loadOverlays(form.productId);
       setNotice("覆盖配置已保存");
     } catch (err) {
@@ -506,7 +582,9 @@ export default function App() {
         throw new Error(`Manifest 校验失败：${validation.errors.join("；")}`);
       }
       await updateProductManifest(form.productId, parsed);
-      setOriginalManifestText(JSON.stringify(parsed, null, 2));
+      const normalized = JSON.stringify(parsed, null, 2);
+      setManifestText(normalized);
+      setOriginalManifestText(normalized);
       await loadManifestRevisions(form.productId);
       await refresh({ silent: true });
       setNotice("Manifest 已保存");
@@ -520,9 +598,11 @@ export default function App() {
   async function runManifestDryRun() {
     if (!form.productId) return;
     setError("");
-    setDryRunningManifest(true);
     try {
       const manifest = JSON.parse(manifestText || "{}");
+      const variables = parseJsonObjectText(form.variablesText, "构建变量");
+      const componentOverrides = parseJsonObjectText(form.componentOverridesText, "组件覆盖");
+      setDryRunningManifest(true);
       const result = await dryRunProductManifest(form.productId, {
         manifest,
         target: form.target,
@@ -530,9 +610,9 @@ export default function App() {
         customer: form.customer,
         version: form.version,
         releaseChannel: form.releaseChannel,
-        variables: JSON.parse(form.variablesText || "{}"),
+        variables,
         configOverrides: buildConfigOverrides(),
-        componentOverrides: JSON.parse(form.componentOverridesText || "{}"),
+        componentOverrides,
       });
       setManifestDryRun(result);
       setNotice(result.valid ? "Manifest 试运行通过" : "Manifest 试运行未通过");
@@ -543,13 +623,17 @@ export default function App() {
     }
   }
 
-  async function loadManifestRevisions(productId = form.productId) {
+  async function loadManifestRevisions(productId = form.productId, options = {}) {
     if (!productId) return;
     setLoadingManifestRevisions(true);
     try {
       const revisions = await listProductManifestRevisions(productId);
       setManifestRevisions(revisions);
     } catch (err) {
+      if (options.quiet) {
+        reportOptionalLoadError(err, "Manifest 历史未加载");
+        return;
+      }
       setError(err);
     } finally {
       setLoadingManifestRevisions(false);
@@ -592,11 +676,11 @@ export default function App() {
     event.preventDefault();
     setError("");
     setNotice("");
-    setSubmitting(true);
     try {
-      const variables = JSON.parse(form.variablesText || "{}");
-      const componentOverrides = JSON.parse(form.componentOverridesText || "{}");
+      const variables = parseJsonObjectText(form.variablesText, "构建变量");
+      const componentOverrides = parseJsonObjectText(form.componentOverridesText, "组件覆盖");
       const configOverrides = buildConfigOverrides();
+      setSubmitting(true);
       const build = await createBuild({
         productId: form.productId,
         target: form.target,
@@ -623,8 +707,8 @@ export default function App() {
     if (!file) return;
     setError("");
     try {
+      const overrides = parseJsonObjectText(form.componentOverridesText, "组件覆盖");
       const record = await uploadArtifact(file);
-      const overrides = JSON.parse(form.componentOverridesText || "{}");
       overrides[componentId] = {
         kind: "manual-upload",
         uploadId: record.id,
@@ -666,7 +750,7 @@ export default function App() {
   function updateComponentOverride(componentId, patch) {
     setError("");
     try {
-      const overrides = JSON.parse(form.componentOverridesText || "{}");
+      const overrides = parseJsonObjectText(form.componentOverridesText, "组件覆盖");
       overrides[componentId] = {
         ...(overrides[componentId] || {}),
         ...patch,
@@ -692,6 +776,8 @@ export default function App() {
 
   async function runBuildAction(fn, build, label) {
     const key = `${label}:${build.id}`;
+    if (busyActionRef.current) return;
+    busyActionRef.current = key;
     setBusyAction(key);
     setError("");
     setNotice("");
@@ -705,6 +791,7 @@ export default function App() {
     } catch (err) {
       setError(err);
     } finally {
+      busyActionRef.current = "";
       setBusyAction("");
     }
   }
@@ -765,6 +852,7 @@ export default function App() {
         setModule={setModule}
         updateComponentOverride={updateComponentOverride}
         uploadComponent={uploadComponent}
+        advancedJsonValidation={advancedJsonValidation}
       />
     ),
     builds: (
@@ -813,6 +901,7 @@ export default function App() {
         loadingManifestRevisions={loadingManifestRevisions}
         loadManifestRevisions={loadManifestRevisions}
         restoreManifestRevision={restoreManifestRevision}
+        advancedJsonValidation={advancedJsonValidation}
       />
     ),
     overlays: (
@@ -859,8 +948,8 @@ export default function App() {
   }[activeSection];
 
   return (
-    <div className="admin-shell">
-      <aside className="admin-sidebar">
+    <div className={`admin-shell ${sidebarCollapsed ? "is-sidebar-collapsed" : ""}`}>
+      <aside id="admin-sidebar" className="admin-sidebar" aria-label="主导航">
         <div className="brand-block">
           <div className="brand-mark">
             <PackageCheck size={22} />
@@ -884,8 +973,11 @@ export default function App() {
                   return (
                     <button
                       key={item.key}
+                      type="button"
                       className={`nav-item ${active ? "is-active" : ""}`}
+                      aria-label={item.label}
                       aria-current={active ? "page" : undefined}
+                      title={item.label}
                       onClick={() => setActiveSection(item.key)}
                     >
                       <span className="nav-item-icon">
@@ -908,13 +1000,60 @@ export default function App() {
               本地 API
             </Text>
             <Text as="div" size="1" color="gray">
-              默认 http://localhost:8080
+              {API_URL}
             </Text>
           </div>
         </div>
       </aside>
 
       <main className="admin-main">
+        <div className="dashboard-toolbar" aria-label="全局工具栏">
+          <button
+            className="toolbar-icon-button"
+            type="button"
+            aria-label={sidebarCollapsed ? "展开导航" : "折叠导航"}
+            aria-expanded={!sidebarCollapsed}
+            aria-controls="admin-sidebar"
+            onClick={toggleSidebar}
+          >
+            <PanelLeft size={16} />
+          </button>
+          <div className="toolbar-divider" />
+          <div className="toolbar-search">
+            <Search size={16} />
+            <input
+              ref={globalSearchRef}
+              type="search"
+              value={searchText}
+              onChange={(event) => setSearchText(event.target.value)}
+              onKeyDown={handleGlobalSearchKeyDown}
+              placeholder="搜索构建、产品、Runner..."
+              aria-label="搜索构建、产品、Runner"
+            />
+            {searchText ? (
+              <button
+                className="toolbar-search-clear"
+                type="button"
+                aria-label="清空全局搜索"
+                onClick={() => {
+                  setSearchText("");
+                  globalSearchRef.current?.focus();
+                }}
+              >
+                <X size={14} />
+              </button>
+            ) : (
+              <kbd>⌘K</kbd>
+            )}
+          </div>
+          <div className="toolbar-spacer" />
+          <div className="toolbar-env" aria-label={`当前环境，${apiEnvironment}，API ${API_URL}`} title={API_URL}>
+            <span className="toolbar-env-dot" />
+            {apiEnvironment}
+            <span className="toolbar-env-api">{shortApiUrl(API_URL)}</span>
+          </div>
+        </div>
+
         <header className="topbar">
           <Box>
             <Text size="1" color="gray" weight="bold">
@@ -980,6 +1119,12 @@ export default function App() {
                 </Text>
               )}
             </div>
+            {pageAlert.retryable && (
+              <Button size="1" variant="soft" onClick={() => refresh({ notify: true })} disabled={loading}>
+                {loading ? <Spinner /> : <RefreshCcw size={14} />}
+                重试连接
+              </Button>
+            )}
             <Button size="1" variant="ghost" onClick={() => setError("")}>
               关闭
             </Button>
@@ -1030,11 +1175,12 @@ export default function App() {
       />
       <ConfirmActionDialog
         action={confirmAction}
+        busy={Boolean(confirmAction && busyAction === `${confirmAction.label}:${confirmAction.build?.id}`)}
         onCancel={() => setConfirmAction(null)}
         onConfirm={async () => {
           const action = confirmAction;
-          setConfirmAction(null);
           await action?.run();
+          setConfirmAction(null);
         }}
       />
     </div>
@@ -1054,13 +1200,13 @@ function OverviewSection({ dashboard, builds, products, uploads, onCreate, onIns
           label="产品定义"
           value={dashboard.products}
           hint={`${products.reduce((sum, item) => sum + (item.components?.length || 0), 0)} 个组件`}
-          color="teal"
+          color="neutral"
         />
         <MetricCard icon={Gauge} label="活跃任务" value={dashboard.active} hint="排队中 + 构建中" color="blue" />
-        <MetricCard icon={ShieldCheck} label="成功率" value={`${dashboard.successRate}%`} hint={`${builds.length} 条构建记录`} color="green" />
+        <MetricCard icon={ShieldCheck} label="成功率" value={`${dashboard.successRate}%`} hint={`${builds.length} 条构建记录`} color="neutral" />
         <MetricCard icon={AlertCircle} label="需要处理" value={dashboard.attention} hint="待审批 / 失败 / 已取消" color="amber" />
-        <MetricCard icon={PackageCheck} label="待验证 Preview" value={dashboard.previewPending} hint="成功但未验证" color="teal" />
-        <MetricCard icon={Rocket} label="可发布 Release" value={dashboard.releaseReady} hint="门禁检查通过" color="green" />
+        <MetricCard icon={PackageCheck} label="待验证 Preview" value={dashboard.previewPending} hint="成功但未验证" color="blue" />
+        <MetricCard icon={Rocket} label="可发布 Release" value={dashboard.releaseReady} hint="门禁检查通过" color="neutral" />
         <MetricCard icon={Ban} label="发布阻塞" value={dashboard.releaseBlocked} hint="需修复复现性" color="amber" />
       </Grid>
 
@@ -1094,8 +1240,16 @@ function OverviewSection({ dashboard, builds, products, uploads, onCreate, onIns
           <div className="asset-list">
             <AssetLine label="产品 Manifest" value={`${products.length} 个`} />
             <AssetLine label="上传制品" value={`${uploads.length} 个`} />
-            <AssetLine label="最近更新" value={dashboard.latest ? formatDate(dashboard.latest.updatedAt) : "暂无"} />
-            <AssetLine label="最近构建" value={dashboard.latest ? shortId(dashboard.latest.id) : "暂无"} />
+            <AssetLine
+              label="最近更新"
+              value={dashboard.latest ? formatDate(dashboard.latest.updatedAt) : "暂无"}
+              title={dashboard.latest?.updatedAt || ""}
+            />
+            <AssetLine
+              label="最近构建"
+              value={dashboard.latest ? shortId(dashboard.latest.id) : "暂无"}
+              title={dashboard.latest?.id || ""}
+            />
           </div>
         </Panel>
       </div>
@@ -1119,151 +1273,294 @@ function CreateBuildSection({
   setModule,
   updateComponentOverride,
   uploadComponent,
+  advancedJsonValidation,
 }) {
   const releasePrecheck = useMemo(
     () => getReleasePrecheck(form, selectedProduct),
     [form.version, form.serviceVersion, form.componentOverridesText, selectedProduct],
   );
+  const [activeStep, setActiveStep] = useState("target");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const componentCount = selectedProduct?.components?.length || 0;
+  const stepItems = [
+    { key: "target", label: "目标", description: "产品、平台和版本" },
+    { key: "config", label: "配置", description: "目录、端口和客户" },
+    { key: "components", label: "组件", description: `${componentCount} 个组件来源` },
+    { key: "review", label: "确认", description: releasePrecheck.ready ? "可提交" : "需关注门禁" },
+  ];
+  const activeStepIndex = Math.max(0, stepItems.findIndex((item) => item.key === activeStep));
+  const goNext = () => setActiveStep(stepItems[Math.min(activeStepIndex + 1, stepItems.length - 1)].key);
+  const goBack = () => setActiveStep(stepItems[Math.max(activeStepIndex - 1, 0)].key);
 
   return (
-    <form className="section-stack" onSubmit={submitBuild}>
-      <div className="form-grid">
-        <Panel title="构建目标" description="选择产品、版本、环境和发布通道" icon={Server}>
-          <div className="field-grid two">
-            <FieldSelect
-              label="产品"
-              value={form.productId}
-              onValueChange={(productId) => {
-                const product = products.find((item) => item.id === productId);
-                if (product) chooseProduct(product);
-              }}
-              options={products.map((product) => ({ value: product.id, label: product.name }))}
-            />
-            <FieldSelect
-              label="目标平台"
-              value={form.target}
-              onValueChange={(target) =>
-                setForm({
-                  ...form,
-                  target,
-                  installDir: selectedProduct?.targetConfig?.[target]?.installDir || form.installDir,
-                })
-              }
-              options={(selectedProduct?.targets || ["linux"]).map((target) => ({
-                value: target,
-                label: target,
-              }))}
-            />
-            <FieldSelect
-              label="版本"
-              value={form.version}
-              onValueChange={(version) => setForm({ ...form, version })}
-              options={(selectedProduct?.versions || ["latest"]).map((version) => ({
-                value: version,
-                label: version,
-              }))}
-            />
-            <FieldSelect
-              label="配置 Profile"
-              value={form.profile}
-              onValueChange={(profile) => setForm({ ...form, profile })}
-              options={(selectedProduct?.profiles || ["qa"]).map((profile) => ({
-                value: profile,
-                label: profile,
-              }))}
-            />
-            <LabeledInput
-              label="客户标识"
-              value={form.customer}
-              onChange={(customer) => setForm({ ...form, customer })}
-              placeholder="例如 example-customer"
-            />
-            <FieldSelect
-              label="构建通道"
-              value={form.releaseChannel}
-              onValueChange={(releaseChannel) => setForm({ ...form, releaseChannel })}
-              options={[{ value: "preview", label: "Preview 安装包" }]}
-            />
-          </div>
-        </Panel>
-
-        <Panel title="核心覆盖项" description="这些配置会写入构建锁" icon={Settings2}>
-          <div className="field-grid two">
-            <LabeledInput label="安装目录" value={form.installDir} onChange={(installDir) => setForm({ ...form, installDir })} />
-            <LabeledInput label="Web 端口" type="number" value={form.webPort} onChange={(webPort) => setForm({ ...form, webPort })} />
-            <LabeledInput label="服务版本" value={form.serviceVersion} onChange={(serviceVersion) => setForm({ ...form, serviceVersion })} />
-            <FieldSelect
-              label="数据库密码策略"
-              value={form.passwordPolicy}
-              onValueChange={(passwordPolicy) => setForm({ ...form, passwordPolicy })}
-              options={[
-                { value: "strong", label: "强策略" },
-                { value: "relaxed", label: "宽松策略" },
-                { value: "custom", label: "自定义" },
-              ]}
-            />
-            <LabeledInput label="客户名称" value={form.customerName} onChange={(customerName) => setForm({ ...form, customerName })} />
-            <LabeledInput label="许可证类型" value={form.license} onChange={(license) => setForm({ ...form, license })} />
-          </div>
-          <Flex mt="4" gap="4" wrap="wrap">
-            {Object.entries(form.modules).map(([name, enabled]) => (
-              <label key={name} className="inline-check">
-                <Checkbox checked={enabled} onCheckedChange={(value) => setModule(name, value)} />
-                <Text size="2">模块 {name}</Text>
-              </label>
-            ))}
-          </Flex>
-        </Panel>
+    <form className="create-flow" onSubmit={submitBuild}>
+      <div className="flow-stepper" aria-label="创建构建步骤">
+        {stepItems.map((step, index) => (
+          <button
+            key={step.key}
+            type="button"
+            aria-current={activeStep === step.key ? "step" : undefined}
+            aria-label={`步骤 ${index + 1}：${step.label}${activeStep === step.key ? "，当前步骤" : ""}，${step.description}`}
+            className={`flow-step ${activeStep === step.key ? "is-active" : ""} ${index < activeStepIndex ? "is-done" : ""}`}
+            onClick={() => setActiveStep(step.key)}
+          >
+            <span>{index + 1}</span>
+            <strong>{step.label}</strong>
+            <small>{step.description}</small>
+          </button>
+        ))}
       </div>
 
       <ReleasePrecheckPanel result={releasePrecheck} />
+      {!advancedJsonValidation.valid && (
+        <Callout.Root color="red" variant="soft" className="advanced-json-gate">
+          <Callout.Icon>
+            <AlertCircle size={16} />
+          </Callout.Icon>
+          <Callout.Text>
+            高级 JSON 无效：{advancedJsonValidation.errors.join("；")}。请修复后再提交构建申请。
+          </Callout.Text>
+        </Callout.Root>
+      )}
 
-      <Panel title="组件来源" description="为每个组件选择仓库、上传文件、固定 URL 或历史构建" icon={Boxes}>
-        <ComponentSourceEditor
-          components={selectedProduct?.components || []}
-          uploads={uploads}
-          overridesText={form.componentOverridesText}
-          onUpdate={updateComponentOverride}
-          onUpload={uploadComponent}
-        />
-      </Panel>
-
-      <Panel title="高级 JSON" description="保留原始变量和组件覆盖 JSON，便于调试与审计" icon={Code2}>
-        <Tabs.Root defaultValue="variables">
-          <Tabs.List>
-            <Tabs.Trigger value="variables">构建变量</Tabs.Trigger>
-            <Tabs.Trigger value="components">组件覆盖</Tabs.Trigger>
-          </Tabs.List>
-          <Box pt="3">
-            <Tabs.Content value="variables">
-              <TextArea
-                className="code-textarea"
-                resize="vertical"
-                value={form.variablesText}
-                onChange={(event) => setForm({ ...form, variablesText: event.target.value })}
+      <div className="build-step-body">
+        {activeStep === "target" && (
+          <Panel title="构建目标" description="选择产品、版本、环境和发布通道" icon={Server}>
+            <Field.Group className="field-grid two">
+              <FieldSelect
+                label="产品"
+                value={form.productId}
+                onValueChange={(productId) => {
+                  const product = products.find((item) => item.id === productId);
+                  if (product) chooseProduct(product);
+                }}
+                options={products.map((product) => ({ value: product.id, label: product.name }))}
               />
-            </Tabs.Content>
-            <Tabs.Content value="components">
-              <TextArea
-                className="code-textarea"
-                resize="vertical"
-                value={form.componentOverridesText}
-                onChange={(event) =>
-                  setForm({ ...form, componentOverridesText: event.target.value })
+              <FieldSelect
+                label="目标平台"
+                value={form.target}
+                onValueChange={(target) =>
+                  setForm({
+                    ...form,
+                    target,
+                    installDir: selectedProduct?.targetConfig?.[target]?.installDir || form.installDir,
+                  })
                 }
+                options={(selectedProduct?.targets || ["linux"]).map((target) => ({
+                  value: target,
+                  label: target,
+                }))}
               />
-            </Tabs.Content>
-          </Box>
-        </Tabs.Root>
-      </Panel>
+              <FieldSelect
+                label="版本"
+                value={form.version}
+                onValueChange={(version) => setForm({ ...form, version })}
+                options={(selectedProduct?.versions || ["latest"]).map((version) => ({
+                  value: version,
+                  label: version,
+                }))}
+              />
+              <FieldSelect
+                label="配置 Profile"
+                value={form.profile}
+                onValueChange={(profile) => setForm({ ...form, profile })}
+                options={(selectedProduct?.profiles || ["qa"]).map((profile) => ({
+                  value: profile,
+                  label: profile,
+                }))}
+              />
+              <LabeledInput
+                label="客户标识"
+                value={form.customer}
+                onChange={(customer) => setForm({ ...form, customer })}
+                placeholder="例如 example-customer"
+              />
+              <FieldSelect
+                label="构建通道"
+                value={form.releaseChannel}
+                onValueChange={(releaseChannel) => setForm({ ...form, releaseChannel })}
+                options={[{ value: "preview", label: "Preview 安装包" }]}
+              />
+            </Field.Group>
+          </Panel>
+        )}
 
-      <Flex className="form-actions" justify="end">
-        <Button type="submit" size="3" disabled={!form.productId || submitting}>
-          {submitting ? <Spinner /> : <Rocket size={18} />}
-          提交构建申请
+        {activeStep === "config" && (
+          <Panel title="核心覆盖项" description="这些配置会写入构建锁" icon={Settings2}>
+            <Field.Group className="field-grid two">
+              <LabeledInput label="安装目录" value={form.installDir} onChange={(installDir) => setForm({ ...form, installDir })} />
+              <LabeledInput label="Web 端口" type="number" value={form.webPort} onChange={(webPort) => setForm({ ...form, webPort })} />
+              <LabeledInput label="服务版本" value={form.serviceVersion} onChange={(serviceVersion) => setForm({ ...form, serviceVersion })} />
+              <FieldSelect
+                label="数据库密码策略"
+                value={form.passwordPolicy}
+                onValueChange={(passwordPolicy) => setForm({ ...form, passwordPolicy })}
+                options={[
+                  { value: "strong", label: "强策略" },
+                  { value: "relaxed", label: "宽松策略" },
+                  { value: "custom", label: "自定义" },
+                ]}
+              />
+              <LabeledInput label="客户名称" value={form.customerName} onChange={(customerName) => setForm({ ...form, customerName })} />
+              <LabeledInput label="许可证类型" value={form.license} onChange={(license) => setForm({ ...form, license })} />
+            </Field.Group>
+            <Flex mt="4" gap="4" wrap="wrap">
+              {Object.entries(form.modules).map(([name, enabled]) => (
+                <label key={name} className="inline-check">
+                  <Checkbox checked={enabled} onCheckedChange={(value) => setModule(name, value)} />
+                  <Text size="2">模块 {name}</Text>
+                </label>
+              ))}
+            </Flex>
+          </Panel>
+        )}
+
+        {activeStep === "components" && (
+          <Panel title="组件来源" description="为每个组件选择仓库、上传文件、固定 URL 或历史构建" icon={Boxes}>
+            <ComponentSourceEditor
+              components={selectedProduct?.components || []}
+              uploads={uploads}
+              overridesText={form.componentOverridesText}
+              onUpdate={updateComponentOverride}
+              onUpload={uploadComponent}
+            />
+          </Panel>
+        )}
+
+        {activeStep === "review" && (
+          <Panel
+            title="提交前确认"
+            description="确认构建目标、配置覆盖、组件来源和 Release 预检结果"
+            icon={ClipboardList}
+            action={
+              <Button type="button" variant="soft" onClick={() => setAdvancedOpen(true)}>
+                <Code2 size={16} />
+                高级 JSON
+              </Button>
+            }
+          >
+            <div className="review-grid">
+              <ReviewItem label="产品" value={selectedProduct?.name || form.productId || "-"} />
+              <ReviewItem label="目标" value={`${form.target} / ${form.profile}`} />
+              <ReviewItem label="版本" value={form.version || "-"} />
+              <ReviewItem label="客户" value={form.customer || form.customerName || "-"} />
+              <ReviewItem label="安装目录" value={form.installDir || "-"} />
+              <ReviewItem label="Web 端口" value={form.webPort || "-"} />
+              <ReviewItem label="服务版本" value={form.serviceVersion || "-"} />
+              <ReviewItem label="组件数量" value={`${componentCount} 个`} />
+            </div>
+          </Panel>
+        )}
+      </div>
+
+      <Flex className="form-actions" justify="between" align="center" gap="3">
+        <Button type="button" variant="soft" disabled={activeStepIndex === 0} onClick={goBack}>
+          返回
         </Button>
+        <Flex gap="2" align="center">
+          <Button type="button" variant="soft" onClick={() => setAdvancedOpen(true)}>
+            <Code2 size={16} />
+            高级 JSON
+          </Button>
+          {activeStep === "review" ? (
+            <Button
+              type="submit"
+              size="3"
+              disabled={!form.productId || submitting || !advancedJsonValidation.valid}
+              title={!advancedJsonValidation.valid ? "请先修复高级 JSON 后再提交构建申请" : "提交构建申请"}
+            >
+              {submitting ? <Spinner /> : <Rocket size={18} />}
+              提交构建申请
+            </Button>
+          ) : (
+            <Button type="button" onClick={goNext}>
+              下一步
+              <ChevronRight size={16} />
+            </Button>
+          )}
+        </Flex>
       </Flex>
+
+      <AdvancedJsonDialog
+        open={advancedOpen}
+        onOpenChange={setAdvancedOpen}
+        form={form}
+        setForm={setForm}
+        validation={advancedJsonValidation}
+      />
     </form>
+  );
+}
+
+function AdvancedJsonDialog({ open, onOpenChange, form, setForm, validation }) {
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Content className="side-drawer">
+        <Dialog.Title>高级 JSON</Dialog.Title>
+        <Dialog.Description>
+          直接编辑构建变量和组件覆盖 JSON，用于调试、审计或精确覆盖组件来源。
+        </Dialog.Description>
+        <Box mt="4">
+          <Tabs.Root defaultValue="variables">
+            <Tabs.List>
+              <Tabs.Trigger value="variables">构建变量</Tabs.Trigger>
+              <Tabs.Trigger value="components">组件覆盖</Tabs.Trigger>
+            </Tabs.List>
+            <Box pt="3">
+              <Tabs.Content value="variables">
+                <TextArea
+                  aria-label="构建变量 JSON"
+                  className="code-textarea"
+                  resize="vertical"
+                  value={form.variablesText}
+                  onChange={(event) => setForm({ ...form, variablesText: event.target.value })}
+                />
+                <JsonValidationNote result={validation.variables} />
+              </Tabs.Content>
+              <Tabs.Content value="components">
+                <TextArea
+                  aria-label="组件覆盖 JSON"
+                  className="code-textarea"
+                  resize="vertical"
+                  value={form.componentOverridesText}
+                  onChange={(event) =>
+                    setForm({ ...form, componentOverridesText: event.target.value })
+                  }
+                />
+                <JsonValidationNote result={validation.components} />
+              </Tabs.Content>
+            </Box>
+          </Tabs.Root>
+        </Box>
+        <Flex mt="4" justify="end">
+          <Dialog.Close>
+            <Button variant="soft">关闭</Button>
+          </Dialog.Close>
+        </Flex>
+      </Dialog.Content>
+    </Dialog.Root>
+  );
+}
+
+function JsonValidationNote({ result }) {
+  return (
+    <Callout.Root color={result.valid ? "gray" : "red"} variant="soft" className="json-validation-note">
+      <Callout.Icon>
+        {result.valid ? <Check size={15} /> : <AlertCircle size={15} />}
+      </Callout.Icon>
+      <Callout.Text>{result.valid ? "JSON 格式有效。" : result.error}</Callout.Text>
+    </Callout.Root>
+  );
+}
+
+function ReviewItem({ label, value }) {
+  return (
+    <div className="review-item">
+      <Text size="1" color="gray">
+        {label}
+      </Text>
+      <Text weight="medium">{value}</Text>
+    </div>
   );
 }
 
@@ -1342,7 +1639,7 @@ function BuildsSection({
 
 function ReleasePrecheckPanel({ result }) {
   return (
-    <Callout.Root color={result.ready ? "green" : "amber"} variant="soft">
+    <Callout.Root color={result.ready ? "gray" : "amber"} variant="soft">
       <Callout.Icon>
         {result.ready ? <ShieldCheck size={18} /> : <AlertCircle size={18} />}
       </Callout.Icon>
@@ -1391,6 +1688,37 @@ function getReleasePrecheck(form, product) {
   return { ready: warnings.length === 0, warnings };
 }
 
+function validateAdvancedJson(variablesText, componentOverridesText) {
+  const variables = validateJsonObjectText(variablesText, "构建变量");
+  const components = validateJsonObjectText(componentOverridesText, "组件覆盖");
+  return {
+    valid: variables.valid && components.valid,
+    variables,
+    components,
+    errors: [variables, components].filter((item) => !item.valid).map((item) => item.error),
+  };
+}
+
+function validateJsonObjectText(text, label) {
+  try {
+    const parsed = JSON.parse(text || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { valid: false, error: `${label} 必须是 JSON 对象` };
+    }
+    return { valid: true, error: "", value: parsed };
+  } catch (err) {
+    return { valid: false, error: `${label} JSON 解析错误：${err.message}` };
+  }
+}
+
+function parseJsonObjectText(text, label) {
+  const result = validateJsonObjectText(text, label);
+  if (!result.valid) {
+    throw new Error(result.error);
+  }
+  return result.value;
+}
+
 function defaultComponentSource(kind, current = {}) {
   if (kind === "artifact-repository") {
     return {
@@ -1429,7 +1757,11 @@ function ProductsSection({
   loadingManifestRevisions,
   loadManifestRevisions,
   restoreManifestRevision,
+  advancedJsonValidation,
 }) {
+  const [pendingReload, setPendingReload] = useState(false);
+  const [pendingProduct, setPendingProduct] = useState(null);
+  const [pendingRevision, setPendingRevision] = useState(null);
   const manifestParse = useMemo(() => {
     try {
       return { manifest: JSON.parse(manifestText || "{}"), error: "" };
@@ -1448,34 +1780,121 @@ function ProductsSection({
     () => diffLines(originalManifestText, manifestText).slice(0, 240),
     [originalManifestText, manifestText],
   );
+  const manifestDirty = manifestText !== originalManifestText;
+  const manifestSaveGateReason = !form.productId
+    ? "请先选择产品"
+    : !manifestValidation.valid
+      ? "请先修复 Manifest 校验错误"
+      : "";
+  const manifestDryRunGateReason = manifestSaveGateReason || (!advancedJsonValidation.valid ? "请先修复高级 JSON" : "");
+  const manifestSaveDisabled = Boolean(manifestSaveGateReason);
+  const manifestDryRunDisabled = Boolean(manifestDryRunGateReason);
+
+  useEffect(() => {
+    setPendingReload(false);
+  }, [form.productId, manifestText]);
+
+  useEffect(() => {
+    if (!manifestDirty) {
+      setPendingProduct(null);
+      setPendingRevision(null);
+    }
+  }, [manifestDirty]);
+
+  function requestManifestReload() {
+    if (manifestDirty && !pendingReload) {
+      setPendingReload(true);
+      return;
+    }
+    setPendingReload(false);
+    loadManifest();
+  }
+
+  function requestProductChange(product) {
+    if (product.id === form.productId) return;
+    if (manifestDirty) {
+      setPendingProduct(product);
+      return;
+    }
+    chooseProduct(product);
+  }
+
+  function confirmProductChange() {
+    const product = pendingProduct;
+    setPendingProduct(null);
+    if (product) {
+      chooseProduct(product);
+    }
+  }
+
+  function requestManifestRevisionRestore(revision) {
+    if (manifestDirty) {
+      setPendingRevision(revision);
+      return;
+    }
+    restoreManifestRevision(revision);
+  }
+
+  function confirmManifestRevisionRestore() {
+    const revision = pendingRevision;
+    setPendingRevision(null);
+    if (revision) {
+      restoreManifestRevision(revision);
+    }
+  }
 
   return (
     <div className="products-layout">
       <Panel title="产品列表" description="选择要维护的 manifest" icon={Boxes}>
+        {pendingProduct && (
+          <Callout.Root color="amber" variant="soft" className="manifest-gate-note">
+            <Callout.Icon>
+              <AlertCircle size={16} />
+            </Callout.Icon>
+            <Callout.Text>
+              Manifest 有未保存修改。确认丢弃草稿后将切换到 {pendingProduct.name}。
+            </Callout.Text>
+            <Flex gap="2" wrap="wrap">
+              <Button size="1" title={`丢弃未保存 Manifest 修改并切换到 ${pendingProduct.name}`} onClick={confirmProductChange}>
+                确认切换
+              </Button>
+              <Button size="1" variant="soft" title="保留当前 Manifest 草稿" onClick={() => setPendingProduct(null)}>
+                继续编辑
+              </Button>
+            </Flex>
+          </Callout.Root>
+        )}
         <div className="product-list">
-          {products.map((product) => (
-            <button
-              key={product.id}
-              className={`product-row ${product.id === form.productId ? "is-selected" : ""}`}
-              onClick={() => chooseProduct(product)}
-            >
-              <div>
-                <Text as="div" weight="bold">
-                  {product.name}
-                </Text>
-                <Text as="div" size="1" color="gray">
-                  {product.description}
-                </Text>
-              </div>
-              <Flex gap="2" wrap="wrap">
-                {product.targets?.map((target) => (
-                  <Badge key={target} variant="soft">
-                    {target}
-                  </Badge>
-                ))}
-              </Flex>
-            </button>
-          ))}
+          {products.map((product) => {
+            const selected = product.id === form.productId;
+            return (
+              <button
+                key={product.id}
+                type="button"
+                className={`product-row ${selected ? "is-selected" : ""}`}
+                aria-current={selected ? "true" : undefined}
+                aria-label={selected ? `当前产品 ${product.name} ${product.id}` : `选择产品 ${product.name} ${product.id}`}
+                title={selected ? `当前产品：${product.name}` : `选择产品：${product.name}`}
+                onClick={() => requestProductChange(product)}
+              >
+                <div>
+                  <Text as="div" weight="bold">
+                    {product.name}
+                  </Text>
+                  <Text as="div" size="1" color="gray">
+                    {product.description}
+                  </Text>
+                </div>
+                <Flex gap="2" wrap="wrap">
+                  {product.targets?.map((target) => (
+                    <Badge key={target} variant="soft">
+                      {target}
+                    </Badge>
+                  ))}
+                </Flex>
+              </button>
+            );
+          })}
         </div>
       </Panel>
 
@@ -1485,20 +1904,77 @@ function ProductsSection({
         icon={FileJson}
         action={
           <Flex gap="2" wrap="wrap">
-            <Button variant="soft" onClick={() => loadManifest()}>
-              重新加载
+            {manifestDirty && (
+              <Badge color="amber" variant="soft" title="Manifest 有未保存修改">
+                未保存
+              </Badge>
+            )}
+            <Button
+              variant={pendingReload ? undefined : "soft"}
+              disabled={!form.productId}
+              title={
+                !form.productId
+                  ? "请先选择产品"
+                  : pendingReload
+                    ? "确认丢弃未保存修改并重新加载 Manifest"
+                    : "从后端重新加载 Manifest"
+              }
+              onClick={requestManifestReload}
+            >
+              {pendingReload ? "确认重载" : "重新加载"}
             </Button>
-            <Button variant="soft" disabled={dryRunningManifest} onClick={runManifestDryRun}>
+            <Button
+              variant="soft"
+              disabled={dryRunningManifest || manifestDryRunDisabled}
+              title={manifestDryRunGateReason || "使用当前构建参数生成构建锁预览"}
+              aria-describedby={manifestDryRunGateReason ? "manifest-action-gate" : undefined}
+              onClick={runManifestDryRun}
+            >
               {dryRunningManifest ? <Spinner /> : <GitCompare size={16} />}
               试运行
             </Button>
-            <Button disabled={savingManifest} onClick={saveManifest}>
+            <Button
+              disabled={savingManifest || manifestSaveDisabled}
+              title={manifestSaveGateReason || "保存当前 Manifest"}
+              aria-describedby={manifestSaveGateReason ? "manifest-action-gate" : undefined}
+              onClick={saveManifest}
+            >
               {savingManifest ? <Spinner /> : null}
               保存 Manifest
             </Button>
           </Flex>
         }
       >
+        {manifestDryRunGateReason && (
+          <Callout.Root id="manifest-action-gate" color="amber" variant="soft" className="manifest-gate-note">
+            <Callout.Icon>
+              <AlertCircle size={16} />
+            </Callout.Icon>
+            <Callout.Text>
+              {manifestSaveGateReason
+                ? `${manifestSaveGateReason}，保存和试运行已暂停。`
+                : `${manifestDryRunGateReason}，试运行已暂停。保存 Manifest 不受影响。`}
+            </Callout.Text>
+          </Callout.Root>
+        )}
+        {pendingRevision && (
+          <Callout.Root color="amber" variant="soft" className="manifest-gate-note">
+            <Callout.Icon>
+              <AlertCircle size={16} />
+            </Callout.Icon>
+            <Callout.Text>
+              Manifest 有未保存修改。确认丢弃草稿后将恢复历史版本 {pendingRevision.id}。
+            </Callout.Text>
+            <Flex gap="2" wrap="wrap">
+              <Button size="1" title={`丢弃未保存 Manifest 修改并恢复 ${pendingRevision.id}`} onClick={confirmManifestRevisionRestore}>
+                确认恢复
+              </Button>
+              <Button size="1" variant="soft" title="保留当前 Manifest 草稿" onClick={() => setPendingRevision(null)}>
+                继续编辑
+              </Button>
+            </Flex>
+          </Callout.Root>
+        )}
         <Tabs.Root defaultValue="editor">
           <Tabs.List>
             <Tabs.Trigger value="editor">编辑</Tabs.Trigger>
@@ -1528,14 +2004,20 @@ function ProductsSection({
               <ManifestFeatureCheckPanel manifest={parsedManifest} />
             </Tabs.Content>
             <Tabs.Content value="dryrun">
-              <ManifestDryRunPanel result={manifestDryRun} running={dryRunningManifest} onRun={runManifestDryRun} />
+              <ManifestDryRunPanel
+                result={manifestDryRun}
+                running={dryRunningManifest}
+                onRun={runManifestDryRun}
+                disabled={manifestDryRunDisabled}
+                disabledReason={manifestDryRunGateReason}
+              />
             </Tabs.Content>
             <Tabs.Content value="revisions">
               <ManifestRevisionsPanel
                 revisions={manifestRevisions}
                 loading={loadingManifestRevisions}
                 onRefresh={() => loadManifestRevisions()}
-                onRestore={restoreManifestRevision}
+                onRestore={requestManifestRevisionRestore}
               />
             </Tabs.Content>
             <Tabs.Content value="diff">
@@ -1565,11 +2047,13 @@ function OverlaysSection({
   savingOverlay,
 }) {
   const [draftName, setDraftName] = useState("");
+  const [pendingOverlayAction, setPendingOverlayAction] = useState(null);
   const overlays = overlayKind === "profiles" ? profileOverlays : customerOverlays;
   const overlayDiff = useMemo(
     () => diffLines(originalOverlayText, overlayText).slice(0, 240),
     [originalOverlayText, overlayText],
   );
+  const overlayDirty = overlayText !== originalOverlayText;
   const validation = useMemo(() => {
     try {
       JSON.parse(overlayText || "{}");
@@ -1584,11 +2068,27 @@ function OverlaysSection({
     if (!isValidOverlayName(name)) {
       return { valid: false, errors: ["名称只能包含字母、数字、点、下划线和中划线"] };
     }
+    if (overlays.some((overlay) => overlay.name === name)) {
+      return { valid: false, errors: [`覆盖配置 ${name} 已存在`] };
+    }
     return { valid: true, errors: [] };
-  }, [draftName]);
+  }, [draftName, overlays]);
   const currentNameValid = !overlayName || isValidOverlayName(overlayName);
+  const overlaySaveGateReason = !overlayName
+    ? "请先选择或新建覆盖配置"
+    : !currentNameValid
+      ? "覆盖名称只能包含字母、数字、点、下划线和中划线"
+      : !validation.valid
+        ? "请先修复覆盖 JSON"
+      : "";
 
-  function switchKind(kind) {
+  useEffect(() => {
+    if (!overlayDirty) {
+      setPendingOverlayAction(null);
+    }
+  }, [overlayDirty]);
+
+  function applyKindSwitch(kind) {
     setOverlayKind(kind);
     const list = kind === "profiles" ? profileOverlays : customerOverlays;
     const nextName = list[0]?.name || "";
@@ -1601,13 +2101,65 @@ function OverlaysSection({
     }
   }
 
-  function startNewOverlay() {
-    const name = draftName.trim();
-    if (!name || !isValidOverlayName(name)) return;
+  function switchKind(kind) {
+    if (kind === overlayKind) return;
+    if (overlayDirty) {
+      setPendingOverlayAction({ type: "kind", kind });
+      return;
+    }
+    applyKindSwitch(kind);
+  }
+
+  function createOverlayDraft(name) {
     setOverlayName(name);
     setOverlayText("{}");
-    setOriginalOverlayText("{}");
+    setOriginalOverlayText("");
     setDraftName("");
+  }
+
+  function startNewOverlay() {
+    const name = draftName.trim();
+    if (!name || !nameValidation.valid) return;
+    if (overlayDirty) {
+      setPendingOverlayAction({ type: "create", name });
+      return;
+    }
+    createOverlayDraft(name);
+  }
+
+  function selectOverlay(kind, name) {
+    if (kind === overlayKind && name === overlayName) return;
+    if (overlayDirty) {
+      setPendingOverlayAction({ type: "load", kind, name });
+      return;
+    }
+    loadOverlay(productId, kind, name);
+  }
+
+  function confirmPendingOverlayAction() {
+    const action = pendingOverlayAction;
+    setPendingOverlayAction(null);
+    if (!action) return;
+    if (action.type === "kind") {
+      applyKindSwitch(action.kind);
+      return;
+    }
+    if (action.type === "create") {
+      createOverlayDraft(action.name);
+      return;
+    }
+    loadOverlay(productId, action.kind, action.name);
+  }
+
+  function pendingOverlayActionLabel(action) {
+    if (!action) return "";
+    if (action.type === "kind") {
+      return action.kind === "profiles" ? "切换到配置面" : "切换到客户覆盖";
+    }
+    if (action.type === "create") {
+      return `新建覆盖 ${action.name}`;
+    }
+    return `加载覆盖 ${action.kind} / ${action.name}`;
   }
 
   return (
@@ -1629,6 +2181,13 @@ function OverlaysSection({
                 variant="soft"
                 onClick={startNewOverlay}
                 disabled={!draftName.trim() || !nameValidation.valid}
+                title={
+                  !draftName.trim()
+                    ? "输入覆盖名称后新建"
+                    : !nameValidation.valid
+                      ? nameValidation.errors[0]
+                      : `新建覆盖 ${draftName.trim()}`
+                }
               >
                 新建
               </Button>
@@ -1638,24 +2197,49 @@ function OverlaysSection({
                 {nameValidation.errors[0]}
               </Text>
             )}
+            {pendingOverlayAction && (
+              <Callout.Root color="amber" variant="soft" className="manifest-gate-note">
+                <Callout.Icon>
+                  <AlertCircle size={16} />
+                </Callout.Icon>
+                <Callout.Text>
+                  覆盖配置有未保存修改。确认丢弃草稿后将{pendingOverlayActionLabel(pendingOverlayAction)}。
+                </Callout.Text>
+                <Flex gap="2" wrap="wrap">
+                  <Button size="1" title="丢弃未保存覆盖修改并继续" onClick={confirmPendingOverlayAction}>
+                    确认丢弃
+                  </Button>
+                  <Button size="1" variant="soft" title="保留当前覆盖草稿" onClick={() => setPendingOverlayAction(null)}>
+                    继续编辑
+                  </Button>
+                </Flex>
+              </Callout.Root>
+            )}
             <div className="product-list">
               {overlays.length === 0 ? (
                 <EmptyState icon={GitCompare} title="暂无覆盖配置" text="当前产品还没有该类型的覆盖文件。" />
               ) : (
-                overlays.map((overlay) => (
-                  <button
-                    key={overlay.name}
-                    className={`product-row ${overlay.name === overlayName ? "is-selected" : ""}`}
-                    onClick={() => loadOverlay(productId, overlayKind, overlay.name)}
-                  >
-                    <Text as="div" weight="bold">
-                      {overlay.name}
-                    </Text>
-                    <Text as="div" size="1" color="gray">
-                      {overlay.kind}
-                    </Text>
-                  </button>
-                ))
+                overlays.map((overlay) => {
+                  const selected = overlay.name === overlayName;
+                  return (
+                    <button
+                      key={overlay.name}
+                      type="button"
+                      className={`product-row ${selected ? "is-selected" : ""}`}
+                      aria-current={selected ? "true" : undefined}
+                      aria-label={selected ? `当前覆盖 ${overlay.kind} ${overlay.name}` : `加载覆盖 ${overlay.kind} ${overlay.name}`}
+                      title={selected ? `当前覆盖：${overlay.name}` : `加载覆盖：${overlay.name}`}
+                      onClick={() => selectOverlay(overlayKind, overlay.name)}
+                    >
+                      <Text as="div" weight="bold">
+                        {overlay.name}
+                      </Text>
+                      <Text as="div" size="1" color="gray">
+                        {overlay.kind}
+                      </Text>
+                    </button>
+                  );
+                })
               )}
             </div>
           </Box>
@@ -1667,15 +2251,32 @@ function OverlaysSection({
         description={overlayName ? `${overlayKind} / ${overlayName}` : "请选择覆盖配置"}
         icon={Code2}
         action={
-          <Button
-            disabled={!overlayName || !currentNameValid || !validation.valid || savingOverlay}
-            onClick={saveOverlay}
-          >
-            {savingOverlay ? <Spinner /> : null}
-            保存覆盖
-          </Button>
+          <>
+            {overlayDirty && (
+              <Badge color="amber" variant="soft" title="覆盖配置有未保存修改">
+                未保存
+              </Badge>
+            )}
+            <Button
+              disabled={Boolean(overlaySaveGateReason) || savingOverlay}
+              title={overlaySaveGateReason || `保存覆盖 ${overlayKind} / ${overlayName}`}
+              aria-describedby={overlaySaveGateReason ? "overlay-save-gate" : undefined}
+              onClick={saveOverlay}
+            >
+              {savingOverlay ? <Spinner /> : null}
+              保存覆盖
+            </Button>
+          </>
         }
       >
+        {overlaySaveGateReason && (
+          <Callout.Root id="overlay-save-gate" color="amber" variant="soft" className="manifest-gate-note">
+            <Callout.Icon>
+              <AlertCircle size={16} />
+            </Callout.Icon>
+            <Callout.Text>{overlaySaveGateReason}，保存覆盖已暂停。</Callout.Text>
+          </Callout.Root>
+        )}
         <Tabs.Root defaultValue="editor">
           <Tabs.List>
             <Tabs.Trigger value="editor">编辑</Tabs.Trigger>
@@ -1714,7 +2315,7 @@ function ManifestFeatureCheckPanel({ manifest }) {
   return (
     <div className="section-stack">
       <Flex gap="3" align="center" wrap="wrap">
-        <Badge color={passed === checks.length ? "green" : "amber"} variant="soft">
+        <Badge color={passed === checks.length ? "gray" : "amber"} variant="soft">
           {passed}/{checks.length} 通过
         </Badge>
         <Text size="2" color="gray">
@@ -1733,7 +2334,7 @@ function ManifestFeatureCheckPanel({ manifest }) {
                   {item.detail}
                 </Text>
               </Box>
-              <Badge color={item.ok ? "green" : item.level === "warn" ? "amber" : "red"} variant="soft">
+              <Badge color={item.ok ? "gray" : item.level === "warn" ? "amber" : "red"} variant="soft">
                 {item.ok ? "通过" : item.level === "warn" ? "需确认" : "未满足"}
               </Badge>
             </Flex>
@@ -1745,6 +2346,8 @@ function ManifestFeatureCheckPanel({ manifest }) {
 }
 
 function ManifestStructuredEditor({ manifest, onChange }) {
+  const [pendingDelete, setPendingDelete] = useState(null);
+
   if (!manifest) {
     return <ValidationPanel result={{ valid: false, errors: ["Manifest JSON 解析失败，无法结构化编辑"] }} />;
   }
@@ -1829,6 +2432,7 @@ function ManifestStructuredEditor({ manifest, onChange }) {
   }
 
   function removeComponent(index) {
+    setPendingDelete(null);
     update({ components: (manifest.components || []).filter((_, itemIndex) => itemIndex !== index) });
   }
 
@@ -1856,7 +2460,16 @@ function ManifestStructuredEditor({ manifest, onChange }) {
   }
 
   function removeWorkload(index) {
+    setPendingDelete(null);
     update({ workloads: (manifest.workloads || []).filter((_, itemIndex) => itemIndex !== index) });
+  }
+
+  function requestDelete(type, index, label) {
+    setPendingDelete({ type, index, label });
+  }
+
+  function isPendingDelete(type, index) {
+    return pendingDelete?.type === type && pendingDelete?.index === index;
   }
 
   const config = manifest.config || {};
@@ -1865,22 +2478,20 @@ function ManifestStructuredEditor({ manifest, onChange }) {
 
   return (
     <div className="section-stack">
-      <div className="field-grid two">
+      <Field.Group className="field-grid two">
         <LabeledInput label="产品名称" value={manifest.name || ""} onChange={(name) => update({ name })} />
         <LabeledInput label="产品 ID" value={manifest.id || ""} onChange={(id) => update({ id })} />
         <LabeledInput label="配置面" value={(manifest.profiles || []).join(", ")} onChange={(value) => update({ profiles: splitCSV(value) })} />
         <LabeledInput label="Versions" value={(manifest.versions || []).join(", ")} onChange={(value) => update({ versions: splitCSV(value) })} />
-      </div>
-      <label className="field">
-        <Text size="2" weight="medium">
-          描述
-        </Text>
+      </Field.Group>
+      <Field.Root className="field">
+        <Field.Label>描述</Field.Label>
         <TextArea
           resize="vertical"
           value={manifest.description || ""}
           onChange={(event) => update({ description: event.target.value })}
         />
-      </label>
+      </Field.Root>
 
       <div className="structured-grid">
         {["linux", "windows"].map((target) => {
@@ -1989,9 +2600,27 @@ function ManifestStructuredEditor({ manifest, onChange }) {
           <div key={`${component.id}-${index}`} className="component-card">
             <Flex justify="between" align="start" gap="3">
               <LabeledInput label="组件 ID" value={component.id || ""} onChange={(id) => updateComponent(index, { id })} />
-              <Button size="1" color="red" variant="soft" onClick={() => removeComponent(index)}>
-                删除
-              </Button>
+              {isPendingDelete("component", index) ? (
+                <div className="inline-danger-confirm" role="group" aria-label={`确认删除组件 ${component.id || index + 1}`}>
+                  <Button size="1" color="red" variant="soft" title={`确认删除组件 ${component.id || index + 1}`} onClick={() => removeComponent(index)}>
+                    确认删除
+                  </Button>
+                  <Button size="1" variant="soft" title="取消删除组件" onClick={() => setPendingDelete(null)}>
+                    取消
+                  </Button>
+                </div>
+              ) : (
+                <Button
+                  size="1"
+                  color="red"
+                  variant="soft"
+                  title={`删除组件 ${component.id || index + 1}`}
+                  aria-label={`删除组件 ${component.id || index + 1}`}
+                  onClick={() => requestDelete("component", index, component.id || `组件 ${index + 1}`)}
+                >
+                  删除
+                </Button>
+              )}
             </Flex>
             <LabeledInput label="类型" value={component.type || ""} onChange={(type) => updateComponent(index, { type })} />
             <label className="inline-check">
@@ -2029,11 +2658,29 @@ function ManifestStructuredEditor({ manifest, onChange }) {
           <div key={`${workload.id}-${index}`} className="workload-card">
             <Flex justify="between" align="start" gap="3">
               <LabeledInput label="Workload ID" value={workload.id || ""} onChange={(id) => updateWorkload(index, { id })} />
-              <Button size="1" color="red" variant="soft" onClick={() => removeWorkload(index)}>
-                删除
-              </Button>
+              {isPendingDelete("workload", index) ? (
+                <div className="inline-danger-confirm" role="group" aria-label={`确认删除 Workload ${workload.id || index + 1}`}>
+                  <Button size="1" color="red" variant="soft" title={`确认删除 Workload ${workload.id || index + 1}`} onClick={() => removeWorkload(index)}>
+                    确认删除
+                  </Button>
+                  <Button size="1" variant="soft" title="取消删除 Workload" onClick={() => setPendingDelete(null)}>
+                    取消
+                  </Button>
+                </div>
+              ) : (
+                <Button
+                  size="1"
+                  color="red"
+                  variant="soft"
+                  title={`删除 Workload ${workload.id || index + 1}`}
+                  aria-label={`删除 Workload ${workload.id || index + 1}`}
+                  onClick={() => requestDelete("workload", index, workload.id || `Workload ${index + 1}`)}
+                >
+                  删除
+                </Button>
+              )}
             </Flex>
-            <div className="field-grid two">
+            <Field.Group className="field-grid two">
               <FieldSelect
                 label="运行时"
                 value={workload.runtime || "docker"}
@@ -2057,7 +2704,7 @@ function ManifestStructuredEditor({ manifest, onChange }) {
                 <Checkbox checked={workload.enabled !== false} onCheckedChange={(value) => updateWorkload(index, { enabled: value === true })} />
                 <Text size="2">默认启用</Text>
               </label>
-            </div>
+            </Field.Group>
             {workload.runtime === "systemd" && (
               <LabeledInput
                 label="ExecStart"
@@ -2090,7 +2737,7 @@ function ManifestStructuredEditor({ manifest, onChange }) {
   );
 }
 
-function ManifestDryRunPanel({ result, running, onRun }) {
+function ManifestDryRunPanel({ result, running, onRun, disabled, disabledReason }) {
   if (running) {
     return (
       <div className="loading-panel">
@@ -2113,18 +2760,24 @@ function ManifestDryRunPanel({ result, running, onRun }) {
   }
   return (
     <div className="section-stack">
-      <Callout.Root color="green" variant="soft">
+      <Callout.Root color="gray" variant="soft">
         <Callout.Icon>
           <Check size={18} />
         </Callout.Icon>
         <Callout.Text>试运行通过，构建锁可生成。</Callout.Text>
-        <Button size="1" variant="ghost" onClick={onRun}>
+        <Button
+          size="1"
+          variant="ghost"
+          disabled={disabled}
+          title={disabledReason || "重新执行 Manifest 试运行"}
+          onClick={onRun}
+        >
           重新运行
         </Button>
       </Callout.Root>
       <div className="audit-grid">
         <AuditMetric label="目标平台" value={result.buildLock?.target || "-"} />
-        <AuditMetric label="Profile" value={result.buildLock?.profile || "-"} />
+        <AuditMetric label="配置 Profile" value={result.buildLock?.profile || "-"} />
         <AuditMetric label="组件锁定" value={result.components?.length || 0} />
         <AuditMetric label="工作负载" value={result.buildLock?.workloads?.length || 0} />
       </div>
@@ -2166,23 +2819,23 @@ function ManifestRevisionsPanel({ revisions, loading, onRefresh, onRestore }) {
           <Text color="gray">正在加载历史版本</Text>
         </div>
       ) : revisions.length === 0 ? (
-        <EmptyState icon={History} title="暂无历史版本" text="保存 Manifest 后会在这里出现 revision。" />
+        <EmptyState icon={History} title="暂无历史版本" text="保存 Manifest 后会在这里出现可恢复的版本记录。" />
       ) : (
         <div className="revision-list">
           {revisions.map((revision) => (
             <div key={revision.id} className="revision-row">
               <Box>
-                <Text as="div" weight="bold">
+                <Text as="div" weight="bold" title={revision.id}>
                   {revision.id}
                 </Text>
-                <Text as="div" size="1" color="gray">
+                <Text as="div" size="1" color="gray" title={`${formatDate(revision.createdAt)} / ${revision.hash || ""}`}>
                   {formatDate(revision.createdAt)} / {shortHash(revision.hash)}
                 </Text>
               </Box>
-              <Text size="2" color="gray">
-                {revision.summary || "manifest saved"}
+              <Text size="2" color="gray" title={revision.summary || "Manifest 已保存"}>
+                {revision.summary || "Manifest 已保存"}
               </Text>
-              <Button size="1" variant="soft" onClick={() => onRestore(revision)}>
+              <Button size="1" variant="soft" title={`恢复 Manifest 历史 ${revision.id}`} onClick={() => onRestore(revision)}>
                 <RotateCcw size={14} />
                 恢复
               </Button>
@@ -2200,6 +2853,7 @@ function manifestFeatureChecks(manifest) {
   const components = manifest.components || [];
   const hasLinux = targets.includes("linux") && Boolean(targetConfig.linux?.installDir);
   const hasWindows = targets.includes("windows") && Boolean(targetConfig.windows?.installDir);
+  const missingPackageNames = targets.filter((target) => !targetConfig[target]?.packageName);
   const requiredComponents = components.filter((component) => component.required !== false);
   const missingSource = requiredComponents.filter((component) => !component.source?.kind && !component.source?.path && !component.source?.uri && !component.source?.url);
   const wildcardSources = requiredComponents.filter((component) => String(component.source?.path || component.source?.uri || component.source?.url || "").includes("*"));
@@ -2221,6 +2875,15 @@ function manifestFeatureChecks(manifest) {
       label: "Preview 与 Release 配置面",
       ok: hasPreviewProfile && hasReleaseProfile,
       detail: "建议至少保留 qa/preview 与 prod/release 两类 profile，用于先验收再发布。",
+      level: "warn",
+    },
+    {
+      label: "安装包命名",
+      ok: missingPackageNames.length === 0,
+      detail:
+        missingPackageNames.length === 0
+          ? "所有目标平台都已配置 packageName。"
+          : `${missingPackageNames.join(", ")} 未配置 packageName；后端可使用默认命名，但建议显式固定。`,
       level: "warn",
     },
     {
@@ -2287,21 +2950,22 @@ function UploadsSection({ uploads, uploadForm, setUploadForm, uploading, onUploa
               选择文件上传到平台存储
             </Text>
             <Text as="div" size="2" color="gray">
-              保存 SHA256、下载策略、保留期限和业务 metadata，当前接口大小限制为 512 MB。
+              保存 SHA256、下载策略、保留期限和业务元数据，当前接口大小限制为 512 MB。
             </Text>
           </Box>
-          <input
-            className="file-input"
-            type="file"
+          <FileUploadControl
+            id="standalone-upload-file"
+            label={uploading ? "上传中" : "选择文件"}
+            description="上传后可在组件来源中复用"
             disabled={uploading}
-            onChange={(event) => onUpload(event.target.files?.[0])}
+            onFile={(file) => onUpload(file)}
           />
         </div>
       </Panel>
 
-      <Panel title="上传记录" description="制品 metadata、下载策略和保留状态" icon={Database}>
-        <div className="table-scroll">
-          <Table.Root className="upload-table" variant="surface">
+      <Panel title="上传记录" description="制品元数据、下载策略和保留状态" icon={Database}>
+        <div className="table-scroll upload-table-scroll">
+          <Table.Root className="upload-table">
             <Table.Header>
               <Table.Row>
                 <Table.ColumnHeaderCell>文件</Table.ColumnHeaderCell>
@@ -2309,7 +2973,7 @@ function UploadsSection({ uploads, uploadForm, setUploadForm, uploading, onUploa
                 <Table.ColumnHeaderCell>SHA256</Table.ColumnHeaderCell>
                 <Table.ColumnHeaderCell>策略</Table.ColumnHeaderCell>
                 <Table.ColumnHeaderCell>保留</Table.ColumnHeaderCell>
-                <Table.ColumnHeaderCell>Metadata</Table.ColumnHeaderCell>
+                <Table.ColumnHeaderCell>元数据</Table.ColumnHeaderCell>
                 <Table.ColumnHeaderCell>时间</Table.ColumnHeaderCell>
                 <Table.ColumnHeaderCell>下载</Table.ColumnHeaderCell>
               </Table.Row>
@@ -2322,48 +2986,48 @@ function UploadsSection({ uploads, uploadForm, setUploadForm, uploading, onUploa
                   </Table.Cell>
                 </Table.Row>
               ) : (
-                uploads.map((upload) => (
-                  <Table.Row key={upload.id}>
-                    <Table.Cell>
-                      <div className="cell-main">
-                        <Text weight="medium">{upload.fileName}</Text>
-                        <Text size="1" color="gray">
+                uploads.map((upload) => {
+                  const canDownload = Boolean(upload.downloadUrl) && upload.retentionStatus !== "expired";
+                  return (
+                    <Table.Row key={upload.id}>
+                      <Table.Cell>
+                        <div className="cell-main">
+                        <Text weight="medium" title={upload.fileName}>{upload.fileName}</Text>
+                        <Text size="1" color="gray" title={upload.uri}>
                           {upload.uri}
                         </Text>
                       </div>
                     </Table.Cell>
                     <Table.Cell>{formatBytes(upload.size)}</Table.Cell>
                     <Table.Cell>
-                      <Code>{shortHash(upload.sha256)}</Code>
-                    </Table.Cell>
-                    <Table.Cell>{downloadPolicyText(upload.downloadPolicy)}</Table.Cell>
-                    <Table.Cell>
-                      <Badge color={retentionColor(upload.retentionStatus)} variant="soft">
-                        {retentionText(upload)}
-                      </Badge>
-                    </Table.Cell>
-                    <Table.Cell>
-                      <Text size="1" color="gray">
-                        {uploadMetadataText(upload.metadata)}
-                      </Text>
-                    </Table.Cell>
-                    <Table.Cell>{formatDate(upload.createdAt)}</Table.Cell>
-                    <Table.Cell>
-                      <Link
-                        href={upload.downloadUrl}
-                        target="_blank"
-                        className={upload.retentionStatus === "expired" ? "is-disabled-link" : ""}
-                        onClick={(event) => {
-                          if (upload.retentionStatus === "expired") {
-                            event.preventDefault();
-                          }
-                        }}
-                      >
-                        <Download size={14} /> 下载
-                      </Link>
-                    </Table.Cell>
-                  </Table.Row>
-                ))
+                        <Code title={upload.sha256}>{shortHash(upload.sha256)}</Code>
+                      </Table.Cell>
+                      <Table.Cell>{downloadPolicyText(upload.downloadPolicy)}</Table.Cell>
+                      <Table.Cell>
+                        <Badge color={retentionColor(upload.retentionStatus)} variant="soft">
+                          {retentionText(upload)}
+                        </Badge>
+                      </Table.Cell>
+                      <Table.Cell>
+                        <Text size="1" color="gray" title={uploadMetadataText(upload.metadata)}>
+                          {uploadMetadataText(upload.metadata)}
+                        </Text>
+                      </Table.Cell>
+                      <Table.Cell title={upload.createdAt}>{formatDate(upload.createdAt)}</Table.Cell>
+                      <Table.Cell>
+                        {canDownload ? (
+                          <Link href={upload.downloadUrl} target="_blank">
+                            <Download size={14} /> 下载
+                          </Link>
+                        ) : (
+                          <Text size="1" color="gray">
+                            {upload.retentionStatus === "expired" ? "已过期" : "无下载链接"}
+                          </Text>
+                        )}
+                      </Table.Cell>
+                    </Table.Row>
+                  );
+                })
               )}
             </Table.Body>
           </Table.Root>
@@ -2381,10 +3045,10 @@ function RunnersSection({ runners, builds, onInspect }) {
   return (
     <div className="section-stack">
       <Grid className="metric-grid" gap="4">
-        <MetricCard icon={Server} label="Runner 数量" value={runners.length} hint="已观测到的 runner" color="teal" />
+        <MetricCard icon={Server} label="Runner 数量" value={runners.length} hint="已观测到的 runner" color="neutral" />
         <MetricCard icon={Gauge} label="忙碌 Runner" value={runners.filter((runner) => runner.status === "busy").length} hint="正在执行构建" color="blue" />
         <MetricCard icon={AlertCircle} label="异常 Runner" value={staleRunners.length} hint="心跳异常或状态未知" color="amber" />
-        <MetricCard icon={ClipboardList} label="活跃任务" value={activeBuilds.length} hint="排队中 + 构建中" color="green" />
+        <MetricCard icon={ClipboardList} label="活跃任务" value={activeBuilds.length} hint="排队中 + 构建中" color="blue" />
       </Grid>
       <Panel title="Runner 执行链路" description="用于确认队列是否被 runner 消费，以及当前卡在哪个阶段" icon={Gauge}>
         <div className="runner-flow-grid">
@@ -2400,14 +3064,21 @@ function RunnersSection({ runners, builds, onInspect }) {
             </Text>
           ) : (
             activeBuilds.slice(0, 6).map((build) => (
-              <button key={build.id} type="button" className="runner-flow-row" onClick={() => onInspect(build)}>
+              <button
+                key={build.id}
+                type="button"
+                className="runner-flow-row"
+                title={`${build.id} / ${build.productId} / ${build.target} / ${build.version} / ${build.runnerId || "等待 runner"}`}
+                aria-label={`查看构建 ${build.id} 的执行链路`}
+                onClick={() => onInspect(build)}
+              >
                 <StatusBadge status={build.status} />
-                <Code>{shortId(build.id)}</Code>
-                <Text size="2">{build.productId}</Text>
-                <Text size="2" color="gray">
+                <Code title={build.id}>{shortId(build.id)}</Code>
+                <Text size="2" title={build.productId}>{build.productId}</Text>
+                <Text size="2" color="gray" title={`${build.target} / ${build.version}`}>
                   {build.target} / {build.version}
                 </Text>
-                <Text size="2" color="gray">
+                <Text size="2" color="gray" title={build.runnerId || "等待 runner"}>
                   {build.runnerId || "等待 runner"}
                 </Text>
               </button>
@@ -2438,13 +3109,13 @@ function RunnersSection({ runners, builds, onInspect }) {
                     </Badge>
                   </Flex>
                   <div className="runner-metrics">
-                    <AssetLine label="当前构建" value={runner.currentBuildId ? shortId(runner.currentBuildId) : "-"} />
+                    <AssetLine label="当前构建" value={runner.currentBuildId ? shortId(runner.currentBuildId) : "-"} title={runner.currentBuildId || "-"} />
                     <AssetLine label="当前状态" value={runner.currentBuildState || "-"} />
                     <AssetLine label="运行中" value={runner.runningBuilds} />
                     <AssetLine label="完成" value={runner.completedBuilds} />
                     <AssetLine label="失败" value={runner.failedBuilds} />
-                    <AssetLine label="最后心跳" value={runner.lastHeartbeatAt ? formatDate(runner.lastHeartbeatAt) : "-"} />
-                    <AssetLine label="最后日志" value={runner.lastLogAt ? formatDate(runner.lastLogAt) : "-"} />
+                    <AssetLine label="最后心跳" value={runner.lastHeartbeatAt ? formatDate(runner.lastHeartbeatAt) : "-"} title={runner.lastHeartbeatAt || "-"} />
+                    <AssetLine label="最后日志" value={runner.lastLogAt ? formatDate(runner.lastLogAt) : "-"} title={runner.lastLogAt || "-"} />
                   </div>
                   <div className="runner-stage-strip" aria-label={`${runner.runnerId} 当前阶段`}>
                     {["claim", "package", "upload", "complete"].map((stage) => (
@@ -2454,17 +3125,21 @@ function RunnersSection({ runners, builds, onInspect }) {
                     ))}
                   </div>
                   {currentBuild && (
-                    <Button size="1" variant="soft" onClick={() => onInspect(currentBuild)}>
+                    <Button size="1" variant="soft" title={`查看当前构建 ${currentBuild.id}`} onClick={() => onInspect(currentBuild)}>
                       <ListChecks size={14} />
                       查看当前构建
                     </Button>
                   )}
                   <div className="runner-log-list">
                     {(runner.recentMessages || []).map((log) => (
-                      <div key={`${runner.runnerId}-${log.sequence}-${log.time}`} className="runner-log-line">
-                        <Code>{log.sequence || "-"}</Code>
-                        <Text size="1" color="gray">{formatDate(log.time)}</Text>
-                        <Text size="2">{log.message}</Text>
+                      <div
+                        key={`${runner.runnerId}-${log.sequence}-${log.time}`}
+                        className="runner-log-line"
+                        title={`${log.sequence || "-"} ${log.time || ""} ${cleanLogMessage(log.message)}`.trim()}
+                      >
+                        <Code title={String(log.sequence || "-")}>{log.sequence || "-"}</Code>
+                        <Text size="1" color="gray" title={log.time || ""}>{formatDate(log.time)}</Text>
+                        <Text size="2" title={cleanLogMessage(log.message)}>{cleanLogMessage(log.message)}</Text>
                       </div>
                     ))}
                   </div>
@@ -2555,7 +3230,7 @@ function ComponentSourceEditor({ components, uploads, overridesText, onUpdate, o
         <AuditMetric label="阻塞" value={blockedCount} />
       </div>
       <div className="table-scroll">
-        <Table.Root className="component-source-table" variant="surface">
+        <Table.Root className="component-source-table">
           <Table.Header>
             <Table.Row>
               <Table.ColumnHeaderCell>组件</Table.ColumnHeaderCell>
@@ -2571,12 +3246,14 @@ function ComponentSourceEditor({ components, uploads, overridesText, onUpdate, o
                 <Table.Cell>
                   <div className="cell-main">
                     <Flex gap="2" align="center" wrap="wrap">
-                      <Text weight="bold">{component.id}</Text>
+                      <Text weight="bold" title={component.id}>
+                        {component.id}
+                      </Text>
                       <Badge color={component.required ? "red" : "gray"} variant="soft">
                         {component.required ? "必需" : "可选"}
                       </Badge>
                     </Flex>
-                    <Text size="1" color="gray">
+                    <Text size="1" color="gray" title={component.type}>
                       {component.type}
                     </Text>
                   </div>
@@ -2621,12 +3298,12 @@ function ComponentSourceEditor({ components, uploads, overridesText, onUpdate, o
                     />
                   )}
                   {kind === "manual-upload" && (
-                    <Code>{source.uri || "等待选择上传记录"}</Code>
+                    <Code title={source.uri || "等待选择上传记录"}>{source.uri || "等待选择上传记录"}</Code>
                   )}
                 </Table.Cell>
                 <Table.Cell>
                   {kind === "manual-upload" ? (
-                    <div className="field-grid">
+                    <Field.Group className="field-grid">
                       <FieldSelect
                         label="已有上传"
                         value={source.uploadId || "__none__"}
@@ -2650,13 +3327,15 @@ function ComponentSourceEditor({ components, uploads, overridesText, onUpdate, o
                           })),
                         ]}
                       />
-                      <input
-                        className="file-input"
-                        aria-label={`上传 ${component.id} 组件文件`}
-                        type="file"
-                        onChange={(event) => onUpload(component.id, event.target.files?.[0])}
+                      <FileUploadControl
+                        id={`component-upload-${component.id}`}
+                        label="上传新文件"
+                        description="上传后自动绑定到该组件"
+                        ariaLabel={`上传 ${component.id} 组件文件`}
+                        compact
+                        onFile={(file) => onUpload(component.id, file)}
                       />
-                    </div>
+                    </Field.Group>
                   ) : (
                     <Text size="2" color="gray">
                       不需要上传
@@ -2664,7 +3343,7 @@ function ComponentSourceEditor({ components, uploads, overridesText, onUpdate, o
                   )}
                 </Table.Cell>
                 <Table.Cell>
-                  <div className={`component-health is-${health.tone}`}>
+                  <div className={`component-health is-${health.tone}`} title={`${component.id}：${health.text}`}>
                     {health.tone === "ready" ? <Check size={15} /> : <AlertCircle size={15} />}
                     <span>{health.text}</span>
                   </div>
@@ -2675,6 +3354,32 @@ function ComponentSourceEditor({ components, uploads, overridesText, onUpdate, o
         </Table.Root>
       </div>
     </div>
+  );
+}
+
+function FileUploadControl({ id, label, description, disabled, compact, ariaLabel, onFile }) {
+  return (
+    <label className={`file-upload-control ${compact ? "is-compact" : ""} ${disabled ? "is-disabled" : ""}`} htmlFor={id}>
+      <input
+        id={id}
+        className="file-input-native"
+        aria-label={ariaLabel || label}
+        type="file"
+        disabled={disabled}
+        onChange={(event) => {
+          onFile(event.target.files?.[0]);
+          event.target.value = "";
+        }}
+      />
+      <span className="file-upload-icon">
+        <Upload size={16} />
+      </span>
+      <span className="file-upload-main">
+        <strong>{label}</strong>
+        {description && <small>{description}</small>}
+      </span>
+      <span className="file-upload-action">浏览</span>
+    </label>
   );
 }
 
@@ -2730,8 +3435,8 @@ function BuildsTable({
             <div key={build.id} className="build-card-row">
               <Flex justify="between" align="start" gap="3">
                 <div className="cell-main">
-                  <Code>{shortId(build.id)}</Code>
-                  <Text size="1" color="gray">
+                  <Code title={build.id}>{shortId(build.id)}</Code>
+                  <Text size="1" color="gray" title={`${build.productId} / ${build.target} / ${build.profile || "-"}`}>
                     {build.productId} / {build.target} / {build.profile || "-"}
                   </Text>
                 </div>
@@ -2739,7 +3444,7 @@ function BuildsTable({
               </Flex>
               <div className="build-card-meta">
                 <AssetLine label="版本" value={build.version || "-"} />
-                <AssetLine label="更新" value={formatDate(build.updatedAt)} />
+                <AssetLine label="更新" value={formatDate(build.updatedAt)} title={build.updatedAt || ""} />
                 <Flex justify="between" gap="3" className="asset-line">
                   <Text color="gray">门禁</Text>
                   <BuildReleaseGateInline build={build} />
@@ -2761,13 +3466,13 @@ function BuildsTable({
         )}
       </div>
       <div className="table-scroll build-table-scroll">
-        <Table.Root className="build-table" variant="surface">
+        <Table.Root className="build-table">
           <Table.Header>
             <Table.Row>
               <Table.ColumnHeaderCell>ID</Table.ColumnHeaderCell>
               <Table.ColumnHeaderCell>产品</Table.ColumnHeaderCell>
               <Table.ColumnHeaderCell>目标</Table.ColumnHeaderCell>
-              <Table.ColumnHeaderCell>Profile</Table.ColumnHeaderCell>
+              <Table.ColumnHeaderCell>配置</Table.ColumnHeaderCell>
               <Table.ColumnHeaderCell>状态</Table.ColumnHeaderCell>
               <Table.ColumnHeaderCell>发布门禁</Table.ColumnHeaderCell>
               <Table.ColumnHeaderCell>更新时间</Table.ColumnHeaderCell>
@@ -2786,12 +3491,12 @@ function BuildsTable({
               builds.map((build) => (
                 <Table.Row key={build.id}>
                   <Table.Cell>
-                    <Code>{shortId(build.id)}</Code>
+                    <Code title={build.id}>{shortId(build.id)}</Code>
                   </Table.Cell>
                   <Table.Cell>
                     <div className="cell-main">
-                      <Text weight="medium">{build.productId}</Text>
-                      <Text size="1" color="gray">
+                      <Text weight="medium" title={build.productId}>{build.productId}</Text>
+                      <Text size="1" color="gray" title={build.version || ""}>
                         {build.version}
                       </Text>
                     </div>
@@ -2804,10 +3509,14 @@ function BuildsTable({
                   <Table.Cell>
                     <BuildReleaseGateInline build={build} />
                   </Table.Cell>
-                  <Table.Cell>{formatDate(build.updatedAt)}</Table.Cell>
+                  <Table.Cell title={build.updatedAt || ""}>{formatDate(build.updatedAt)}</Table.Cell>
                   <Table.Cell>
                     {build.downloadUrl || build.artifactUri ? (
-                      <Link href={build.downloadUrl || buildDownloadUrl(build.id)} target="_blank">
+                      <Link
+                        href={build.downloadUrl || buildDownloadUrl(build.id)}
+                        target="_blank"
+                        title={build.downloadUrl || build.artifactUri || buildDownloadUrl(build.id)}
+                      >
                         <Download size={14} /> 下载
                       </Link>
                     ) : (
@@ -2839,9 +3548,10 @@ function BuildsTable({
 
 function BuildReleaseGateInline({ build }) {
   const readiness = getReleaseReadiness(build);
+  const gateTitle = releaseGateInlineTitle(build, readiness);
   if (build.status === "published") {
     return (
-      <div className="release-readiness is-pass">
+      <div className="release-readiness is-pass" title={gateTitle} aria-label={gateTitle}>
         <Check size={14} />
         <span>已发布</span>
       </div>
@@ -2849,12 +3559,12 @@ function BuildReleaseGateInline({ build }) {
   }
   if (build.status === "preview_validated") {
     return readiness.ready ? (
-      <div className="release-readiness is-pass">
+      <div className="release-readiness is-pass" title={gateTitle} aria-label={gateTitle}>
         <Rocket size={14} />
         <span>可发布</span>
       </div>
     ) : (
-      <div className="release-readiness is-blocked">
+      <div className="release-readiness is-blocked" title={gateTitle} aria-label={gateTitle}>
         <AlertCircle size={14} />
         <span>{readiness.blockingCount || 1} 阻塞</span>
         <small>{readiness.reason || "发布门禁未通过"}</small>
@@ -2863,18 +3573,33 @@ function BuildReleaseGateInline({ build }) {
   }
   if (build.status === "succeeded") {
     return (
-      <div className="release-readiness is-waiting">
+      <div className="release-readiness is-waiting" title={gateTitle} aria-label={gateTitle}>
         <ShieldCheck size={14} />
         <span>待验证 Preview</span>
       </div>
     );
   }
   return (
-    <div className="release-readiness is-muted">
+    <div className="release-readiness is-muted" title={gateTitle} aria-label={gateTitle}>
       <CircleDot size={14} />
       <span>等待构建成功</span>
     </div>
   );
+}
+
+function releaseGateInlineTitle(build, readiness) {
+  if (build.status === "published") {
+    return `${build.id}：Release 已发布`;
+  }
+  if (build.status === "preview_validated") {
+    return readiness.ready
+      ? `${build.id}：Release 门禁通过，可发布`
+      : `${build.id}：Release 门禁阻塞 ${readiness.blockingCount || 1} 项，${readiness.reason || "发布门禁未通过"}`;
+  }
+  if (build.status === "succeeded") {
+    return `${build.id}：Preview 已生成，等待验证后才能发布`;
+  }
+  return `${build.id}：等待构建成功后检查发布门禁`;
 }
 
 function BuildActions({
@@ -2890,15 +3615,16 @@ function BuildActions({
   showInspect = true,
 }) {
   const releaseReadiness = getReleaseReadiness(build);
+  const busyTitle = (label) => (busyAction === `${label}:${build.id}` ? `${label}处理中` : "");
   return (
     <Flex gap="2" wrap="wrap">
       {build.status === "pending_approval" && (
         <>
-          <Button size="1" color="green" variant="soft" disabled={busyAction === `审批通过:${build.id}`} onClick={() => onApprove(build)}>
+          <Button size="1" color="gray" variant="soft" title={busyTitle("审批通过") || `审批通过 ${build.id}`} disabled={busyAction === `审批通过:${build.id}`} onClick={() => onApprove(build)}>
             <Check size={14} />
             通过
           </Button>
-          <Button size="1" color="red" variant="soft" disabled={busyAction === `拒绝:${build.id}`} onClick={() => onReject(build)}>
+          <Button size="1" color="red" variant="soft" title={busyTitle("拒绝") || `拒绝 ${build.id}`} disabled={busyAction === `拒绝:${build.id}`} onClick={() => onReject(build)}>
             <X size={14} />
             拒绝
           </Button>
@@ -2907,8 +3633,9 @@ function BuildActions({
       {build.status === "succeeded" && (
         <Button
           size="1"
-          color="teal"
+          color="gray"
           variant="soft"
+          title={busyTitle("验证 Preview") || `验证 Preview ${build.id}`}
           disabled={busyAction === `验证 Preview:${build.id}`}
           onClick={() => onValidate(build)}
         >
@@ -2921,28 +3648,29 @@ function BuildActions({
           <Button
             size="1"
             variant="soft"
+            title={busyTitle("转 Release") || (releaseReadiness.ready ? `转 Release ${build.id}` : `Release 门禁阻塞：${releaseReadiness.reason || "发布门禁未通过"}`)}
             disabled={!releaseReadiness.ready || busyAction === `转 Release:${build.id}`}
             onClick={() => onPublish(build)}
           >
             <ShieldCheck size={14} />
-            Release
+            发布
           </Button>
         </Tooltip>
       )}
       {["pending_approval", "queued", "running"].includes(build.status) && (
-        <Button size="1" color="amber" variant="soft" disabled={busyAction === `取消:${build.id}`} onClick={() => onCancel(build)}>
+        <Button size="1" color="amber" variant="soft" title={busyTitle("取消") || `取消 ${build.id}`} disabled={busyAction === `取消:${build.id}`} onClick={() => onCancel(build)}>
           <Ban size={14} />
           取消
         </Button>
       )}
       {["failed", "canceled"].includes(build.status) && (
-        <Button size="1" color="purple" variant="soft" disabled={busyAction === `重试:${build.id}`} onClick={() => onRetry(build)}>
+        <Button size="1" color="purple" variant="soft" title={busyTitle("重试") || `重试 ${build.id}`} disabled={busyAction === `重试:${build.id}`} onClick={() => onRetry(build)}>
           <RotateCcw size={14} />
           重试
         </Button>
       )}
       {showInspect && (
-        <Button size="1" variant="soft" onClick={() => onInspect(build)}>
+        <Button size="1" variant="soft" title={`查看详情 ${build.id}`} onClick={() => onInspect(build)}>
           <ListChecks size={14} />
           详情
         </Button>
@@ -3032,10 +3760,10 @@ function BuildInspectTabs({ build, logs, buildLock, releaseCheck }) {
             <DetailItem label="产品" value={build.productId} />
             <DetailItem label="目标平台" value={build.target} />
             <DetailItem label="版本" value={build.version} />
-            <DetailItem label="Profile" value={build.profile || "-"} />
+            <DetailItem label="配置 Profile" value={build.profile || "-"} />
             <DetailItem label="构建通道" value={build.releaseChannel || "-"} />
             <DetailItem label="Runner" value={build.runnerId || "-"} />
-            <DetailItem label="Nomad Job" value={build.nomadJobId || "-"} mono />
+            <DetailItem label="Nomad 任务" value={build.nomadJobId || "-"} mono />
             <DetailItem label="创建时间" value={formatDate(build.createdAt)} />
             <DetailItem label="更新时间" value={formatDate(build.updatedAt)} />
             <DetailItem label="验证时间" value={build.validatedAt ? formatDate(build.validatedAt) : "-"} />
@@ -3097,7 +3825,7 @@ function ResolvedComponents({ components }) {
         </Callout.Root>
       )}
       <div className="table-scroll">
-        <Table.Root className="component-lock-table" variant="surface">
+        <Table.Root className="component-lock-table">
           <Table.Header>
             <Table.Row>
               <Table.ColumnHeaderCell>组件</Table.ColumnHeaderCell>
@@ -3122,15 +3850,15 @@ function ResolvedComponents({ components }) {
                   <Table.Cell>{component.type}</Table.Cell>
                   <Table.Cell>{sourceKindLabels[component.source?.kind] || component.source?.kind}</Table.Cell>
                   <Table.Cell>
-                    <Badge color={component.version === "latest" ? "amber" : "green"} variant="soft">
+                    <Badge color={component.version === "latest" ? "amber" : "gray"} variant="soft">
                       {component.version || "-"}
                     </Badge>
                   </Table.Cell>
                   <Table.Cell>
-                    <Code>{uri || "-"}</Code>
+                    <Code title={uri || "-"}>{uri || "-"}</Code>
                   </Table.Cell>
                   <Table.Cell>
-                    <Code>{shortHash(component.sha256)}</Code>
+                    <Code title={component.sha256 || "-"}>{shortHash(component.sha256)}</Code>
                   </Table.Cell>
                 </Table.Row>
               );
@@ -3148,7 +3876,7 @@ function BuildExecutionSummary({ build, buildLock, releaseCheck }) {
     <div className="execution-summary">
       <AuditMetric label="当前状态" value={statusMeta[build.status]?.label || build.status || "-"} />
       <AuditMetric label="Runner" value={build.runnerId || "未分配"} />
-      <AuditMetric label="Build Lock" value={buildLock?.buildId ? "已生成" : "缺失"} />
+      <AuditMetric label="构建锁" value={buildLock?.buildId ? "已生成" : "缺失"} />
       <AuditMetric label="Release 门禁" value={check.releaseReady ? "通过" : `${check.blockingCount || 0} 阻塞`} />
     </div>
   );
@@ -3195,7 +3923,7 @@ function ResolvedWorkloads({ workloads }) {
                 {workload.component || "未绑定组件"}
               </Text>
             </Box>
-            <Badge color={workload.enabled === false ? "gray" : "green"} variant="soft">
+            <Badge color="gray" variant="soft">
               {workload.enabled === false ? "禁用" : workload.runtime}
             </Badge>
           </Flex>
@@ -3285,29 +4013,44 @@ function ReleaseCheckGroup({ title, checks }) {
     <div className="release-check-group">
       <Flex justify="between" align="center" gap="3">
         <Text weight="bold">{title}</Text>
-        <Badge color={checks.every((item) => item.status !== "blocked") ? "green" : "amber"} variant="soft">
+        <Badge color={checks.every((item) => item.status !== "blocked") ? "gray" : "amber"} variant="soft">
           {checks.filter((item) => item.status === "blocked").length} 阻塞
         </Badge>
       </Flex>
       <div className="release-check-list">
-        {checks.map((item) => (
-          <div key={item.id} className={`release-check-row is-${item.status}`}>
-            <div className="release-check-icon">
-              {item.status === "blocked" ? <AlertCircle size={15} /> : <Check size={15} />}
+        {checks.map((item) => {
+          const reason = item.reason ? releaseReasonText(item.reason) : "检查通过";
+          const summary = releaseCheckSummaryText(item, reason);
+          return (
+            <div
+              key={item.id}
+              className={`release-check-row is-${item.status}`}
+              title={summary}
+              aria-label={summary}
+            >
+              <div className="release-check-icon">
+                {item.status === "blocked" ? <AlertCircle size={15} /> : <Check size={15} />}
+              </div>
+              <div>
+                <Text as="div" weight="medium" title={item.title || item.id || ""}>
+                  {item.title}
+                </Text>
+                <Text as="div" size="1" color="gray" title={reason}>
+                  {reason}
+                </Text>
+              </div>
             </div>
-            <div>
-              <Text as="div" weight="medium">
-                {item.title}
-              </Text>
-              <Text as="div" size="1" color="gray">
-                {item.reason ? releaseReasonText(item.reason) : "检查通过"}
-              </Text>
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
+}
+
+function releaseCheckSummaryText(item, reason) {
+  const statusText = item.status === "blocked" ? "阻塞" : "通过";
+  const idText = item.id ? `（${item.id}）` : "";
+  return `${item.title || "门禁检查"}${idText}：${statusText}，${reason || "检查通过"}`;
 }
 
 function BuildLockAudit({ build, buildLock }) {
@@ -3352,15 +4095,19 @@ function AuditMetric({ label, value }) {
 
 function LogsList({ logs }) {
   const [filter, setFilter] = useState("");
+  const displayLogs = useMemo(
+    () => (logs || []).map((entry) => ({ ...entry, message: cleanLogMessage(entry.message) })),
+    [logs],
+  );
   const filteredLogs = useMemo(() => {
     const keyword = filter.trim().toLowerCase();
-    if (!keyword) return logs || [];
-    return (logs || []).filter((entry) =>
+    if (!keyword) return displayLogs;
+    return displayLogs.filter((entry) =>
       [entry.time, entry.source, entry.message]
         .filter(Boolean)
         .some((value) => String(value).toLowerCase().includes(keyword)),
     );
-  }, [filter, logs]);
+  }, [displayLogs, filter]);
 
   if (!logs?.length) {
     return <EmptyState icon={ScrollText} title="暂无日志" text="Runner 或系统日志会显示在这里。" />;
@@ -3384,11 +4131,11 @@ function LogsList({ logs }) {
           </TextField.Slot>
         </TextField.Root>
         <Flex gap="2" wrap="wrap">
-          <Button variant="soft" onClick={() => copyText(logText)}>
+          <Button variant="soft" title="复制当前筛选后的日志" onClick={() => copyText(logText)}>
             <Copy size={16} />
             复制
           </Button>
-          <Button variant="soft" onClick={() => downloadText("build-logs.txt", logText)}>
+          <Button variant="soft" title="下载当前筛选后的日志" onClick={() => downloadText("build-logs.txt", logText)}>
             <FileDown size={16} />
             下载
           </Button>
@@ -3396,10 +4143,10 @@ function LogsList({ logs }) {
       </Flex>
       <div className="log-list">
         {filteredLogs.map((entry, index) => (
-          <div key={`${entry.time}-${index}`} className="log-line">
-            <Code>{formatDate(entry.time)}</Code>
-            <Code color="teal">[{entry.source}]</Code>
-            <Text>{entry.message}</Text>
+          <div key={`${entry.time}-${index}`} className="log-line" title={`${entry.time || ""} ${entry.source || ""} ${entry.message || ""}`.trim()}>
+            <Code title={entry.time || ""}>{formatDate(entry.time)}</Code>
+            <Code color="gray" title={entry.source || ""}>[{entry.source}]</Code>
+            <Text title={entry.message || ""}>{entry.message}</Text>
           </div>
         ))}
         {filteredLogs.length === 0 && (
@@ -3417,14 +4164,14 @@ function BuildTimeline({ builds, onInspect }) {
   return (
     <div className="timeline-list">
       {builds.map((build) => (
-        <button key={build.id} className="timeline-item" onClick={() => onInspect(build)}>
+        <button key={build.id} type="button" className="timeline-item" onClick={() => onInspect(build)}>
           <div className="timeline-dot" />
           <div className="timeline-main">
             <Box>
               <Text as="div" weight="bold">
                 {build.productId}
               </Text>
-              <Text as="div" size="1" color="gray">
+              <Text as="div" size="1" color="gray" title={`${build.id} / ${build.target} / ${build.version}`}>
                 {shortId(build.id)} / {build.target} / {build.version}
               </Text>
             </Box>
@@ -3544,6 +4291,9 @@ function normalizeError(error) {
       color: error.severity === "warning" ? "amber" : "red",
       tone,
       surface: errorSurface(error),
+      retryable: error.retryable,
+      requestId: error.requestId,
+      correlationId: error.correlationId,
     };
   }
   return {
@@ -3553,7 +4303,14 @@ function normalizeError(error) {
     color: "red",
     tone: "error",
     surface: "alert",
+    retryable: false,
   };
+}
+
+function cleanLogMessage(message) {
+  return String(message ?? "")
+    .replace(ansiEscapePattern, "")
+    .replace(unsafeLogControlPattern, "");
 }
 
 function releaseReasonText(reason) {
@@ -3562,12 +4319,12 @@ function releaseReasonText(reason) {
 
 function MetricCard({ icon: Icon, label, value, hint, color }) {
   return (
-    <Card className="metric-card">
-      <Flex gap="3" align="center">
+    <Card className="metric-card" size="sm">
+      <Card.Content className="metric-card-content">
         <div className={`metric-icon tone-${color}`}>
           <Icon size={20} />
         </div>
-        <Box>
+        <div className="metric-copy">
           <Text as="div" size="1" color="gray">
             {label}
           </Text>
@@ -3577,37 +4334,41 @@ function MetricCard({ icon: Icon, label, value, hint, color }) {
           <Text as="div" size="1" color="gray">
             {hint}
           </Text>
-        </Box>
-      </Flex>
+        </div>
+      </Card.Content>
     </Card>
   );
 }
 
 function Panel({ title, description, icon: Icon, action, children }) {
   return (
-    <Card className="admin-panel">
-      <Flex className="panel-header" justify="between" align="center" gap="4">
-        <Flex align="center" gap="3" minWidth="0">
+    <Card className="admin-panel" size="sm">
+      <Card.Header className="panel-header">
+        <div className="panel-title-row">
           {Icon && (
             <div className="panel-icon">
               <Icon size={18} />
             </div>
           )}
-          <Box>
-            <Heading as="h2" size="3">
-              {title}
-            </Heading>
+          <div className="panel-copy">
+            <Card.Title>
+              <Heading as="h2" size="3">
+                {title}
+              </Heading>
+            </Card.Title>
             {description && (
-              <Text as="div" size="2" color="gray">
-                {description}
-              </Text>
+              <Card.Description>
+                <Text as="div" size="2" color="gray">
+                  {description}
+                </Text>
+              </Card.Description>
             )}
-          </Box>
-        </Flex>
-        {action && <Box className="panel-action">{action}</Box>}
-      </Flex>
+          </div>
+        </div>
+        {action && <Card.Action className="panel-action">{action}</Card.Action>}
+      </Card.Header>
       <Separator size="4" />
-      <Box className="panel-body">{children}</Box>
+      <Card.Content className="panel-body">{children}</Card.Content>
     </Card>
   );
 }
@@ -3621,9 +4382,10 @@ function StatusBadge({ status }) {
   );
 }
 
-function DetailItem({ label, value, mono, wide }) {
+function DetailItem({ label, value, mono, wide, title }) {
+  const resolvedTitle = title || String(value ?? "");
   return (
-    <div className={`detail-item ${wide ? "wide" : ""}`}>
+    <div className={`detail-item ${wide ? "wide" : ""}`} title={resolvedTitle}>
       <Text size="1" color="gray">
         {label}
       </Text>
@@ -3634,11 +4396,11 @@ function DetailItem({ label, value, mono, wide }) {
   );
 }
 
-function AssetLine({ label, value }) {
+function AssetLine({ label, value, title }) {
   return (
     <Flex justify="between" gap="3" className="asset-line">
       <Text color="gray">{label}</Text>
-      <Text weight="medium">{value}</Text>
+      <Text weight="medium" title={title || String(value ?? "")}>{value}</Text>
     </Flex>
   );
 }
@@ -3657,7 +4419,7 @@ function EmptyState({ icon: Icon, title, text }) {
 
 function ValidationPanel({ result }) {
   return (
-    <Callout.Root color={result.valid ? "green" : "red"} variant="soft">
+    <Callout.Root color={result.valid ? "gray" : "red"} variant="soft">
       <Callout.Icon>
         {result.valid ? <Check size={18} /> : <AlertCircle size={18} />}
       </Callout.Icon>
@@ -3684,9 +4446,9 @@ function DiffPanel({ lines, emptyText = "没有差异。" }) {
   );
 }
 
-function ConfirmActionDialog({ action, onCancel, onConfirm }) {
+function ConfirmActionDialog({ action, busy, onCancel, onConfirm }) {
   return (
-    <Dialog.Root open={Boolean(action)} onOpenChange={(open) => !open && onCancel()}>
+    <Dialog.Root open={Boolean(action)} onOpenChange={(open) => !open && !busy && onCancel()}>
       <Dialog.Content className="confirm-dialog">
         <Dialog.Title>确认{action?.label}</Dialog.Title>
         <Dialog.Description>
@@ -3694,17 +4456,21 @@ function ConfirmActionDialog({ action, onCancel, onConfirm }) {
         </Dialog.Description>
         {action?.build && (
           <Box mt="3">
-            <Code>{action.build.productId}</Code>{" "}
-            <Code>{action.build.id}</Code>
+            <Code title={action.build.productId}>{action.build.productId}</Code>{" "}
+            <Code title={action.build.id}>{action.build.id}</Code>
           </Box>
         )}
         <Flex mt="4" gap="3" justify="end">
-          <Dialog.Close>
-            <Button variant="soft" onClick={onCancel}>
-              返回
-            </Button>
-          </Dialog.Close>
-          <Button color="red" onClick={onConfirm}>
+          <Button variant="soft" title="返回，不执行操作" disabled={busy} onClick={onCancel}>
+            返回
+          </Button>
+          <Button
+            color="red"
+            title={busy ? `${action?.label || "操作"}处理中` : `确认${action?.label || ""} ${action?.build?.id || ""}`.trim()}
+            disabled={busy}
+            onClick={onConfirm}
+          >
+            {busy ? <Spinner /> : null}
             确认{action?.label}
           </Button>
         </Flex>
@@ -3714,23 +4480,25 @@ function ConfirmActionDialog({ action, onCancel, onConfirm }) {
 }
 
 function JsonBlock({ value, compact }) {
+  const text = JSON.stringify(value || {}, null, 2);
   return (
-    <pre className={`json-block ${compact ? "is-compact" : ""}`}>
-      {JSON.stringify(value || {}, null, 2)}
+    <pre className={`json-block ${compact ? "is-compact" : ""}`} aria-label="JSON 内容" title={text}>
+      {text}
     </pre>
   );
 }
 
 function FieldSelect({ label, value, onValueChange, options }) {
+  const id = useId();
   const safeOptions = options.length ? options : [{ value: "-", label: "-" }];
   const safeValue = value || safeOptions[0].value;
   return (
-    <label className="field">
-      <Text size="2" weight="medium">
+    <Field.Root className="field">
+      <Field.Label htmlFor={id}>
         {label}
-      </Text>
+      </Field.Label>
       <Select.Root value={safeValue} onValueChange={onValueChange}>
-        <Select.Trigger />
+        <Select.Trigger id={id} />
         <Select.Content>
           {safeOptions.map((option) => (
             <Select.Item key={option.value} value={option.value}>
@@ -3739,23 +4507,25 @@ function FieldSelect({ label, value, onValueChange, options }) {
           ))}
         </Select.Content>
       </Select.Root>
-    </label>
+    </Field.Root>
   );
 }
 
 function LabeledInput({ label, value, onChange, type = "text", placeholder }) {
+  const id = useId();
   return (
-    <label className="field">
-      <Text size="2" weight="medium">
+    <Field.Root className="field">
+      <Field.Label htmlFor={id}>
         {label}
-      </Text>
+      </Field.Label>
       <TextField.Root
+        id={id}
         type={type}
         value={value}
         placeholder={placeholder}
         onChange={(event) => onChange(event.target.value)}
       />
-    </label>
+    </Field.Root>
   );
 }
 
@@ -3767,6 +4537,31 @@ function shortId(id) {
 function shortHash(hash) {
   if (!hash) return "-";
   return hash.length > 18 ? `${hash.slice(0, 18)}...` : hash;
+}
+
+export function apiEnvironmentLabel(url) {
+  const value = String(url || "").trim();
+  if (!value) return "自定义环境";
+  if (value.startsWith("/")) return "同源环境";
+  try {
+    const parsed = new URL(value);
+    const host = parsed.hostname.toLowerCase();
+    if (["localhost", "127.0.0.1", "::1", "0.0.0.0"].includes(host)) {
+      return "本地环境";
+    }
+    return "远程环境";
+  } catch {
+    return "自定义环境";
+  }
+}
+
+function shortApiUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.host;
+  } catch {
+    return url;
+  }
 }
 
 function dateValue(value) {
@@ -3806,8 +4601,8 @@ function retentionText(upload) {
 
 function retentionColor(status) {
   if (status === "expired") return "red";
-  if (status === "permanent") return "green";
-  return "teal";
+  if (status === "permanent") return "gray";
+  return "gray";
 }
 
 function uploadMetadataText(metadata) {
@@ -3830,7 +4625,7 @@ function runnerStatusText(status) {
 
 function runnerStatusColor(status) {
   if (status === "busy") return "blue";
-  if (status === "online" || status === "idle") return "green";
+  if (status === "online" || status === "idle") return "gray";
   if (status === "stale" || status === "unknown") return "amber";
   return "red";
 }
@@ -3861,9 +4656,6 @@ function validateProductManifest(manifest) {
     manifest.targets.forEach((target) => {
       if (!manifest.targetConfig?.[target]?.installDir) {
         errors.push(`targetConfig.${target}.installDir 缺失`);
-      }
-      if (!manifest.targetConfig?.[target]?.packageName) {
-        errors.push(`targetConfig.${target}.packageName 缺失`);
       }
     });
   }

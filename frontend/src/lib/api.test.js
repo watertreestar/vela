@@ -74,4 +74,21 @@ describe("api error contract", () => {
       category: "system",
     });
   });
+
+  it("maps network failures to a retryable API unavailable error", async () => {
+    global.fetch = vi.fn().mockRejectedValue(new TypeError("Failed to fetch"));
+
+    await expect(listProducts()).rejects.toMatchObject({
+      name: "ApiError",
+      status: 0,
+      code: "API_UNAVAILABLE",
+      messageKey: "errors.api.unavailable",
+      message: "API unavailable",
+      severity: "critical",
+      category: "network",
+      retryable: true,
+      userActionKey: "actions.checkApiService",
+      details: [{ code: "api.baseUrl", title: "API 地址", message: "http://localhost:8080" }],
+    });
+  });
 });

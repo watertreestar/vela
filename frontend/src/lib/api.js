@@ -1,4 +1,4 @@
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8080";
+export const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8080";
 
 export class ApiError extends Error {
   constructor({
@@ -58,8 +58,30 @@ function toApiError(payload, status, fallback) {
   return new ApiError({ status, message, details });
 }
 
+function toNetworkError() {
+  return new ApiError({
+    status: 0,
+    code: "API_UNAVAILABLE",
+    messageKey: "errors.api.unavailable",
+    message: "API unavailable",
+    severity: "critical",
+    category: "network",
+    retryable: true,
+    userActionKey: "actions.checkApiService",
+    details: [{ code: "api.baseUrl", title: "API 地址", message: API_URL }],
+  });
+}
+
+async function fetchWithNetworkError(url, options) {
+  try {
+    return await fetch(url, options);
+  } catch {
+    throw toNetworkError();
+  }
+}
+
 async function request(path, options = {}) {
-  const response = await fetch(`${API_URL}${path}`, {
+  const response = await fetchWithNetworkError(`${API_URL}${path}`, {
     headers: {
       "Content-Type": "application/json",
       ...options.headers,
@@ -194,7 +216,7 @@ export async function uploadArtifact(file, options = {}) {
       form.append(`metadata.${key}`, String(value));
     }
   }
-  const response = await fetch(`${API_URL}/api/uploads`, {
+  const response = await fetchWithNetworkError(`${API_URL}/api/uploads`, {
     method: "POST",
     body: form,
   });
