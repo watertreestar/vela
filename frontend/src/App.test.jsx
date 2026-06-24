@@ -1019,7 +1019,7 @@ describe("Packaging dashboard", () => {
     expect(screen.getByRole("button", { name: "保存 Manifest" })).toBeDisabled();
   });
 
-  it("treats target packageName as a functional warning instead of a hard manifest gate", async () => {
+  it("blocks manifest saving when enabled targets are missing packageName", async () => {
     const user = userEvent.setup();
     renderApp();
 
@@ -1041,14 +1041,15 @@ describe("Packaging dashboard", () => {
     });
 
     await user.click(screen.getByRole("tab", { name: /校验/ }));
-    expect(screen.getByText("Manifest 校验通过。")).toBeInTheDocument();
-    expect(screen.queryByText(/保存和试运行已暂停/)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "保存 Manifest" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "试运行" })).toBeEnabled();
+    expect(screen.getByText(/targetConfig\.linux\.packageName 缺失/)).toBeInTheDocument();
+    expect(screen.getByText(/targetConfig\.windows\.packageName 缺失/)).toBeInTheDocument();
+    expect(screen.getByText("请先修复 Manifest 校验错误，保存和试运行已暂停。")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保存 Manifest" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "试运行" })).toBeDisabled();
 
     await user.click(screen.getByRole("tab", { name: /功能检查/ }));
     expect(screen.getByText("安装包命名")).toBeInTheDocument();
-    expect(screen.getByText(/linux, windows 未配置 packageName/)).toBeInTheDocument();
+    expect(screen.getByText(/linux, windows 未配置 packageName；保存 Manifest 和试运行前必须显式固定/)).toBeInTheDocument();
     expect(screen.getAllByText("需确认").length).toBeGreaterThan(0);
   });
 

@@ -2931,7 +2931,7 @@ function manifestFeatureChecks(manifest) {
       detail:
         missingPackageNames.length === 0
           ? "所有目标平台都已配置 packageName。"
-          : `${missingPackageNames.join(", ")} 未配置 packageName；后端可使用默认命名，但建议显式固定。`,
+          : `${missingPackageNames.join(", ")} 未配置 packageName；保存 Manifest 和试运行前必须显式固定。`,
       level: "warn",
     },
     {
@@ -4704,6 +4704,9 @@ function validateProductManifest(manifest) {
     manifest.targets.forEach((target) => {
       if (!manifest.targetConfig?.[target]?.installDir) {
         errors.push(`targetConfig.${target}.installDir 缺失`);
+      }
+      if (!manifest.targetConfig?.[target]?.packageName) {
+        errors.push(`targetConfig.${target}.packageName 缺失`);
       }
     });
   }
