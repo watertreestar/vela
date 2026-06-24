@@ -1106,7 +1106,7 @@ describe("Packaging dashboard", () => {
 
   it("edits common manifest fields with the structured editor", async () => {
     const user = userEvent.setup();
-    renderApp();
+    const { container } = renderApp();
 
     await screen.findByRole("heading", { name: "总览" });
     await user.click(screen.getByRole("button", { name: /产品配置/ }));
@@ -1115,8 +1115,27 @@ describe("Packaging dashboard", () => {
     await user.clear(screen.getByLabelText("产品名称"));
     await user.type(screen.getByLabelText("产品名称"), "定位平台专业版");
 
+    const componentCards = container.querySelectorAll(".component-card");
+    const artifactComponent = componentCards[0];
+    await user.clear(within(artifactComponent).getByLabelText("仓库名称"));
+    await user.type(within(artifactComponent).getByLabelText("仓库名称"), "rustfs");
+    await user.clear(within(artifactComponent).getByLabelText("仓库路径"));
+    await user.type(within(artifactComponent).getByLabelText("仓库路径"), "artifact/stable/location-guard.tar.gz");
+
+    const manualUploadComponent = componentCards[1];
+    fireEvent.change(within(manualUploadComponent).getByLabelText("上传记录 ID"), { target: { value: "upload-license" } });
+    fireEvent.change(within(manualUploadComponent).getByLabelText("上传 URI"), {
+      target: { value: "local-upload://upload-license/customer.lic" },
+    });
+    fireEvent.change(within(manualUploadComponent).getByLabelText("允许后缀"), { target: { value: ".lic, .license" } });
+
     await user.click(screen.getByRole("tab", { name: /^编辑/ }));
     expect(screen.getByDisplayValue(/定位平台专业版/)).toBeInTheDocument();
+    expect(screen.getByDisplayValue(/"repository": "rustfs"/)).toBeInTheDocument();
+    expect(screen.getByDisplayValue(/"path": "artifact\/stable\/location-guard.tar.gz"/)).toBeInTheDocument();
+    expect(screen.getByDisplayValue(/"uploadId": "upload-license"/)).toBeInTheDocument();
+    expect(screen.getByDisplayValue(/"uri": "local-upload:\/\/upload-license\/customer.lic"/)).toBeInTheDocument();
+    expect(screen.getByDisplayValue((value) => value.includes('".license"'))).toBeInTheDocument();
   });
 
   it("requires inline confirmation before removing structured manifest items", async () => {

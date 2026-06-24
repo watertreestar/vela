@@ -1734,9 +1734,24 @@ function defaultComponentSource(kind, current = {}) {
     return { kind, uri: current.uri || "" };
   }
   if (kind === "manual-upload") {
-    return { kind, uploadId: current.uploadId || "", uri: current.uri || "" };
+    return {
+      kind,
+      uploadId: current.uploadId || "",
+      uri: current.uri || "",
+      accept: Array.isArray(current.accept) ? current.accept : [],
+    };
   }
   return { kind };
+}
+
+function mergeComponentSource(current = {}, patch = {}) {
+  if (patch.kind) {
+    return {
+      ...defaultComponentSource(patch.kind, current),
+      ...patch,
+    };
+  }
+  return { ...current, ...patch };
 }
 
 function ProductsSection({
@@ -2412,7 +2427,7 @@ function ManifestStructuredEditor({ manifest, onChange }) {
     components[index] = {
       ...components[index],
       ...patch,
-      source: patch.source ? { ...(components[index]?.source || {}), ...patch.source } : components[index]?.source,
+      source: patch.source ? mergeComponentSource(components[index]?.source, patch.source) : components[index]?.source,
     };
     update({ components });
   }
@@ -2630,17 +2645,50 @@ function ManifestStructuredEditor({ manifest, onChange }) {
             <FieldSelect
               label="来源类型"
               value={component.source?.kind || "artifact-repository"}
-              onValueChange={(kind) => updateComponent(index, { source: { kind } })}
+              onValueChange={(kind) => updateComponent(index, { source: defaultComponentSource(kind, component.source) })}
               options={sourceKindOptions.map((option) => ({ value: option.key, label: option.label }))}
             />
             {(component.source?.kind || "artifact-repository") === "artifact-repository" && (
-              <LabeledInput label="仓库路径" value={component.source?.path || ""} onChange={(path) => updateComponent(index, { source: { path } })} />
+              <Field.Group className="field-grid two">
+                <LabeledInput
+                  label="仓库名称"
+                  value={component.source?.repository || ""}
+                  onChange={(repository) => updateComponent(index, { source: { repository } })}
+                  placeholder="minio"
+                />
+                <LabeledInput
+                  label="仓库路径"
+                  value={component.source?.path || ""}
+                  onChange={(path) => updateComponent(index, { source: { path } })}
+                />
+              </Field.Group>
             )}
             {component.source?.kind === "fixed-url" && (
               <LabeledInput label="URL" value={component.source?.url || ""} onChange={(url) => updateComponent(index, { source: { url } })} />
             )}
             {component.source?.kind === "previous-build" && (
               <LabeledInput label="URI" value={component.source?.uri || ""} onChange={(uri) => updateComponent(index, { source: { uri } })} />
+            )}
+            {component.source?.kind === "manual-upload" && (
+              <Field.Group className="field-grid two">
+                <LabeledInput
+                  label="上传记录 ID"
+                  value={component.source?.uploadId || ""}
+                  onChange={(uploadId) => updateComponent(index, { source: { uploadId } })}
+                />
+                <LabeledInput
+                  label="上传 URI"
+                  value={component.source?.uri || ""}
+                  onChange={(uri) => updateComponent(index, { source: { uri } })}
+                  placeholder="local-upload://..."
+                />
+                <LabeledInput
+                  label="允许后缀"
+                  value={(component.source?.accept || []).join(", ")}
+                  onChange={(value) => updateComponent(index, { source: { accept: splitCSV(value) } })}
+                  placeholder=".zip, .tar.gz, .lic"
+                />
+              </Field.Group>
             )}
           </div>
         ))}
