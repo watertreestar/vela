@@ -28,8 +28,8 @@
 当前尚未完全实现：
 
 - `details[].params` 目前仅作为预留字段，尚未在所有错误里填充。
-- `correlationId` 尚未持久化到 build、runner、artifact 和 audit 事件。
-- Notification center 和独立 audit event 尚未实现。
+- `requestId` / `correlationId` 已进入 API response、access log、audit event、Build log、Runner 请求日志和上传 artifact metadata。
+- Notification center 已实现构建生命周期 MVP；Runner 离线、存储不可用、归档和签名策略仍待补齐。
 
 ## 3. Go 内部错误、API 返回与日志责任边界
 
@@ -404,33 +404,50 @@ Alert 用于当前页面必须处理的问题：
 
 Notification 用于异步后台事件和需要追踪的系统事件：
 
-- Runner 离线。
-- Scheduler 提交失败。
-- 构建失败或完成。
-- Preview 已生成等待验证。
-- Release 发布完成。
-- 存储不可用、下载不可用。
+- 已落地：Scheduler 提交失败、构建失败、Preview 已生成等待验证、Preview 已验证、Release 发布完成。
+- 后续补齐：Runner 离线、存储不可用、下载不可用、审计归档或签名失败。
 
-当前前端已实现 toast 与 page alert；notification center 后续实现时应复用同一套 `ApiError` / event 结构。
+当前前端已实现 toast、page alert 和 notification center。Notification center 使用持久通知 API，支持未读数、单条已读、全部已读和跳转构建详情；不替代 audit event，audit event 仍用于追责和审计。
 
 ## 10. RequestId 与 CorrelationId
 
-建议增加 request middleware：
+当前 request middleware：
 
 - 读取请求头 `X-Request-Id`；不存在时生成 `req_xxx`。
-- 写回响应头 `X-Request-Id`。
+- 写回响应头 `X-Request-Id` 和 `X-Correlation-Id`。
 - 将 requestId 放入 `APIError.requestId`。
-- 服务端 access log 和 error log 都打印 requestId。
+- 服务端 access log 和 error log 都打印 requestId/correlationId。
 
-建议增加 correlationId：
+当前 correlationId 规则：
 
-- 创建构建时生成 `corr_xxx`。
-- 后续 approve、runner claim、heartbeat、complete、artifact upload、release publish 都沿用同一个 correlationId。
-- Build log、Runner log、audit event、monitor output 都应能关联 correlationId。
+- 请求头包含 `X-Correlation-Id` 时沿用调用方传入值。
+- 请求头缺失时以 requestId 派生 `corr_xxx`。
+- 创建、审批、拒绝、Preview 验证、Release 发布、重试、取消、runner claim、runner log append、heartbeat、complete 写入 Build log 时持久化 requestId/correlationId。
+- audit event 同样持久化 requestId/correlationId。
+- 上传 artifact metadata 持久化创建请求的 requestId/correlationId；下载请求通过 `upload.download` audit event 关联。
+
+链路排查可以使用只读 Python CLI：
+
+```bash
+python scripts/correlation_trace_cli.py trace \
+  --api-url http://127.0.0.1:8080 \
+  --correlation-id corr_xxx
+```
+
+该命令会查询 `/api/audit-events`、`/api/builds`、`/api/uploads` 和 `/api/notifications`，并从审计事件、构建记录、构建日志、上传元数据和通知中汇总匹配的 requestId/correlationId。默认使用构建列表里的内嵌日志；如果需要强制读取每个构建的日志端点，可以加：
+
+```bash
+python scripts/correlation_trace_cli.py trace \
+  --api-url http://127.0.0.1:8080 \
+  --correlation-id corr_xxx \
+  --scan-build-log-endpoints
+```
+
+当 `AUTH_ENABLED=true` 时，需要传入 viewer/operator/admin bearer token，或通过 `PACKAGING_API_TOKEN` / `AUTH_ADMIN_TOKEN` 环境变量提供 token。机器可读排查证据使用 `--json`，schema 为 `packaging.correlation_trace.report/v1`。
 
 ## 11. Build Log、Runner Log 与 Audit
 
-Build log 当前是业务和技术日志的混合。后续建议扩展字段：
+Build log 当前是业务和技术日志的混合，字段包括：
 
 ```json
 {
@@ -519,7 +536,7 @@ data: {"code":"RESOURCE_NOT_FOUND","message":"build not found","requestId":"req_
 
 ## 14. 监测与告警
 
-`scripts/monitor_cli.py` 适合本地验收、CI smoke check 和部署后巡检。生产环境建议后续增加 `/metrics`、服务日志采集和独立 audit log。
+`scripts/monitor_cli.py` 适合本地验收、CI smoke check 和部署后巡检。后端已提供基础 `/metrics` 和独立 audit event API；生产环境仍需要补充服务日志采集、告警规则和审计归档策略。
 
 建议告警策略：
 
@@ -573,4 +590,4 @@ E2E 测试：
 5. 前端新增 i18n 字典，`normalizeError()` 改为 `code/detail.code` 驱动。
 6. 建立 `code -> surface` 分流表，逐步接入 notification center。
 6. 补后端错误契约测试、前端 i18n 单测和 E2E 错误路径。
-7. 后续实现独立 audit event、结构化 BuildLog 和 `/metrics`。
+7. 后续为 audit event 补归档/签名策略，结构化 BuildLog，并为 `/metrics` 补生产告警规则。

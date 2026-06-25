@@ -208,6 +208,69 @@ const runners = [
   },
 ];
 
+const notifications = [
+  {
+    id: "ntf-preview-ready",
+    type: "build.preview_ready",
+    severity: "info",
+    title: "Preview 已生成",
+    message: "lsap / windows / prod / 1.0.0：Runner 已生成 Preview 制品，等待人工验证。",
+    resourceType: "build",
+    resourceId: "build-success-002",
+    productId: "lsap",
+    buildId: "build-success-002",
+    createdAt: "2026-05-28T05:32:00Z",
+  },
+  {
+    id: "ntf-release-published",
+    type: "build.published",
+    severity: "success",
+    title: "Release 已发布",
+    message: "lsap / windows / prod / 1.0.0：验证通过的 Preview 已提升为 Release。",
+    resourceType: "build",
+    resourceId: "build-success-002",
+    productId: "lsap",
+    buildId: "build-success-002",
+    createdAt: "2026-05-28T06:45:00Z",
+    readAt: "2026-05-28T06:50:00Z",
+  },
+];
+
+const auditEvents = [
+  {
+    id: "aud-build-download",
+    time: "2026-05-28T06:55:00Z",
+    action: "build.download",
+    actorId: "operator",
+    actorRole: "operator",
+    resourceType: "build",
+    resourceId: "build-success-002",
+    productId: "lsap",
+    buildId: "build-success-002",
+    uploadId: "upload-license",
+    requestId: "req-build-download",
+    correlationId: "corr-release-flow",
+    status: "success",
+    summary: "build artifact download requested",
+    metadata: { downloadPolicy: "restricted", retention: "active" },
+  },
+  {
+    id: "aud-archive-export",
+    time: "2026-05-28T06:58:00Z",
+    action: "audit.archive.export",
+    actorId: "viewer",
+    actorRole: "viewer",
+    resourceType: "audit_archive",
+    resourceId: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    productId: "lsap",
+    requestId: "req-archive",
+    correlationId: "corr-release-flow",
+    status: "success",
+    summary: "audit archive exported",
+    metadata: { digestAlgorithm: "sha256", retentionMode: "COMPLIANCE" },
+  },
+];
+
 function releaseCheckFor(build) {
   const fixedVersion = build.version && build.version !== "latest";
   const previewReady = build.status === "succeeded" || build.status === "preview_validated" || build.status === "published";
@@ -237,6 +300,56 @@ function releaseCheckFor(build) {
   };
 }
 
+function reproducibilityReportFor(build) {
+  const releaseCheck = releaseCheckFor(build);
+  const lock = build.buildLock || baseBuildLock;
+  return {
+    generatedAt: "2026-05-28T06:45:00Z",
+    buildId: build.id,
+    productId: build.productId,
+    target: build.target,
+    profile: build.profile,
+    customer: build.customer,
+    version: build.version,
+    releaseChannel: build.releaseChannel,
+    status: build.status,
+    reproducible: releaseCheck.releaseReady,
+    releaseCheck,
+    buildLock: lock,
+    sourceArtifacts: (lock.components || []).map((component) => ({
+      componentId: component.id,
+      type: component.type,
+      version: component.version,
+      sourceKind: component.source?.kind,
+      uri: component.uri,
+      sha256: component.sha256,
+      required: component.required,
+    })),
+    outputArtifact: {
+      uri: build.artifactUri || "",
+      downloadUrl: build.downloadUrl || "http://localhost:8080/api/uploads/upload-license/download",
+      uploadId: "upload-license",
+      sha256: "abcdef0123456789abcdef0123456789",
+      size: 2048,
+      contentType: "application/octet-stream",
+      downloadPolicy: "platform",
+      retentionStatus: "active",
+      createdAt: "2026-05-28T06:05:00Z",
+    },
+    runner: {
+      runnerId: build.runnerId || "linux-runner-01",
+      nomadJobId: build.nomadJobId || "job-" + build.id,
+    },
+    lifecycle: {
+      createdAt: build.createdAt,
+      approvedAt: build.approvedAt,
+      validatedAt: build.validatedAt,
+      publishedAt: build.publishedAt,
+      updatedAt: build.updatedAt,
+    },
+  };
+}
+
 function withReleaseSummary(build) {
   const check = releaseCheckFor(build);
   const firstBlocked = check.checks.find((item) => item.status === "blocked");
@@ -261,6 +374,10 @@ function jsonResponse(payload, status = 200) {
     ok: status >= 200 && status < 300,
     status,
     json: () => Promise.resolve(payload),
+    clone: () => ({
+      json: () => Promise.reject(new Error("not a download error payload")),
+    }),
+    blob: () => Promise.resolve(new Blob([JSON.stringify(payload)], { type: "application/json" })),
   });
 }
 
@@ -288,6 +405,8 @@ function setupFetch() {
         },
       ],
     },
+    notifications: [...notifications],
+    auditEvents: [...auditEvents],
     createPayloads: [],
     revisions: [
       {
@@ -316,6 +435,62 @@ function setupFetch() {
     }
     if (method === "GET" && path === "/api/runners") {
       return jsonResponse(runners);
+    }
+    if (method === "GET" && path === "/api/notifications") {
+      const read = parsed.searchParams.get("read");
+      const nextNotifications = state.notifications.filter((notification) => {
+        if (read === "unread") return !notification.readAt;
+        if (read === "read") return Boolean(notification.readAt);
+        return true;
+      });
+      return jsonResponse(nextNotifications);
+    }
+    if (method === "GET" && path === "/api/audit-events") {
+      const action = parsed.searchParams.get("action");
+      const buildId = parsed.searchParams.get("buildId");
+      const filtered = state.auditEvents.filter((event) => {
+        if (action && event.action !== action) return false;
+        if (buildId && event.buildId !== buildId) return false;
+        return true;
+      });
+      return jsonResponse(filtered);
+    }
+    if (method === "GET" && path === "/api/audit-events/archive") {
+      return jsonResponse({
+        schemaVersion: "packaging.audit.archive/v1",
+        generatedAt: "2026-05-28T07:00:00Z",
+        archiveUri: "minio://packaging-audit/audit-archives/sha256/012345.json",
+        archiveStoredAt: "2026-05-28T07:00:00Z",
+        archiveRetentionMode: "COMPLIANCE",
+        archiveRetainUntil: "2036-05-28T07:00:00Z",
+        archiveLegalHold: "ON",
+        eventCount: state.auditEvents.length,
+        filter: Object.fromEntries(parsed.searchParams.entries()),
+        events: state.auditEvents,
+        digestAlgorithm: "sha256",
+        digest: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        signatureAlgorithm: "hmac-sha256",
+        signatureKeyId: "audit-key-2026",
+        signature: "signature",
+      });
+    }
+    const notificationReadMatch = path.match(/^\/api\/notifications\/([^/]+)\/read$/);
+    if (method === "POST" && notificationReadMatch) {
+      const id = notificationReadMatch[1];
+      state.notifications = state.notifications.map((notification) =>
+        notification.id === id
+          ? { ...notification, readAt: notification.readAt || "2026-05-28T07:00:00Z" }
+          : notification,
+      );
+      return jsonResponse(state.notifications.find((notification) => notification.id === id));
+    }
+    if (method === "POST" && path === "/api/notifications/read-all") {
+      const changed = state.notifications
+        .filter((notification) => !notification.readAt)
+        .map((notification) => ({ ...notification, readAt: "2026-05-28T07:00:00Z" }));
+      const changedById = new Map(changed.map((notification) => [notification.id, notification]));
+      state.notifications = state.notifications.map((notification) => changedById.get(notification.id) || notification);
+      return jsonResponse(changed);
     }
     if (method === "GET" && path === "/api/products/lsap/manifest") {
       return jsonResponse(state.manifests.lsap);
@@ -450,6 +625,11 @@ function setupFetch() {
     if (method === "GET" && path === "/api/builds/build-created-003/release-check") {
       return jsonResponse(releaseCheckFor(state.builds.find((build) => build.id === "build-created-003")));
     }
+    const reportMatch = path.match(/^\/api\/builds\/([^/]+)\/reproducibility-report$/);
+    if (method === "GET" && reportMatch) {
+      const build = state.builds.find((item) => item.id === reportMatch[1]);
+      return build ? jsonResponse(reproducibilityReportFor(build)) : jsonResponse({ error: "not found" }, 404);
+    }
     if (method === "POST" && path === "/api/builds/build-pending-001/approve") {
       const approved = { ...state.builds.find((build) => build.id === "build-pending-001"), status: "queued" };
       state.builds = state.builds.map((build) => (build.id === approved.id ? approved : build));
@@ -497,6 +677,9 @@ function renderApp() {
 
 beforeEach(() => {
   window.localStorage.clear();
+  window.URL.createObjectURL = vi.fn(() => "blob:packaging-test");
+  window.URL.revokeObjectURL = vi.fn();
+  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
   setupFetch();
 });
 
@@ -591,9 +774,89 @@ describe("Packaging dashboard", () => {
     expect(screen.getByText("http://localhost:8080")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "本地环境" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "日期范围" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "通知" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "通知，1 条未读" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "主题" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "当前用户" })).not.toBeInTheDocument();
+  });
+
+  it("opens the notification center and marks notifications as read", async () => {
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "总览" });
+    await user.click(screen.getByRole("button", { name: "通知，1 条未读" }));
+
+    expect(await screen.findByRole("heading", { name: "通知中心" })).toBeInTheDocument();
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText("1 条未读")).toBeInTheDocument();
+    expect(within(dialog).getByText("Preview 已生成")).toBeInTheDocument();
+
+    await user.click(within(dialog).getAllByRole("button", { name: "已读" })[0]);
+    await waitFor(() => {
+      expect(within(dialog).getByText("没有未读通知")).toBeInTheDocument();
+    });
+
+    await user.click(within(dialog).getAllByRole("button", { name: "查看" })[0]);
+    expect(await screen.findByRole("heading", { name: /构建详情/ })).toBeInTheDocument();
+    expect(screen.getAllByText("lsap / build-success-002").length).toBeGreaterThan(0);
+  });
+
+  it("loads audit events and exports an archive from the audit center", async () => {
+    const user = userEvent.setup();
+    renderApp();
+
+    expect(await screen.findByRole("heading", { name: "总览" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "审计中心" }));
+
+    expect(await screen.findByRole("heading", { level: 1, name: "审计中心" })).toBeInTheDocument();
+    expect(await screen.findByText("build.download")).toBeInTheDocument();
+    expect(screen.getByText("audit.archive.export")).toBeInTheDocument();
+    expect(screen.getAllByText("operator").length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole("button", { name: "导出归档" }));
+
+    expect(await screen.findByText("最近归档证据")).toBeInTheDocument();
+    expect(screen.getByText("audit-key-2026")).toBeInTheDocument();
+    expect(screen.getByText("COMPLIANCE")).toBeInTheDocument();
+    expect(window.URL.createObjectURL).toHaveBeenCalled();
+  });
+
+  it("saves an access token and reflects the selected frontend role", async () => {
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "总览" });
+    await user.click(screen.getByRole("button", { name: "免登录" }));
+    await user.type(screen.getByLabelText("Bearer Token"), "operator-token");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(JSON.parse(window.localStorage.getItem("packaging.auth"))).toMatchObject({
+      token: "operator-token",
+      role: "operator",
+    });
+    expect(await screen.findByRole("button", { name: "操作员" })).toBeInTheDocument();
+  });
+
+  it("disables protected actions for a viewer token", async () => {
+    window.localStorage.setItem("packaging.auth", JSON.stringify({ token: "viewer-token", role: "viewer" }));
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "总览" });
+    expect(screen.getByRole("button", { name: "只读" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "新建构建" })).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: /构建记录/ }));
+    const approveButton = screen.getAllByRole("button", { name: "通过" })[0];
+    expect(approveButton).toBeDisabled();
+    expect(approveButton).toHaveAttribute("title", "需要操作员或管理员才能审批构建");
+
+    await user.click(screen.getByRole("button", { name: /产品配置/ }));
+    expect(screen.getByRole("button", { name: "保存 Manifest" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "保存 Manifest" })).toHaveAttribute(
+      "title",
+      "需要操作员或管理员才能保存 Manifest",
+    );
   });
 
   it("derives environment labels from API URLs", () => {
@@ -620,11 +883,20 @@ describe("Packaging dashboard", () => {
     await user.click(screen.getByRole("tab", { name: /发布门禁/ }));
     expect(screen.getByText("构建版本固定").closest(".release-check-row")).toHaveAttribute(
       "title",
-      "构建版本固定（release.fixed-version）：阻塞，Release 需要选择固定版本，不能使用 latest",
+      "构建版本固定（release.fixed-version）：阻塞，Release 需要固定版本，不能使用 latest",
     );
-    expect(screen.getByText("Release 需要选择固定版本，不能使用 latest")).toHaveAttribute(
+    expect(screen.getByText("Release 需要固定版本，不能使用 latest")).toHaveAttribute(
       "title",
-      "Release 需要选择固定版本，不能使用 latest",
+      "Release 需要固定版本，不能使用 latest",
+    );
+
+    await user.click(screen.getByRole("tab", { name: /可复现报告/ }));
+    expect(screen.getByText("仍有阻塞")).toBeInTheDocument();
+    expect(screen.getByText("源组件锁定")).toBeInTheDocument();
+    expect(screen.getByText("最终制品证据")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "下载报告" })).toHaveAttribute(
+      "title",
+      "下载 build-pending-001 的可复现报告 JSON",
     );
 
     await user.click(screen.getByRole("tab", { name: /日志/ }));
@@ -656,6 +928,10 @@ describe("Packaging dashboard", () => {
     expect(screen.getByText("构建版本固定")).toBeInTheDocument();
     expect(fetch).toHaveBeenCalledWith(
       "http://localhost:8080/api/builds/build-success-002/release-check",
+      expect.objectContaining({ headers: expect.objectContaining({ "Content-Type": "application/json" }) }),
+    );
+    expect(fetch).toHaveBeenCalledWith(
+      "http://localhost:8080/api/builds/build-success-002/reproducibility-report",
       expect.objectContaining({ headers: expect.objectContaining({ "Content-Type": "application/json" }) }),
     );
 
@@ -1456,12 +1732,11 @@ describe("Packaging dashboard", () => {
     expect(screen.getAllByText("等待构建成功").some((element) => element.parentElement?.getAttribute("title")?.includes("build-pending-001"))).toBe(true);
     expect(screen.getAllByText("待验证 Preview").some((element) => element.parentElement?.getAttribute("title")?.includes("build-success-002"))).toBe(true);
     expect(screen.getAllByRole("button", { name: "详情" }).some((element) => element.getAttribute("title") === "查看详情 build-success-002")).toBe(true);
-    const downloadLink = screen.getByRole("link", { name: /下载/ });
-    expect(downloadLink).toHaveAttribute(
-      "href",
-      "http://localhost:8080/api/builds/build-success-002/download",
-    );
-    expect(downloadLink).toHaveAttribute("title", "minio://packaging/lsap-windows.exe");
+    const downloadButton = screen
+      .getAllByRole("button", { name: /下载/ })
+      .find((element) => element.getAttribute("title") === "minio://packaging/lsap-windows.exe");
+    expect(downloadButton).toBeTruthy();
+    expect(downloadButton).toHaveAttribute("title", "minio://packaging/lsap-windows.exe");
   });
 
   it("shows artifact metadata, retention and runner observability", async () => {
@@ -1477,7 +1752,7 @@ describe("Packaging dashboard", () => {
     expect(screen.getByText("abcdef0123456789ab...")).toHaveAttribute("title", "abcdef0123456789abcdef0123456789");
     expect(screen.getByText("expired-preview.tar.gz")).toBeInTheDocument();
     expect(screen.getAllByText("已过期").length).toBeGreaterThan(0);
-    expect(screen.getAllByRole("link", { name: /下载/ })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: /下载/ }).length).toBeGreaterThanOrEqual(1);
 
     await user.click(screen.getByRole("button", { name: /Runner 监控/ }));
 

@@ -1,4 +1,6 @@
 const errorMessages = {
+  AUTH_REQUIRED: "请先登录后再继续",
+  AUTH_FORBIDDEN: "当前账号没有执行该操作的权限",
   VALIDATION_INVALID_JSON: "请求 JSON 无法解析",
   VALIDATION_REQUIRED_FIELD: "缺少必填字段",
   VALIDATION_INVALID_REQUEST: "请求参数不正确",
@@ -25,6 +27,8 @@ const errorMessages = {
 };
 
 const messageKeys = {
+  "errors.auth.required": "请先登录后再继续",
+  "errors.auth.forbidden": "当前账号没有执行该操作的权限",
   "errors.validation.invalidJson": "请求 JSON 无法解析",
   "errors.validation.requiredField": "缺少必填字段",
   "errors.validation.invalidRequest": "请求参数不正确",
@@ -44,6 +48,8 @@ const messageKeys = {
 };
 
 const userActionKeys = {
+  "actions.signIn": "请登录后重试",
+  "actions.requestPermission": "请联系管理员开通所需权限",
   "actions.fixManifestSchema": "请修复 Manifest 校验错误后再保存",
   "actions.createPreviewFirst": "请先创建 Preview 构建，验证通过后再转 Release",
   "actions.fixReleaseGate": "请先修复阻塞项后再发布",
@@ -97,6 +103,8 @@ const legacyReasonMessages = {
 };
 
 const errorSurfaces = {
+  AUTH_REQUIRED: "alert",
+  AUTH_FORBIDDEN: "toast",
   BUILD_STATE_CONFLICT: "toast",
   MANIFEST_SCHEMA_INVALID: "alert",
   MANIFEST_DRY_RUN_FAILED: "alert",

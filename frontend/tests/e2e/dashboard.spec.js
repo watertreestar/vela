@@ -256,6 +256,46 @@ const runners = [
   },
 ];
 
+const auditEvents = [
+  {
+    id: "aud-build-download",
+    time: "2026-05-28T06:55:00Z",
+    action: "build.download",
+    actorId: "operator",
+    actorRole: "operator",
+    resourceType: "build",
+    resourceId: "build-preview-ready",
+    productId: "lsap",
+    buildId: "build-preview-ready",
+    uploadId: "upload-license",
+    requestId: "req-build-download",
+    correlationId: "corr-release-flow",
+    status: "success",
+    summary: "build artifact download requested",
+    metadata: { downloadPolicy: "restricted", retention: "active" },
+  },
+  {
+    id: "aud-archive-export",
+    time: "2026-05-28T06:58:00Z",
+    action: "audit.archive.export",
+    actorId: "viewer",
+    actorRole: "viewer",
+    resourceType: "audit_archive",
+    resourceId: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    productId: "lsap",
+    requestId: "req-archive",
+    correlationId: "corr-release-flow",
+    status: "success",
+    summary: "audit archive exported",
+    metadata: { digestAlgorithm: "sha256", retentionMode: "COMPLIANCE" },
+  },
+];
+
+function jwtWithClaims(claims) {
+  const encode = (payload) => Buffer.from(JSON.stringify(payload)).toString("base64url");
+  return `${encode({ alg: "RS256" })}.${encode(claims)}.signature`;
+}
+
 function releaseCheckFor(build) {
   const fixedVersion = build.version && build.version !== "latest";
   const exactUris = (build.buildLock?.components || build.components || []).every(
@@ -303,6 +343,7 @@ async function mockApi(page) {
   const state = {
     builds: [...builds],
     createPayloads: [],
+    authHeaders: [],
     overlays: {
       profiles: [{ name: "qa", kind: "profiles", data: { config: { ports: { web: 48001 } } } }],
       customers: [{ name: "city-bank", kind: "customers", data: { config: { customer: { name: "City Bank" } } } }],
@@ -313,6 +354,7 @@ async function mockApi(page) {
     const url = new URL(request.url());
     const path = url.pathname;
     const method = request.method();
+    state.authHeaders.push({ method, path, authorization: request.headers().authorization || "" });
     const json = (payload, status = 200) =>
       route.fulfill({ status, contentType: "application/json", body: JSON.stringify(payload) });
 
@@ -320,6 +362,28 @@ async function mockApi(page) {
     if (method === "GET" && path === "/api/builds") return json(state.builds.map(withReleaseSummary));
     if (method === "GET" && path === "/api/uploads") return json(uploads);
     if (method === "GET" && path === "/api/runners") return json(runners);
+    if (method === "GET" && path === "/api/notifications") return json([]);
+    if (method === "GET" && path === "/api/audit-events") return json(auditEvents);
+    if (method === "GET" && path === "/api/audit-events/archive") {
+      return json({
+        schemaVersion: "packaging.audit.archive/v1",
+        generatedAt: "2026-05-28T07:00:00Z",
+        archiveUri: "minio://packaging-audit/audit-archives/sha256/012345.json",
+        archiveStoredAt: "2026-05-28T07:00:00Z",
+        archiveRetentionMode: "COMPLIANCE",
+        archiveRetainUntil: "2036-05-28T07:00:00Z",
+        archiveLegalHold: "ON",
+        eventCount: auditEvents.length,
+        filter: Object.fromEntries(url.searchParams.entries()),
+        events: auditEvents,
+        digestAlgorithm: "sha256",
+        digest: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        signatureAlgorithm: "hmac-sha256",
+        signatureKeyId: "audit-key-2026",
+        signature: "signature",
+      });
+    }
+    if (method === "POST" && path === "/api/notifications/read-all") return json([]);
     if (method === "GET" && path === "/api/products/lsap/manifest") return json(product);
     if (method === "GET" && path === "/api/products/lsap/manifest/revisions") return json([]);
     if (method === "GET" && path === "/api/products/lsap/overlays/profiles") return json(state.overlays.profiles);
@@ -436,6 +500,25 @@ test("upload records stay usable with a large artifact history", async ({ page }
   await expect(page.getByRole("columnheader", { name: "文件" })).toBeInViewport();
 });
 
+test("audit center lists events and shows archive evidence", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/");
+
+  await page.getByRole("button", { name: /审计中心/ }).click();
+
+  await expect(page.getByRole("heading", { name: "审计中心" }).first()).toBeVisible();
+  await expect(page.getByText("build.download")).toBeVisible();
+  await expect(page.getByText("audit.archive.export")).toBeVisible();
+  await expect(page.getByText("corr-release")).toHaveCount(2);
+
+  await page.getByRole("button", { name: "导出归档" }).click();
+
+  await expect(page.getByText("最近归档证据")).toBeVisible();
+  await expect(page.getByText("audit-key-2026")).toBeVisible();
+  await expect(page.getByText("COMPLIANCE", { exact: true })).toBeVisible();
+  await expect(page.getByText("ON", { exact: true })).toBeVisible();
+});
+
 test("create build form accepts richer component and customer data", async ({ page }) => {
   const state = await mockApi(page);
   await page.goto("/");
@@ -461,4 +544,97 @@ test("create build form accepts richer component and customer data", async ({ pa
   expect(state.createPayloads[0].customer).toBe("city-bank");
   expect(state.createPayloads[0].configOverrides.ports.web).toBe(49100);
   expect(state.createPayloads[0].configOverrides.customer.name).toBe("城市银行");
+});
+
+test("auth dialog saves bearer token and browser requests include authorization", async ({ page }) => {
+  const state = await mockApi(page);
+  await page.goto("/");
+
+  await page.getByRole("button", { name: /免登录/ }).click({ force: true });
+  await page.getByLabel("Bearer Token").fill("operator-token-e2e");
+  await page.getByRole("button", { name: "保存" }).click({ force: true });
+
+  await expect(page.getByText("访问令牌已保存")).toBeVisible();
+  await expect(page.getByRole("button", { name: /操作员/ })).toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => window.localStorage.getItem("packaging.auth")))
+    .toContain("operator-token-e2e");
+  await expect
+    .poll(() => state.authHeaders.filter((entry) => entry.authorization === "Bearer operator-token-e2e").length)
+    .toBeGreaterThan(0);
+});
+
+test("OIDC redirect callback stores access token and derived role", async ({ page }) => {
+  const state = await mockApi(page);
+  const token = jwtWithClaims({ roles: ["operator"], sub: "alice" });
+  await page.goto(`/#access_token=${token}&token_type=Bearer&state=oidc-state`);
+
+  await expect(page.getByText("OIDC 登录已完成")).toBeVisible();
+  await expect(page.getByRole("button", { name: /操作员/ })).toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => window.localStorage.getItem("packaging.auth")))
+    .toContain(token);
+  await expect
+    .poll(() => state.authHeaders.filter((entry) => entry.authorization === `Bearer ${token}`).length)
+    .toBeGreaterThan(0);
+});
+
+test("viewer auth state disables protected dashboard actions", async ({ page }) => {
+  await mockApi(page);
+  await page.addInitScript(() => {
+    window.localStorage.setItem("packaging.auth", JSON.stringify({ token: "viewer-token-e2e", role: "viewer" }));
+  });
+  await page.goto("/");
+
+  await expect(page.getByRole("button", { name: /只读/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: "新建构建" })).toBeDisabled();
+  await page.getByRole("button", { name: /构建记录/ }).click();
+  await expect(page.getByRole("button", { name: "通过", exact: true }).first()).toBeDisabled();
+  await expect(page.getByRole("button", { name: "发布", exact: true }).first()).toBeDisabled();
+  await expect(page.getByRole("button", { name: "重试", exact: true }).first()).toBeDisabled();
+  await expect(page.getByRole("button", { name: "详情", exact: true }).first()).toBeEnabled();
+});
+
+test.describe("desktop visual regression", () => {
+  test("captures key admin pages", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== "chromium", "desktop screenshot gate only");
+
+    await mockApi(page);
+    await page.goto("/");
+    const main = page.locator(".admin-main");
+
+    await expect(page.getByRole("heading", { name: "总览" })).toBeVisible();
+    await expect(main).toHaveScreenshot("admin-overview.png", {
+      animations: "disabled",
+      caret: "hide",
+      maxDiffPixelRatio: 0.01,
+    });
+
+    await page.getByRole("button", { name: /构建记录/ }).click();
+    await expect(page.getByRole("heading", { name: "构建记录", level: 1 })).toBeVisible();
+    await expect(main).toHaveScreenshot("admin-builds.png", {
+      animations: "disabled",
+      caret: "hide",
+      maxDiffPixelRatio: 0.01,
+    });
+
+    await page.getByRole("button", { name: /创建构建/ }).click();
+    await page.getByRole("button", { name: /步骤 3：组件/ }).click();
+    await expect(page.getByRole("heading", { name: "组件来源" })).toBeVisible();
+    await expect(main).toHaveScreenshot("admin-create-components.png", {
+      animations: "disabled",
+      caret: "hide",
+      maxDiffPixelRatio: 0.01,
+    });
+
+    await page.getByRole("button", { name: /审计中心/ }).click();
+    await expect(page.getByRole("heading", { name: "审计中心" }).first()).toBeVisible();
+    await page.getByRole("button", { name: "导出归档" }).click();
+    await expect(page.getByText("最近归档证据")).toBeVisible();
+    await expect(main).toHaveScreenshot("admin-audit-center.png", {
+      animations: "disabled",
+      caret: "hide",
+      maxDiffPixelRatio: 0.01,
+    });
+  });
 });

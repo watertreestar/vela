@@ -86,6 +86,17 @@ def args(**overrides):
         "dagger_base_image_tar": "",
         "dagger_base_image_tar_tag": "",
         "dagger_install_tools": "skip",
+        "linux_packager_fixture": False,
+        "linux_fixture_command": acceptance_cli.DEFAULT_LINUX_FIXTURE_COMMAND,
+        "verify_linux_fixture": True,
+        "windows_packager_fixture": True,
+        "windows_fixture_command": acceptance_cli.DEFAULT_WINDOWS_FIXTURE_COMMAND,
+        "windows_packager_command": "",
+        "verify_windows_fixture": True,
+        "windows_signing_fixture": True,
+        "windows_signing_fixture_command": acceptance_cli.DEFAULT_WINDOWS_SIGNING_FIXTURE_COMMAND,
+        "windows_signing_command": "",
+        "verify_windows_signing_fixture": True,
         "docker_network": "",
         "add_host_gateway": True,
         "allow_existing_queued": False,
@@ -99,6 +110,16 @@ def args(**overrides):
         "keep_api": False,
         "api_start_timeout": 1,
         "runner_timeout": 60,
+        "artifact_store": "local",
+        "minio_container": "packaging-rustfs",
+        "minio_endpoint": "127.0.0.1:9000",
+        "api_minio_endpoint": "",
+        "minio_public_url": "",
+        "runner_minio_public_url": "",
+        "minio_access_key": "rustfsadmin",
+        "minio_secret_key": "rustfsadmin",
+        "minio_bucket": "packaging-artifacts",
+        "minio_use_ssl": False,
         "store_driver": "postgres",
         "database_url": "postgres://test",
     }
@@ -116,6 +137,79 @@ class AcceptanceCliTest(unittest.TestCase):
         self.assertIn("DAGGER_LINUX_INSTALL_TOOLS=skip", command)
         self.assertIn("packaging-runner:local", command)
 
+    def test_docker_runner_command_sets_minio_public_url(self):
+        command = acceptance_cli.docker_runner_command(
+            args(
+                artifact_store="minio",
+                docker_network="packaging-net",
+                runner_minio_public_url="http://packaging-rustfs:9000",
+            )
+        )
+
+        self.assertIn("MINIO_PUBLIC_URL=http://packaging-rustfs:9000", command)
+
+    def test_docker_runner_command_sets_linux_fixture_packager(self):
+        command = acceptance_cli.docker_runner_command(args(linux_packager_fixture=True))
+
+        self.assertIn(
+            f"DAGGER_LINUX_PACKAGE_CMD={acceptance_cli.DEFAULT_LINUX_FIXTURE_COMMAND}",
+            command,
+        )
+        self.assertIn(
+            f"DAGGER_LINUX_INSTALL_TOOLS={acceptance_cli.DEFAULT_LINUX_FIXTURE_INSTALL_TOOLS}",
+            command,
+        )
+
+    def test_docker_runner_command_sets_windows_fixture_packager(self):
+        command = acceptance_cli.docker_runner_command(args(target="windows"))
+
+        self.assertIn(
+            f"WINDOWS_PACKAGER_CMD={acceptance_cli.DEFAULT_WINDOWS_FIXTURE_COMMAND}",
+            command,
+        )
+        self.assertIn(
+            f"WINDOWS_SIGNING_CMD={acceptance_cli.DEFAULT_WINDOWS_SIGNING_FIXTURE_COMMAND}",
+            command,
+        )
+
+    def test_docker_runner_command_prefers_custom_windows_packager(self):
+        command = acceptance_cli.docker_runner_command(
+            args(target="windows", windows_packager_command="iscc C:\\packaging\\setup.iss")
+        )
+
+        self.assertIn("WINDOWS_PACKAGER_CMD=iscc C:\\packaging\\setup.iss", command)
+        self.assertNotIn(
+            f"WINDOWS_PACKAGER_CMD={acceptance_cli.DEFAULT_WINDOWS_FIXTURE_COMMAND}",
+            command,
+        )
+
+    def test_docker_runner_command_prefers_custom_windows_signing_command(self):
+        command = acceptance_cli.docker_runner_command(
+            args(target="windows", windows_signing_command="signtool sign /fd SHA256 setup.exe")
+        )
+
+        self.assertIn("WINDOWS_SIGNING_CMD=signtool sign /fd SHA256 setup.exe", command)
+        self.assertNotIn(
+            f"WINDOWS_SIGNING_CMD={acceptance_cli.DEFAULT_WINDOWS_SIGNING_FIXTURE_COMMAND}",
+            command,
+        )
+
+    def test_minio_component_overrides_use_runner_api_download_url(self):
+        overrides = acceptance_cli.component_overrides(
+            args(artifact_store="minio", runner_api_url="http://packaging-api:8080"),
+            {
+                "ui": {
+                    "id": "upload-1",
+                    "uri": "minio://packaging-artifacts/uploads/upload-1/ui.bin",
+                    "downloadUrl": "http://127.0.0.1:8080/api/uploads/upload-1/download",
+                }
+            },
+        )
+
+        self.assertEqual(overrides["ui"]["kind"], "manual-upload")
+        self.assertEqual(overrides["ui"]["uploadId"], "upload-1")
+        self.assertEqual(overrides["ui"]["uri"], "http://packaging-api:8080/api/uploads/upload-1/download")
+
     def test_run_acceptance_uses_real_runner_path_and_validates_release_gate(self):
         fake = FakeAcceptanceApi()
 
@@ -130,7 +224,7 @@ class AcceptanceCliTest(unittest.TestCase):
             patch("acceptance_cli.upload_file", side_effect=fake.upload_file),
             patch("acceptance_cli.ensure_environment"),
             patch("acceptance_cli.run_runner", side_effect=mark_succeeded),
-            patch("acceptance_cli.verify_download"),
+            patch("acceptance_cli.verify_artifact_download"),
         ):
             result = acceptance_cli.run_acceptance(args())
 
@@ -141,6 +235,62 @@ class AcceptanceCliTest(unittest.TestCase):
         self.assertIn("/api/builds/build-acceptance/approve", post_paths)
         self.assertIn("/api/builds/build-acceptance/validate-preview", post_paths)
         self.assertIn(("GET", "/api/builds/build-acceptance/release-check", None), fake.calls)
+
+    def test_run_acceptance_requires_minio_artifact_uri_in_minio_mode(self):
+        fake = FakeAcceptanceApi()
+
+        def mark_succeeded(_args, _root):
+            fake.build["status"] = "succeeded"
+            fake.build["artifactUri"] = "local-upload://artifact/package.tar.gz"
+            fake.build["downloadUrl"] = "http://api.test/api/uploads/artifact/download"
+
+        with (
+            patch("acceptance_cli.api_is_healthy", return_value=True),
+            patch("acceptance_cli.request_json", side_effect=fake.request_json),
+            patch("acceptance_cli.upload_file", side_effect=fake.upload_file),
+            patch("acceptance_cli.ensure_environment"),
+            patch("acceptance_cli.run_runner", side_effect=mark_succeeded),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "expected minio artifact URI"):
+                acceptance_cli.run_acceptance(args(artifact_store="minio"))
+
+    def test_verify_artifact_download_checks_linux_fixture_marker(self):
+        build = {
+            "id": "build-linux-fixture",
+            "downloadUrl": "http://api.test/api/uploads/artifact/download",
+        }
+        with patch(
+            "acceptance_cli.download_bytes",
+            return_value=acceptance_cli.LINUX_FIXTURE_MARKER + b"\nbuild-linux-fixture\n",
+        ):
+            acceptance_cli.verify_artifact_download(args(linux_packager_fixture=True), build)
+
+        with patch("acceptance_cli.download_bytes", return_value=b"plain artifact"):
+            with self.assertRaisesRegex(RuntimeError, "linux artifact.*fixture marker"):
+                acceptance_cli.verify_artifact_download(args(linux_packager_fixture=True), build)
+
+    def test_verify_artifact_download_checks_windows_signing_fixture_marker(self):
+        build = {
+            "id": "build-windows-fixture",
+            "downloadUrl": "http://api.test/api/uploads/artifact/download",
+        }
+        signed_fixture = b"\n".join(
+            [
+                acceptance_cli.WINDOWS_FIXTURE_MARKER,
+                acceptance_cli.WINDOWS_SIGNING_FIXTURE_MARKER,
+                b"build-windows-fixture",
+            ]
+        )
+
+        with patch("acceptance_cli.download_bytes", return_value=signed_fixture):
+            acceptance_cli.verify_artifact_download(args(target="windows"), build)
+
+        with patch(
+            "acceptance_cli.download_bytes",
+            return_value=acceptance_cli.WINDOWS_FIXTURE_MARKER + b"\nbuild-windows-fixture\n",
+        ):
+            with self.assertRaisesRegex(RuntimeError, "signing fixture marker"):
+                acceptance_cli.verify_artifact_download(args(target="windows"), build)
 
     def test_preflight_fails_when_existing_queued_build_could_be_claimed(self):
         def request_json(api_url, method, path, body=None):

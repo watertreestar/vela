@@ -16,3 +16,14 @@
 - Navigation should feel like shadcn: compact left sidebar, simple grouped items, quiet hover state, clear active item, and icons used as small supporting marks rather than large decorations.
 - Data-heavy pages should prioritize scanability: tables, compact metric cards, inline filters, small badges, and clear action buttons.
 - Use Radix Themes and Tailwind CSS already present in the frontend; avoid switching UI libraries unless explicitly requested.
+
+## Code Commit Principles
+
+- Create a git commit at each important checkpoint:
+  - Data model and API/interface definitions are complete.
+  - Core logic implementation is complete.
+  - Tests are written and passing for the checkpoint scope.
+  - Documentation updates are complete.
+- Checkpoint commit messages must start with `[WIP]`.
+- After the feature is complete, clean up the checkpoint history with `git commit --amend` or an interactive rebase before finalizing the branch.
+- Do not commit unrelated local changes. Keep `.idea` and other local IDE metadata untracked.

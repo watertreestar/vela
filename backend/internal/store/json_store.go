@@ -17,12 +17,15 @@ import (
 )
 
 type JSONStore struct {
-	dataDir       string
-	productsDir   string
-	buildsFile    string
-	uploadsFile   string
-	revisionsFile string
-	mu            sync.Mutex
+	dataDir           string
+	productsDir       string
+	buildsFile        string
+	uploadsFile       string
+	revisionsFile     string
+	auditFile         string
+	authSessionsFile  string
+	notificationsFile string
+	mu                sync.Mutex
 }
 
 func NewJSONStore(dataDir string, productsDir string) (*JSONStore, error) {
@@ -30,11 +33,14 @@ func NewJSONStore(dataDir string, productsDir string) (*JSONStore, error) {
 		return nil, err
 	}
 	return &JSONStore{
-		dataDir:       dataDir,
-		productsDir:   productsDir,
-		buildsFile:    filepath.Join(dataDir, "builds.json"),
-		uploadsFile:   filepath.Join(dataDir, "uploads.json"),
-		revisionsFile: filepath.Join(dataDir, "manifest_revisions.json"),
+		dataDir:           dataDir,
+		productsDir:       productsDir,
+		buildsFile:        filepath.Join(dataDir, "builds.json"),
+		uploadsFile:       filepath.Join(dataDir, "uploads.json"),
+		revisionsFile:     filepath.Join(dataDir, "manifest_revisions.json"),
+		auditFile:         filepath.Join(dataDir, "audit_events.json"),
+		authSessionsFile:  filepath.Join(dataDir, "auth_sessions.json"),
+		notificationsFile: filepath.Join(dataDir, "notifications.json"),
 	}, nil
 }
 
@@ -259,7 +265,7 @@ func (s *JSONStore) UpdateBuild(id string, update func(*domain.Build) error) (do
 	return domain.Build{}, apperr.NotFound("build", id)
 }
 
-func (s *JSONStore) ClaimBuild(target string, runnerID string) (domain.Build, bool, error) {
+func (s *JSONStore) ClaimBuild(target string, runnerID string, requestID string, correlationID string) (domain.Build, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -279,9 +285,11 @@ func (s *JSONStore) ClaimBuild(target string, runnerID string) (domain.Build, bo
 		builds[index].Attempt++
 		builds[index].UpdatedAt = nowUTC()
 		builds[index].Logs = append(builds[index].Logs, domain.BuildLog{
-			Time:    nowUTC(),
-			Source:  runnerID,
-			Message: fmt.Sprintf("claimed by runner %s", runnerID),
+			Time:          nowUTC(),
+			Source:        runnerID,
+			Message:       fmt.Sprintf("claimed by runner %s", runnerID),
+			RequestID:     requestID,
+			CorrelationID: correlationID,
 		})
 		if err := s.writeBuildsLocked(builds); err != nil {
 			return domain.Build{}, false, err
@@ -381,6 +389,200 @@ func (s *JSONStore) ReadUpload(id string) (domain.UploadRecord, error) {
 	return domain.UploadRecord{}, apperr.NotFound("upload", id)
 }
 
+func (s *JSONStore) SaveAuditEvent(event domain.AuditEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	events, err := s.readAuditEventsLocked()
+	if err != nil {
+		return err
+	}
+	events = append(events, event)
+	return s.writeAuditEventsLocked(events)
+}
+
+func (s *JSONStore) ListAuditEvents(filter domain.AuditEventFilter) ([]domain.AuditEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	events, err := s.readAuditEventsLocked()
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]domain.AuditEvent, 0, len(events))
+	for _, event := range events {
+		if !auditEventMatches(event, filter) {
+			continue
+		}
+		filtered = append(filtered, event)
+	}
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].Time.After(filtered[j].Time)
+	})
+	return limitAuditEvents(filtered, filter.Limit), nil
+}
+
+func (s *JSONStore) SaveAuthSession(session domain.AuthSession) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sessions, err := s.readAuthSessionsLocked()
+	if err != nil {
+		return err
+	}
+	for index := range sessions {
+		if sessions[index].ID == session.ID {
+			sessions[index] = session
+			return s.writeAuthSessionsLocked(sessions)
+		}
+	}
+	sessions = append(sessions, session)
+	return s.writeAuthSessionsLocked(sessions)
+}
+
+func (s *JSONStore) ReadAuthSession(id string) (domain.AuthSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sessions, err := s.readAuthSessionsLocked()
+	if err != nil {
+		return domain.AuthSession{}, err
+	}
+	for _, session := range sessions {
+		if session.ID == id {
+			return session, nil
+		}
+	}
+	return domain.AuthSession{}, apperr.NotFound("auth_session", id)
+}
+
+func (s *JSONStore) RevokeAuthSession(id string, revokedAt time.Time) (domain.AuthSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sessions, err := s.readAuthSessionsLocked()
+	if err != nil {
+		return domain.AuthSession{}, err
+	}
+	for index := range sessions {
+		if sessions[index].ID != id {
+			continue
+		}
+		sessions[index].RevokedAt = &revokedAt
+		if err := s.writeAuthSessionsLocked(sessions); err != nil {
+			return domain.AuthSession{}, err
+		}
+		return sessions[index], nil
+	}
+	return domain.AuthSession{}, apperr.NotFound("auth_session", id)
+}
+
+func (s *JSONStore) SaveNotification(notification domain.Notification) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	notifications, err := s.readNotificationsLocked()
+	if err != nil {
+		return err
+	}
+	notifications = append(notifications, notification)
+	return s.writeNotificationsLocked(notifications)
+}
+
+func (s *JSONStore) ListNotifications(filter domain.NotificationFilter) ([]domain.Notification, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	notifications, err := s.readNotificationsLocked()
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]domain.Notification, 0, len(notifications))
+	for _, notification := range notifications {
+		if !notificationMatches(notification, filter) {
+			continue
+		}
+		filtered = append(filtered, notification)
+	}
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].CreatedAt.After(filtered[j].CreatedAt)
+	})
+	return limitNotifications(filtered, filter.Limit), nil
+}
+
+func (s *JSONStore) MarkNotificationRead(id string) (domain.Notification, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	notifications, err := s.readNotificationsLocked()
+	if err != nil {
+		return domain.Notification{}, err
+	}
+	now := nowUTC()
+	for index := range notifications {
+		if notifications[index].ID != id {
+			continue
+		}
+		if notifications[index].ReadAt == nil {
+			notifications[index].ReadAt = &now
+		}
+		if err := s.writeNotificationsLocked(notifications); err != nil {
+			return domain.Notification{}, err
+		}
+		return notifications[index], nil
+	}
+	return domain.Notification{}, apperr.NotFound("notification", id)
+}
+
+func (s *JSONStore) MarkAllNotificationsRead() ([]domain.Notification, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	notifications, err := s.readNotificationsLocked()
+	if err != nil {
+		return nil, err
+	}
+	now := nowUTC()
+	changed := make([]domain.Notification, 0)
+	for index := range notifications {
+		if notifications[index].ReadAt != nil {
+			continue
+		}
+		notifications[index].ReadAt = &now
+		changed = append(changed, notifications[index])
+	}
+	if err := s.writeNotificationsLocked(notifications); err != nil {
+		return nil, err
+	}
+	return changed, nil
+}
+
+func (s *JSONStore) PruneReadNotificationsBefore(before time.Time) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	notifications, err := s.readNotificationsLocked()
+	if err != nil {
+		return 0, err
+	}
+	kept := make([]domain.Notification, 0, len(notifications))
+	pruned := 0
+	for _, notification := range notifications {
+		if notification.ReadAt != nil && notification.ReadAt.Before(before) {
+			pruned++
+			continue
+		}
+		kept = append(kept, notification)
+	}
+	if pruned == 0 {
+		return 0, nil
+	}
+	if err := s.writeNotificationsLocked(kept); err != nil {
+		return 0, err
+	}
+	return pruned, nil
+}
+
 func (s *JSONStore) readBuildsLocked() ([]domain.Build, error) {
 	content, err := os.ReadFile(s.buildsFile)
 	if errors.Is(err, os.ErrNotExist) {
@@ -469,6 +671,152 @@ func (s *JSONStore) writeUploadsLocked(records []domain.UploadRecord) error {
 		return err
 	}
 	return os.WriteFile(s.uploadsFile, content, 0o644)
+}
+
+func (s *JSONStore) readAuditEventsLocked() ([]domain.AuditEvent, error) {
+	content, err := os.ReadFile(s.auditFile)
+	if errors.Is(err, os.ErrNotExist) {
+		return []domain.AuditEvent{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var events []domain.AuditEvent
+	if err := json.Unmarshal(content, &events); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+func (s *JSONStore) writeAuditEventsLocked(events []domain.AuditEvent) error {
+	content, err := json.MarshalIndent(events, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(s.auditFile, content, 0o644)
+}
+
+func (s *JSONStore) readAuthSessionsLocked() ([]domain.AuthSession, error) {
+	content, err := os.ReadFile(s.authSessionsFile)
+	if errors.Is(err, os.ErrNotExist) {
+		return []domain.AuthSession{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var sessions []domain.AuthSession
+	if err := json.Unmarshal(content, &sessions); err != nil {
+		return nil, err
+	}
+	return sessions, nil
+}
+
+func (s *JSONStore) writeAuthSessionsLocked(sessions []domain.AuthSession) error {
+	content, err := json.MarshalIndent(sessions, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(s.authSessionsFile, content, 0o644)
+}
+
+func (s *JSONStore) readNotificationsLocked() ([]domain.Notification, error) {
+	content, err := os.ReadFile(s.notificationsFile)
+	if errors.Is(err, os.ErrNotExist) {
+		return []domain.Notification{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var notifications []domain.Notification
+	if err := json.Unmarshal(content, &notifications); err != nil {
+		return nil, err
+	}
+	return notifications, nil
+}
+
+func (s *JSONStore) writeNotificationsLocked(notifications []domain.Notification) error {
+	content, err := json.MarshalIndent(notifications, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(s.notificationsFile, content, 0o644)
+}
+
+func auditEventMatches(event domain.AuditEvent, filter domain.AuditEventFilter) bool {
+	if filter.ResourceType != "" && event.ResourceType != filter.ResourceType {
+		return false
+	}
+	if filter.ResourceID != "" && event.ResourceID != filter.ResourceID {
+		return false
+	}
+	if filter.BuildID != "" && event.BuildID != filter.BuildID {
+		return false
+	}
+	if filter.ProductID != "" && event.ProductID != filter.ProductID {
+		return false
+	}
+	if filter.UploadID != "" && event.UploadID != filter.UploadID {
+		return false
+	}
+	if filter.Action != "" && event.Action != filter.Action {
+		return false
+	}
+	return true
+}
+
+func notificationMatches(notification domain.Notification, filter domain.NotificationFilter) bool {
+	if filter.Type != "" && notification.Type != filter.Type {
+		return false
+	}
+	if filter.Severity != "" && notification.Severity != filter.Severity {
+		return false
+	}
+	if filter.ResourceType != "" && notification.ResourceType != filter.ResourceType {
+		return false
+	}
+	if filter.ResourceID != "" && notification.ResourceID != filter.ResourceID {
+		return false
+	}
+	if filter.BuildID != "" && notification.BuildID != filter.BuildID {
+		return false
+	}
+	if filter.ProductID != "" && notification.ProductID != filter.ProductID {
+		return false
+	}
+	if filter.UploadID != "" && notification.UploadID != filter.UploadID {
+		return false
+	}
+	if filter.RunnerID != "" && notification.RunnerID != filter.RunnerID {
+		return false
+	}
+	switch filter.ReadStatus {
+	case "read":
+		return notification.ReadAt != nil
+	case "unread":
+		return notification.ReadAt == nil
+	default:
+		return true
+	}
+}
+
+func limitNotifications(notifications []domain.Notification, limit int) []domain.Notification {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	if len(notifications) <= limit {
+		return notifications
+	}
+	return notifications[:limit]
+}
+
+func limitAuditEvents(events []domain.AuditEvent, limit int) []domain.AuditEvent {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	if len(events) <= limit {
+		return events
+	}
+	return events[:limit]
 }
 
 func nowUTC() time.Time {

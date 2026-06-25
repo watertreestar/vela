@@ -105,6 +105,66 @@ create table if not exists manifest_revisions (
 );
 
 create index if not exists manifest_revisions_product_created_idx on manifest_revisions(product_id, created_at desc);
+
+create table if not exists audit_events (
+  id text primary key,
+  action text not null,
+  actor_id text not null,
+  actor_role text,
+  resource_type text not null,
+  resource_id text not null,
+  product_id text,
+  build_id text,
+  upload_id text,
+  request_id text,
+  correlation_id text,
+  status text not null,
+  summary text not null,
+  metadata jsonb not null default '{}'::jsonb,
+  payload jsonb not null,
+  created_at timestamptz not null
+);
+
+create index if not exists audit_events_created_idx on audit_events(created_at desc);
+create index if not exists audit_events_resource_idx on audit_events(resource_type, resource_id, created_at desc);
+create index if not exists audit_events_build_idx on audit_events(build_id, created_at desc);
+create index if not exists audit_events_product_idx on audit_events(product_id, created_at desc);
+create index if not exists audit_events_upload_idx on audit_events(upload_id, created_at desc);
+
+create table if not exists auth_sessions (
+  id text primary key,
+  subject text not null,
+  role text not null,
+  expires_at timestamptz not null,
+  revoked_at timestamptz,
+  payload jsonb not null,
+  created_at timestamptz not null
+);
+
+create index if not exists auth_sessions_subject_idx on auth_sessions(subject, created_at desc);
+create index if not exists auth_sessions_expires_idx on auth_sessions(expires_at);
+
+create table if not exists notifications (
+  id text primary key,
+  type text not null,
+  severity text not null,
+  resource_type text,
+  resource_id text,
+  product_id text,
+  build_id text,
+  upload_id text,
+  runner_id text,
+  read_at timestamptz,
+  metadata jsonb not null default '{}'::jsonb,
+  payload jsonb not null,
+  created_at timestamptz not null
+);
+
+create index if not exists notifications_created_idx on notifications(created_at desc);
+create index if not exists notifications_unread_idx on notifications(created_at desc) where read_at is null;
+create index if not exists notifications_resource_idx on notifications(resource_type, resource_id, created_at desc);
+create index if not exists notifications_build_idx on notifications(build_id, created_at desc);
+create index if not exists notifications_product_idx on notifications(product_id, created_at desc);
 `)
 	return err
 }
@@ -358,7 +418,7 @@ func (s *PostgresStore) UpdateBuild(id string, update func(*domain.Build) error)
 	return build, nil
 }
 
-func (s *PostgresStore) ClaimBuild(target string, runnerID string) (domain.Build, bool, error) {
+func (s *PostgresStore) ClaimBuild(target string, runnerID string, requestID string, correlationID string) (domain.Build, bool, error) {
 	ctx := context.Background()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -389,9 +449,11 @@ limit 1`
 	build.Attempt++
 	build.UpdatedAt = nowUTC()
 	build.Logs = append(build.Logs, domain.BuildLog{
-		Time:    nowUTC(),
-		Source:  runnerID,
-		Message: fmt.Sprintf("claimed by runner %s", runnerID),
+		Time:          nowUTC(),
+		Source:        runnerID,
+		Message:       fmt.Sprintf("claimed by runner %s", runnerID),
+		RequestID:     requestID,
+		CorrelationID: correlationID,
 	})
 	if err := s.saveBuild(ctx, tx, build); err != nil {
 		return domain.Build{}, false, err
@@ -494,6 +556,276 @@ func (s *PostgresStore) ReadUpload(id string) (domain.UploadRecord, error) {
 		return domain.UploadRecord{}, err
 	}
 	return record, nil
+}
+
+func (s *PostgresStore) SaveAuditEvent(event domain.AuditEvent) error {
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	metadata, err := json.Marshal(event.Metadata)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`
+insert into audit_events (
+  id, action, actor_id, actor_role, resource_type, resource_id, product_id,
+  build_id, upload_id, request_id, correlation_id, status, summary,
+  metadata, payload, created_at
+) values (
+  $1, $2, $3, $4, $5, $6, $7,
+  $8, $9, $10, $11, $12, $13,
+  $14::jsonb, $15::jsonb, $16
+) on conflict (id) do nothing
+`, event.ID, event.Action, event.ActorID, event.ActorRole, event.ResourceType, event.ResourceID, event.ProductID,
+		event.BuildID, event.UploadID, event.RequestID, event.CorrelationID, event.Status, event.Summary,
+		string(metadata), string(payload), event.Time)
+	return err
+}
+
+func (s *PostgresStore) ListAuditEvents(filter domain.AuditEventFilter) ([]domain.AuditEvent, error) {
+	limit := filter.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	rows, err := s.db.Query(`
+select payload
+from audit_events
+where ($1 = '' or resource_type = $1)
+  and ($2 = '' or resource_id = $2)
+  and ($3 = '' or build_id = $3)
+  and ($4 = '' or product_id = $4)
+  and ($5 = '' or upload_id = $5)
+  and ($6 = '' or action = $6)
+order by created_at desc
+limit $7
+`, filter.ResourceType, filter.ResourceID, filter.BuildID, filter.ProductID, filter.UploadID, filter.Action, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	events := []domain.AuditEvent{}
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var event domain.AuditEvent
+		if err := json.Unmarshal(raw, &event); err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
+func (s *PostgresStore) SaveAuthSession(session domain.AuthSession) error {
+	payload, err := json.Marshal(session)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`
+insert into auth_sessions (id, subject, role, expires_at, revoked_at, payload, created_at)
+values ($1, $2, $3, $4, $5, $6::jsonb, $7)
+on conflict (id) do update set
+  subject = excluded.subject,
+  role = excluded.role,
+  expires_at = excluded.expires_at,
+  revoked_at = excluded.revoked_at,
+  payload = excluded.payload
+`, session.ID, session.Subject, session.Role, session.ExpiresAt, session.RevokedAt, string(payload), session.IssuedAt)
+	return err
+}
+
+func (s *PostgresStore) ReadAuthSession(id string) (domain.AuthSession, error) {
+	var raw []byte
+	if err := s.db.QueryRow(`select payload from auth_sessions where id = $1`, id).Scan(&raw); err != nil {
+		if err == sql.ErrNoRows {
+			return domain.AuthSession{}, apperr.NotFound("auth_session", id)
+		}
+		return domain.AuthSession{}, err
+	}
+	var session domain.AuthSession
+	if err := json.Unmarshal(raw, &session); err != nil {
+		return domain.AuthSession{}, err
+	}
+	return session, nil
+}
+
+func (s *PostgresStore) RevokeAuthSession(id string, revokedAt time.Time) (domain.AuthSession, error) {
+	session, err := s.ReadAuthSession(id)
+	if err != nil {
+		return domain.AuthSession{}, err
+	}
+	session.RevokedAt = &revokedAt
+	payload, err := json.Marshal(session)
+	if err != nil {
+		return domain.AuthSession{}, err
+	}
+	result, err := s.db.Exec(`
+update auth_sessions
+set revoked_at = $2, payload = $3::jsonb
+where id = $1
+`, id, revokedAt, string(payload))
+	if err != nil {
+		return domain.AuthSession{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return domain.AuthSession{}, err
+	}
+	if affected == 0 {
+		return domain.AuthSession{}, apperr.NotFound("auth_session", id)
+	}
+	return session, nil
+}
+
+func (s *PostgresStore) SaveNotification(notification domain.Notification) error {
+	payload, err := json.Marshal(notification)
+	if err != nil {
+		return err
+	}
+	metadata, err := json.Marshal(notification.Metadata)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`
+insert into notifications (
+  id, type, severity, resource_type, resource_id, product_id, build_id,
+  upload_id, runner_id, read_at, metadata, payload, created_at
+) values (
+  $1, $2, $3, $4, $5, $6, $7,
+  $8, $9, $10, $11::jsonb, $12::jsonb, $13
+) on conflict (id) do nothing
+`, notification.ID, notification.Type, notification.Severity, notification.ResourceType, notification.ResourceID,
+		notification.ProductID, notification.BuildID, notification.UploadID, notification.RunnerID, notification.ReadAt,
+		string(metadata), string(payload), notification.CreatedAt)
+	return err
+}
+
+func (s *PostgresStore) ListNotifications(filter domain.NotificationFilter) ([]domain.Notification, error) {
+	limit := filter.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	rows, err := s.db.Query(`
+select payload
+from notifications
+where ($1 = '' or type = $1)
+  and ($2 = '' or severity = $2)
+  and ($3 = '' or resource_type = $3)
+  and ($4 = '' or resource_id = $4)
+  and ($5 = '' or build_id = $5)
+  and ($6 = '' or product_id = $6)
+  and ($7 = '' or upload_id = $7)
+  and ($8 = '' or runner_id = $8)
+  and ($9 = '' or ($9 = 'read' and read_at is not null) or ($9 = 'unread' and read_at is null))
+order by created_at desc
+limit $10
+`, filter.Type, filter.Severity, filter.ResourceType, filter.ResourceID, filter.BuildID,
+		filter.ProductID, filter.UploadID, filter.RunnerID, filter.ReadStatus, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	notifications := []domain.Notification{}
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var notification domain.Notification
+		if err := json.Unmarshal(raw, &notification); err != nil {
+			return nil, err
+		}
+		notifications = append(notifications, notification)
+	}
+	return notifications, rows.Err()
+}
+
+func (s *PostgresStore) MarkNotificationRead(id string) (domain.Notification, error) {
+	var raw []byte
+	if err := s.db.QueryRow(`select payload from notifications where id = $1`, id).Scan(&raw); err != nil {
+		if err == sql.ErrNoRows {
+			return domain.Notification{}, apperr.NotFound("notification", id)
+		}
+		return domain.Notification{}, err
+	}
+	var notification domain.Notification
+	if err := json.Unmarshal(raw, &notification); err != nil {
+		return domain.Notification{}, err
+	}
+	if notification.ReadAt == nil {
+		now := time.Now().UTC()
+		notification.ReadAt = &now
+	}
+	payload, err := json.Marshal(notification)
+	if err != nil {
+		return domain.Notification{}, err
+	}
+	_, err = s.db.Exec(`
+update notifications
+set read_at = $2, payload = $3::jsonb
+where id = $1
+`, notification.ID, notification.ReadAt, string(payload))
+	if err != nil {
+		return domain.Notification{}, err
+	}
+	return notification, nil
+}
+
+func (s *PostgresStore) MarkAllNotificationsRead() ([]domain.Notification, error) {
+	rows, err := s.db.Query(`select payload from notifications where read_at is null order by created_at desc`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	now := time.Now().UTC()
+	notifications := []domain.Notification{}
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var notification domain.Notification
+		if err := json.Unmarshal(raw, &notification); err != nil {
+			return nil, err
+		}
+		notification.ReadAt = &now
+		notifications = append(notifications, notification)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, notification := range notifications {
+		payload, err := json.Marshal(notification)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := s.db.Exec(`
+update notifications
+set read_at = $2, payload = $3::jsonb
+where id = $1
+`, notification.ID, notification.ReadAt, string(payload)); err != nil {
+			return nil, err
+		}
+	}
+	return notifications, nil
+}
+
+func (s *PostgresStore) PruneReadNotificationsBefore(before time.Time) (int, error) {
+	result, err := s.db.Exec(`delete from notifications where read_at is not null and read_at < $1`, before)
+	if err != nil {
+		return 0, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(count), nil
 }
 
 func (s *PostgresStore) readBuildForUpdate(ctx context.Context, tx *sql.Tx, id string) (domain.Build, error) {

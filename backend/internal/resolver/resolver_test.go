@@ -8,8 +8,9 @@ import (
 )
 
 type fakeOverlayStore struct {
-	overlays map[string]map[string]any
-	uploads  map[string]domain.UploadRecord
+	overlays  map[string]map[string]any
+	uploads   map[string]domain.UploadRecord
+	artifacts map[string]domain.ArtifactResolution
 }
 
 func (s fakeOverlayStore) ReadOverlay(productID string, kind string, name string) (map[string]any, error) {
@@ -18,6 +19,14 @@ func (s fakeOverlayStore) ReadOverlay(productID string, kind string, name string
 
 func (s fakeOverlayStore) ReadUpload(id string) (domain.UploadRecord, error) {
 	return s.uploads[id], nil
+}
+
+func (s fakeOverlayStore) ResolveArtifactSource(source domain.ComponentSource, version string) (domain.ArtifactResolution, bool, error) {
+	if s.artifacts == nil {
+		return domain.ArtifactResolution{}, false, nil
+	}
+	resolution, ok := s.artifacts[source.Path+"@"+version]
+	return resolution, ok, nil
 }
 
 func TestResolveBuildMergesConfigAndLocksComponents(t *testing.T) {
@@ -88,6 +97,48 @@ func TestResolveBuildMergesConfigAndLocksComponents(t *testing.T) {
 	}
 	if lock.BuildID != "build-1" || lock.Components[0].URI != components[0].URI {
 		t.Fatalf("build lock mismatch: %#v", lock)
+	}
+}
+
+func TestResolveBuildUsesArtifactSourceResolver(t *testing.T) {
+	product := domain.Product{
+		ID: "lsap",
+		Components: []domain.Component{{
+			ID:       "engine",
+			Type:     "archive",
+			Required: true,
+			Source: domain.ComponentSource{
+				Kind:       "artifact-repository",
+				Repository: "minio",
+				Path:       "artifact/engine/{{version}}/engine-*.tar.gz",
+			},
+		}},
+	}
+	store := fakeOverlayStore{
+		artifacts: map[string]domain.ArtifactResolution{
+			"artifact/engine/{{version}}/engine-*.tar.gz@1.2.3": {
+				URI:    "minio://artifact/engine/1.2.3/engine-1.2.3.tar.gz",
+				SHA256: "resolved-sha",
+			},
+		},
+	}
+
+	_, components, lock, err := ResolveBuild(product, domain.BuildRequest{
+		ProductID: "lsap",
+		Target:    "linux",
+		Version:   "1.2.3",
+	}, "build-1", store)
+	if err != nil {
+		t.Fatalf("ResolveBuild returned error: %v", err)
+	}
+	if components[0].URI != "minio://artifact/engine/1.2.3/engine-1.2.3.tar.gz" {
+		t.Fatalf("artifact resolver uri not used: %#v", components[0])
+	}
+	if components[0].SHA256 != "resolved-sha" {
+		t.Fatalf("artifact resolver sha not used: %#v", components[0])
+	}
+	if lock.Components[0].URI != components[0].URI || lock.Components[0].SHA256 != "resolved-sha" {
+		t.Fatalf("build lock did not capture resolved artifact: %#v", lock.Components[0])
 	}
 }
 

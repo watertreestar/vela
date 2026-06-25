@@ -1584,6 +1584,28 @@ textarea:focus-visible,
   gap: 12px;
 }
 
+.audit-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.audit-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.audit-evidence-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.audit-table {
+  min-width: 1180px;
+}
+
 .release-gate-summary {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -2278,6 +2300,125 @@ body {
   white-space: nowrap;
 }
 
+.auth-status-button {
+  min-width: 84px;
+}
+
+.notification-trigger {
+  position: relative;
+  min-width: 88px;
+}
+
+.notification-count {
+  display: inline-flex;
+  min-width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: #09090b;
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 18px;
+  padding: 0 5px;
+}
+
+.auth-dialog {
+  max-width: 520px;
+}
+
+.notification-dialog {
+  max-width: 640px;
+}
+
+.notification-dialog-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  border-top: 1px solid #e5e7eb;
+  padding-top: 12px;
+}
+
+.notification-list {
+  display: grid;
+  max-height: min(520px, 68vh);
+  overflow: auto;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.notification-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  border: 1px solid #e5e7eb;
+  border-radius: 7px;
+  background: #ffffff;
+  padding: 10px;
+}
+
+.notification-item.is-unread {
+  border-color: #d4d4d8;
+  background: #fafafa;
+}
+
+.notification-item-main {
+  min-width: 0;
+}
+
+.notification-item-header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.notification-unread-dot {
+  display: inline-flex;
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.notification-item.is-unread .notification-unread-dot {
+  background: #09090b;
+}
+
+.notification-message {
+  margin: 6px 0 0;
+}
+
+.notification-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+  color: #71717a;
+  font-size: 11px;
+}
+
+.notification-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.auth-form {
+  gap: 14px;
+}
+
+.permission-note {
+  margin-bottom: 12px;
+  font-size: 12px;
+}
+
 .topbar {
   align-items: flex-start;
   margin: 0 0 18px;
@@ -2819,6 +2960,9 @@ body {
 
   .metric-grid,
   .audit-grid,
+  .audit-filter-grid,
+  .audit-summary-grid,
+  .audit-evidence-grid,
   .component-health-strip,
   .execution-summary,
   .runner-flow-grid,

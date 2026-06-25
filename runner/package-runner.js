@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cp, copyFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { cp, copyFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -95,6 +95,161 @@ async function writeJSON(file, value) {
   await writeFile(file, JSON.stringify(value, null, 2));
 }
 
+function secretEnvName(name) {
+  const prefix = process.env.SECRET_ENV_PREFIX || "PACKAGING_SECRET_";
+  return `${prefix}${String(name || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")}`;
+}
+
+function parseSecretRef(value) {
+  const trimmed = String(value || "").trim();
+  if (trimmed.startsWith("secret://")) return trimmed.slice("secret://".length).trim();
+  if (trimmed.startsWith("secret:")) return trimmed.slice("secret:".length).trim();
+  return "";
+}
+
+function resolveSecretRefs(value, stats = { count: 0 }) {
+  if (typeof value === "string") {
+    const name = parseSecretRef(value);
+    if (!name) return value;
+    const envName = secretEnvName(name);
+    if (!(envName in process.env)) {
+      throw new Error(`missing secret environment ${envName}`);
+    }
+    stats.count += 1;
+    return process.env[envName];
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => resolveSecretRefs(item, stats));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, child]) => [key, resolveSecretRefs(child, stats)]),
+    );
+  }
+  return value;
+}
+
+async function resolveBuildSecrets(build) {
+  const stats = { count: 0 };
+  const resolved = {
+    ...build,
+    finalConfig: resolveSecretRefs(build.finalConfig || {}, stats),
+    variables: resolveSecretRefs(build.variables || {}, stats),
+    workloads: resolveSecretRefs(build.workloads || build.buildLock?.workloads || [], stats),
+  };
+  await log(build, `secrets resolved: ${stats.count} reference(s)`);
+  return resolved;
+}
+
+async function pathStats(root, limit) {
+  const result = {
+    path: root,
+    exists: false,
+    files: 0,
+    directories: 0,
+    bytes: 0,
+    truncated: false,
+    error: "",
+  };
+  if (!root) return result;
+  try {
+    const rootStat = await stat(root);
+    result.exists = true;
+    if (rootStat.isFile()) {
+      result.files = 1;
+      result.bytes = rootStat.size;
+      return result;
+    }
+    if (!rootStat.isDirectory()) return result;
+    const queue = [root];
+    while (queue.length > 0) {
+      const current = queue.shift();
+      let entries;
+      try {
+        entries = await readdir(current, { withFileTypes: true });
+      } catch (err) {
+        result.error = err.message;
+        continue;
+      }
+      for (const entry of entries) {
+        const entryPath = path.join(current, entry.name);
+        if (entry.isDirectory()) {
+          result.directories += 1;
+          queue.push(entryPath);
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        const entryStat = await stat(entryPath).catch(() => null);
+        result.files += 1;
+        result.bytes += entryStat?.size || 0;
+        if (result.files >= limit) {
+          result.truncated = true;
+          return result;
+        }
+      }
+    }
+    return result;
+  } catch (err) {
+    result.error = err.message;
+    return result;
+  }
+}
+
+async function collectCacheSnapshot(workspace) {
+  const configuredLimit = Number(process.env.RUNNER_CACHE_SCAN_FILE_LIMIT || 5000);
+  const limit = Number.isFinite(configuredLimit) && configuredLimit > 0 ? configuredLimit : 5000;
+  const paths = [
+    ["bun", process.env.BUN_INSTALL_CACHE_DIR],
+    ["xdg", process.env.XDG_CACHE_HOME],
+    ["dagger", process.env.DAGGER_CACHE_DIR],
+    ["artifacts", process.env.ARTIFACT_ROOT],
+    ["components", workspace ? path.join(workspace, "context", "components") : ""],
+  ];
+  const entries = [];
+  for (const [name, root] of paths) {
+    entries.push({ name, ...(await pathStats(root || "", limit)) });
+  }
+  return {
+    runnerId: RUNNER_ID,
+    target: TARGET,
+    capturedAt: new Date().toISOString(),
+    scanFileLimit: limit,
+    entries,
+  };
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+}
+
+function cacheSummary(snapshot) {
+  return snapshot.entries
+    .map((entry) => {
+      if (!entry.path) return `${entry.name}=unconfigured`;
+      if (!entry.exists) return `${entry.name}=missing`;
+      const truncated = entry.truncated ? "+" : "";
+      const error = entry.error ? ` error=${entry.error}` : "";
+      return `${entry.name}=${formatBytes(entry.bytes)}/${entry.files}${truncated} files${error}`;
+    })
+    .join("; ");
+}
+
+async function reportCacheSnapshot(build, workspace, stage) {
+  const snapshot = await collectCacheSnapshot(workspace);
+  snapshot.stage = stage;
+  await writeJSON(path.join(workspace, "context", "rendered", `runner-cache-${stage}.json`), snapshot);
+  const summary = cacheSummary(snapshot);
+  await log(build, `cache ${stage}: ${summary}`);
+  await heartbeat(build, `cache ${stage}: ${summary}`);
+  return snapshot;
+}
+
 async function sha256(file) {
   const hash = createHash("sha256");
   hash.update(await readFile(file));
@@ -108,6 +263,10 @@ async function prepareWorkspace(build) {
   await mkdir(path.join(dir, "context", "components"), { recursive: true });
   await mkdir(path.join(dir, "context", "rendered"), { recursive: true });
   await mkdir(path.join(dir, "output"), { recursive: true });
+  await copyFile(
+    path.join(RUNNER_DIR, "fixtures", "linux_package_packager.py"),
+    path.join(dir, "context", "rendered", "linux_package_packager.py"),
+  ).catch(() => {});
   await writeJSON(path.join(dir, "context", "build-lock.json"), build.buildLock);
   await writeJSON(path.join(dir, "context", "final-config.json"), build.finalConfig);
   await writeJSON(path.join(dir, "context", "build-info.json"), {
@@ -157,8 +316,18 @@ function minioDownloadURL(uri) {
   return `${publicURL.replace(/\/$/, "")}/${uri.replace("minio://", "")}`;
 }
 
+function downloadHeaders(url) {
+  const headers = {};
+  const gitlabBaseURL = process.env.GITLAB_PACKAGE_BASE_URL || "";
+  const gitlabToken = process.env.GITLAB_PACKAGE_TOKEN || "";
+  if (gitlabBaseURL && gitlabToken && url.startsWith(gitlabBaseURL.replace(/\/$/, ""))) {
+    headers["PRIVATE-TOKEN"] = gitlabToken;
+  }
+  return headers;
+}
+
 async function downloadToFile(url, target) {
-  const response = await fetch(url);
+  const response = await fetch(url, { headers: downloadHeaders(url) });
   if (!response.ok) {
     throw new Error(`download failed ${response.status}: ${url}`);
   }
@@ -357,33 +526,58 @@ async function packageWindows(build, workspace) {
   return output;
 }
 
-async function runPackaging(build) {
-  const workspace = await prepareWorkspace(build);
-  await heartbeat(build, "workspace prepared");
-  await log(build, `workspace prepared at ${workspace}`);
-  await downloadComponents(build, workspace);
-  await renderConfigs(build, workspace);
+async function signWindowsArtifact(build, workspace, output) {
+  const command = process.env.WINDOWS_SIGNING_CMD;
+  if (!command) {
+    await log(build, "windows signing skipped: WINDOWS_SIGNING_CMD is not set");
+    return;
+  }
+  const result = runShell(command, workspace, {
+    OUTPUT: output,
+    ARTIFACT: output,
+    BUILD_ID: build.id,
+    PRODUCT_ID: build.productId,
+    TARGET: build.target,
+    VERSION: build.version,
+  });
+  if (!result.ok) {
+    throw new Error(result.output || "windows signing failed");
+  }
+  await log(build, "windows artifact signed");
+}
 
-  const { planPath } = await writeDaggerPlan(build, workspace);
+async function runPackaging(build) {
+  const runtimeBuild = await resolveBuildSecrets(build);
+  const workspace = await prepareWorkspace(runtimeBuild);
+  await heartbeat(runtimeBuild, "workspace prepared");
+  await log(runtimeBuild, `workspace prepared at ${workspace}`);
+  await reportCacheSnapshot(runtimeBuild, workspace, "before");
+  await downloadComponents(runtimeBuild, workspace);
+  await reportCacheSnapshot(runtimeBuild, workspace, "components");
+  await renderConfigs(runtimeBuild, workspace);
+
+  const { planPath } = await writeDaggerPlan(runtimeBuild, workspace);
   const useDagger = process.env.USE_DAGGER_FOR_LINUX !== "false";
   let output;
-  if (build.target === "windows") {
-    await compileLsapctl(build, workspace);
-    output = await packageWindows(build, workspace);
+  if (runtimeBuild.target === "windows") {
+    await compileLsapctl(runtimeBuild, workspace);
+    output = await packageWindows(runtimeBuild, workspace);
+    await signWindowsArtifact(runtimeBuild, workspace, output);
   } else {
     output = useDagger
-      ? await packageLinuxWithDagger(build, workspace, planPath)
-      : await packageLinuxWithoutDagger(build, workspace);
+      ? await packageLinuxWithDagger(runtimeBuild, workspace, planPath)
+      : await packageLinuxWithoutDagger(runtimeBuild, workspace);
   }
   const digest = await sha256(output);
   const checksumFile = `${output}.sha256`;
   await writeFile(checksumFile, `${digest}  ${path.basename(output)}\n`);
-  await log(build, `package created: ${output}`);
+  await log(runtimeBuild, `package created: ${output}`);
+  await reportCacheSnapshot(runtimeBuild, workspace, "after");
 
   const uploaded = await upload(output);
   const checksum = await upload(checksumFile);
-  await log(build, `uploaded checksum: ${checksum.uri}`);
-  await log(build, `uploaded artifact: ${uploaded.uri}`);
+  await log(runtimeBuild, `uploaded checksum: ${checksum.uri}`);
+  await log(runtimeBuild, `uploaded artifact: ${uploaded.uri}`);
   return uploaded;
 }
 

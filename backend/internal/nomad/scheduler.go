@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	nomadapi "github.com/hashicorp/nomad/api"
 
 	"packaging-platform/backend/internal/config"
 	"packaging-platform/backend/internal/domain"
+	"packaging-platform/backend/internal/secret"
 )
 
 type Scheduler interface {
@@ -44,6 +46,7 @@ func NewScheduler(cfg config.Config) (Scheduler, error) {
 	nomadConfig.Address = cfg.NomadAddr
 	nomadConfig.Region = cfg.NomadRegion
 	nomadConfig.Namespace = cfg.NomadNamespace
+	nomadConfig.SecretID = cfg.NomadToken
 	client, err := nomadapi.NewClient(nomadConfig)
 	if err != nil {
 		return nil, err
@@ -52,8 +55,11 @@ func NewScheduler(cfg config.Config) (Scheduler, error) {
 }
 
 func (s NomadScheduler) Submit(build domain.Build, product domain.Product) (string, string, error) {
-	job := s.buildJob(build, product)
-	_, _, err := s.client.Jobs().Register(job, nil)
+	job, err := s.buildJobWithSecrets(build, product)
+	if err != nil {
+		return "", "", err
+	}
+	_, _, err = s.client.Jobs().Register(job, nil)
 	if err != nil {
 		return "", "", err
 	}
@@ -61,6 +67,14 @@ func (s NomadScheduler) Submit(build domain.Build, product domain.Product) (stri
 }
 
 func (s NomadScheduler) buildJob(build domain.Build, product domain.Product) *nomadapi.Job {
+	job, err := s.buildJobWithSecrets(build, product)
+	if err != nil {
+		return nil
+	}
+	return job
+}
+
+func (s NomadScheduler) buildJobWithSecrets(build domain.Build, product domain.Product) (*nomadapi.Job, error) {
 	jobID := jobID(build)
 	taskName := "package"
 	groupName := "builder"
@@ -73,6 +87,9 @@ func (s NomadScheduler) buildJob(build domain.Build, product domain.Product) *no
 			"-lc",
 			s.cfg.RunnerCommand,
 		},
+	}
+	if s.cfg.RunnerDockerPrivileged {
+		config["privileged"] = true
 	}
 	volumes := []string{}
 	if s.cfg.DaggerDockerSocket != "" {
@@ -119,6 +136,8 @@ func (s NomadScheduler) buildJob(build domain.Build, product domain.Product) *no
 		"MINIO_BUCKET":      s.cfg.MinIOBucket,
 	}
 	addEnv(env, "MINIO_PUBLIC_URL", s.cfg.MinIOPublicURL)
+	addEnv(env, "GITLAB_PACKAGE_BASE_URL", s.cfg.GitLabPackageBaseURL)
+	addEnv(env, "GITLAB_PACKAGE_TOKEN", s.cfg.GitLabPackageToken)
 	if build.Target == "linux" && s.cfg.ArtifactRoot != "" {
 		addEnv(env, "ARTIFACT_ROOT", "/artifacts")
 	} else {
@@ -136,8 +155,21 @@ func (s NomadScheduler) buildJob(build domain.Build, product domain.Product) *no
 	addEnv(env, "LSAPCTL_BUILD_CMD", s.cfg.LSAPCTLBuildCmd)
 	addEnv(env, "LINUX_PACKAGER_CMD", s.cfg.LinuxPackagerCmd)
 	addEnv(env, "WINDOWS_PACKAGER_CMD", s.cfg.WindowsPackagerCmd)
+	addEnv(env, "WINDOWS_SIGNING_CMD", s.cfg.WindowsSigningCmd)
+	addEnv(env, "SECRET_ENV_PREFIX", s.cfg.SecretEnvPrefix)
 	for key, value := range build.Variables {
 		env["VAR_"+strings.ToUpper(key)] = fmt.Sprint(value)
+	}
+	resolver, err := secret.NewResolver(s.cfg)
+	if err != nil {
+		return nil, err
+	}
+	secretEnv, err := resolver.ResolveBuild(build)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range secretEnv {
+		env[key] = value
 	}
 
 	return &nomadapi.Job{
@@ -146,17 +178,24 @@ func (s NomadScheduler) buildJob(build domain.Build, product domain.Product) *no
 		Type:        ptr("batch"),
 		Datacenters: []string{"dc1"},
 		TaskGroups: []*nomadapi.TaskGroup{{
-			Name:        &groupName,
-			Count:       ptr(1),
-			Constraints: placementConstraints(build.Target, constraintClass),
+			Name:             &groupName,
+			Count:            ptr(1),
+			Constraints:      placementConstraints(build.Target, constraintClass),
+			RestartPolicy:    restartPolicy(s.cfg),
+			ReschedulePolicy: reschedulePolicy(s.cfg),
+			EphemeralDisk:    ephemeralDisk(s.cfg),
+			MaxRunDuration:   durationPtr(s.cfg.RunnerMaxRunDuration),
 			Tasks: []*nomadapi.Task{{
-				Name:   taskName,
-				Driver: driver,
-				Config: config,
-				Env:    env,
+				Name:        taskName,
+				Driver:      driver,
+				Config:      config,
+				Env:         env,
+				Resources:   taskResources(s.cfg),
+				LogConfig:   logConfig(s.cfg),
+				KillTimeout: durationPtr(s.cfg.RunnerKillTimeout),
 			}},
 		}},
-	}
+	}, nil
 }
 
 func (s NomadScheduler) Inspect(jobID string) (JobStatus, error) {
@@ -257,4 +296,67 @@ func placementConstraints(target string, nodeClass string) []*nomadapi.Constrain
 		constraints = append(constraints, nomadapi.NewConstraint("${meta.node_class}", "=", nodeClass))
 	}
 	return constraints
+}
+
+func taskResources(cfg config.Config) *nomadapi.Resources {
+	resources := &nomadapi.Resources{
+		CPU:      ptr(positiveOrDefault(cfg.RunnerCPU, 2000)),
+		MemoryMB: ptr(positiveOrDefault(cfg.RunnerMemoryMB, 4096)),
+		DiskMB:   ptr(positiveOrDefault(cfg.RunnerDiskMB, 4096)),
+	}
+	if cfg.RunnerMemoryMaxMB > 0 {
+		resources.MemoryMaxMB = ptr(cfg.RunnerMemoryMaxMB)
+	}
+	return resources
+}
+
+func logConfig(cfg config.Config) *nomadapi.LogConfig {
+	return &nomadapi.LogConfig{
+		MaxFiles:      ptr(positiveOrDefault(cfg.RunnerLogMaxFiles, 10)),
+		MaxFileSizeMB: ptr(positiveOrDefault(cfg.RunnerLogMaxFileMB, 20)),
+		Disabled:      ptr(false),
+	}
+}
+
+func restartPolicy(cfg config.Config) *nomadapi.RestartPolicy {
+	return &nomadapi.RestartPolicy{
+		Attempts: ptr(nonNegativeOrDefault(cfg.RunnerRestartAttempts, 0)),
+		Mode:     ptr("fail"),
+	}
+}
+
+func reschedulePolicy(cfg config.Config) *nomadapi.ReschedulePolicy {
+	return &nomadapi.ReschedulePolicy{
+		Attempts:  ptr(nonNegativeOrDefault(cfg.RunnerRescheduleAttempts, 0)),
+		Unlimited: ptr(false),
+	}
+}
+
+func ephemeralDisk(cfg config.Config) *nomadapi.EphemeralDisk {
+	return &nomadapi.EphemeralDisk{
+		Sticky:  ptr(false),
+		Migrate: ptr(false),
+		SizeMB:  ptr(positiveOrDefault(cfg.RunnerDiskMB, 4096)),
+	}
+}
+
+func durationPtr(value time.Duration) *time.Duration {
+	if value <= 0 {
+		return nil
+	}
+	return &value
+}
+
+func nonNegativeOrDefault(value int, fallback int) int {
+	if value < 0 {
+		return fallback
+	}
+	return value
+}
+
+func positiveOrDefault(value int, fallback int) int {
+	if value <= 0 {
+		return fallback
+	}
+	return value
 }

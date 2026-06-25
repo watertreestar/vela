@@ -18,19 +18,19 @@
 ## 当前架构
 
 ```text
-HeroUI/Tailwind Frontend
+React admin console with local shadcn/Radix-style primitives
   -> Go Packaging API
-  -> PostgreSQL
+  -> PostgreSQL by default, JSON store for local fallback
   -> Nomad
   -> Runner
   -> Dagger for Linux pipeline
-  -> MinIO/local artifact store
+  -> local or MinIO/RustFS-compatible artifact store
 ```
 
 主要组件：
 
 - `backend/`：Go API，负责产品、manifest、build、upload、approval、publish、runner task、Nomad 调度。
-- `frontend/`：React + HeroUI + Tailwind 控制台。目前功能优先，视觉和布局后续专门处理。
+- `frontend/`：React 控制台，使用本地 shadcn/Radix-style primitives 和紧凑 dashboard 风格。
 - `products/`：产品 manifest 和默认配置。
 - `runner/`：Bun 编写的任务执行器，负责领取任务、下载组件、渲染上下文、调用 Dagger 或宿主打包命令、上传结果。
 - `lsapctl/`：Go 编写的 Linux 包内 CLI，负责安装、启动、停止、重启、状态、卸载、环境检查。
@@ -142,13 +142,19 @@ UI overrides > build variables > customer overlay > profile overlay > target def
 - 组件制品来源。
 - Linux/Windows target。
 
-后续需要重点加强：
+当前已经加强：
 
-- manifest schema 校验。
-- config 类型校验。
-- secret 引用解析。
-- 变更 diff 和审计。
-- build lock 可复现性校验。
+- manifest 保存、dry-run 和构建创建的核心校验。
+- 常用配置项的结构化编辑和高级 JSON 模式。
+- `secret:<name>` / `secret://<name>` 引用解析，支持 env/file/SOPS/Vault KV v2/Nomad Variables backend。
+- Manifest revision、restore、diff 和独立 audit event。
+- Build Lock、release gate 和可复现报告。
+
+仍需按实际使用频率继续加强：
+
+- uncommon Docker/systemd nested fields 的结构化编辑。
+- 更细粒度 schema/version compatibility。
+- 生产级 live acceptance 和长期保留策略。
 
 ## Linux 安装包设计
 
@@ -216,6 +222,7 @@ Windows Runner：
 - 通过 Nomad `raw_exec` 在 Windows 宿主机上启动。
 - 需要 Windows 宿主环境安装 Bun、Inno Setup 或 WiX、可选 SignTool。
 - Windows setup.exe 的真实打包依赖 `WINDOWS_PACKAGER_CMD`。
+- Windows setup.exe 的签名依赖 `WINDOWS_SIGNING_CMD`；runner 会在 checksum 和上传前执行该 hook。
 - 当前不强行把 Windows 打包塞进 Linux 容器，因为 setup.exe、签名和厂商运行库通常依赖 Windows 宿主工具链。
 
 生命周期要求：
@@ -243,43 +250,42 @@ Windows Runner：
 | 手动上传 | 已实现 MVP | upload endpoint 和本地/MinIO 存储适配 |
 | 组件来源选择 | 已实现 MVP | repository/manual/fixed/previous-build |
 | Linux packaging | 已实现 MVP | Bun runner + Dagger + tar.gz |
-| Windows packaging | 半实现 | 支持 target 和命令钩子，真实 setup.exe 依赖 Windows packager 命令 |
-| Nomad 调度 | 已接入 | 支持 Linux Docker driver 和 Windows raw_exec |
+| Windows packaging | MVP | 支持 target、`WINDOWS_PACKAGER_CMD`、`WINDOWS_SIGNING_CMD`、fixture 验收和生产主机 readiness check；真实 Release 仍依赖 Windows packager host 和证书链 |
+| Nomad 调度 | 已接入 | 支持 Linux Docker driver、Windows raw_exec、资源/日志/重启/重调度策略 |
 | PostgreSQL | 已接入 | JSON store 仅保留本地 fallback |
-| MinIO | 已接入基础能力 | 仍需强化 resolver、权限和生命周期 |
+| MinIO/RustFS | 已接入 MVP | 支持源制品解析、最终制品上传、审计归档和可选 object-lock 验收 |
 | `lsapctl` | 已实现 MVP | Docker/systemd 生命周期、权限、安装目录、备份、状态 |
-| 前端体验 | 待优化 | 当前布局和视觉不是最终形态 |
+| 前端体验 | 已重做 MVP | PC dashboard 风格、中文 UI、结构化 Manifest/Build/Upload/Runner/Notification/Reproducibility 主要流程已覆盖 |
 
 ## 主要欠缺项
 
 产品和配置：
 
-- manifest schema 需要成为强约束，而不是只靠约定。
-- config override 需要类型系统和表单化 UI。
-- secret 不能直接落在 build config，需要接入 Vault、Nomad Variables、SOPS 或类似方案。
-- customer/profile/target overlay 需要独立管理页面和 diff 预览。
-- build lock 需要展示最终解析结果，方便审计。
+- uncommon Docker/systemd nested fields 仍主要依赖高级 JSON。
+- secret 引用已经接入 env/file/SOPS/Vault KV v2/Nomad Variables；如生产需要，可继续增加云 KMS 原生 backend。
+- customer/profile overlay 已有独立管理页面；target config 主要在 Manifest 结构化编辑中维护。
+- build lock、release gate 和可复现报告已经在 UI/API 中展示。
 
 组件和制品：
 
-- repository resolver 需要真正支持 GitLab Package Registry、MinIO prefix/glob/latest/version 解析。
-- 手动上传需要权限、大小限制、checksum 校验和过期策略。
-- 制品需要 retention policy。
-- 下载地址需要签名 URL 或访问控制。
-- 最终安装包需要 checksum、签名和 SBOM。
+- GitLab Generic Package Registry exact-file resolver、MinIO/RustFS exact/wildcard resolver 和 local `ARTIFACT_ROOT` resolver 已实现。
+- 手动上传已有权限、512 MB API 限制、checksum、download policy 和 retention metadata。
+- 下载权限已按 `public/platform/restricted` 在 auth mode 下执行。
+- 最终安装包已有 checksum；Windows signing hook 已实现，真实证书签名仍需生产 Windows host 验收。
+- SBOM 仍未纳入当前 MVP。
 
 Runner 和 Dagger：
 
-- Linux Dagger pipeline 需要更多真实模板渲染测试。
+- Linux Dagger pipeline 已有 fixture/golden path 和 `fixture_golden_cli.py` 确定性校验；仍需要更多真实产品 fixture 矩阵。
 - Dagger cache、Bun cache、组件缓存需要可观测和清理策略。
 - Runner 需要并发控制。
 - Runner 需要更清晰的错误分类和重试策略。
-- 需要本地一键 e2e 验证脚本。
-- Windows packaging 需要补齐真实 Inno Setup 或 WiX 模板。
+- 已有 Python 一键本地验收脚本，支持 local/RustFS/Windows fixture 路径。
+- Windows packaging 仍需要在真实 Windows host 上补齐 Inno Setup 或 WiX 生产验收。
 
 Nomad 和宿主环境：
 
-- Nomad job spec 需要生产级资源限制、日志、artifact/cache mount、安全策略。
+- Nomad job spec 已包含资源限制、ephemeral disk、allocation log rotation、kill timeout、max run duration、restart/reschedule policy 和 cache mount。
 - Linux runner host 需要安装和运维文档。
 - Windows runner host 需要服务化启动、权限、签名证书和工具链文档。
 - 需要验证 allocation failed、lost、cancel、retry 的完整闭环。
@@ -296,29 +302,29 @@ Nomad 和宿主环境：
 
 安全和治理：
 
-- 缺少 AuthN/AuthZ。
-- 审批流没有角色和权限控制。
-- 缺少审计日志。
-- 缺少密钥管理。
+- AuthN/AuthZ MVP 已实现：静态 token、OIDC/JWKS、server-side broker、persisted session store/logout、角色权限和 runner token。
+- 审批、发布、Manifest 写入、上传、下载和 runner API 已有角色边界。
+- 独立 audit event、archive digest/HMAC signing、archive storage、可选 object-lock evidence 和前端 audit center 已实现。
+- Secret management MVP 已实现：env/file/SOPS/Vault KV v2/Nomad Variables。
 - 缺少多租户或团队隔离模型。
 - 缺少发布通道策略和不可变制品策略。
 
 测试和质量：
 
-- Go backend 单元测试和集成测试需要补齐。
-- Runner 需要 mock API 和真实文件场景测试。
-- Dagger pipeline 需要 fixture-based 测试。
+- Go backend tests、Python script tests、frontend unit tests、Playwright E2E、runner entry build check 已作为当前验证门。
+- Runner 已有 fixture 路径和 acceptance CLI；仍需更多真实文件/产品矩阵。
+- Dagger pipeline 已有 fixture-based testing 和 fixture golden CLI；仍可增加更多 base image/golden archive。
 - `lsapctl` 需要 Linux 容器/VM 集成测试。
 - Nomad lifecycle 需要本地 docker-compose 或脚本化验证。
 - Windows setup.exe 需要专门的 Windows runner 验证。
 
 前端：
 
-- 当前前端只满足功能入口，布局和视觉需要重做。
-- 产品、build、manifest、logs、approval 的信息架构需要重新梳理。
-- 配置编辑应该从纯 JSON 编辑升级成结构化表单 + 高级 JSON 模式。
-- 日志需要支持跟随、过滤、复制、下载。
-- 构建记录需要清晰展示状态、耗时、runner、artifact、失败原因。
+- 前端已改为 dashboard admin 风格，PC 优先。
+- 产品、build、manifest、logs、approval、upload、runner、notification、reproducibility 已有主要信息架构。
+- 配置编辑已支持结构化表单 + 高级 JSON 模式。
+- 日志支持列表和 stream；复制/下载仍可后续增强。
+- 构建记录已展示状态、runner、artifact、失败原因和 release gate 摘要。
 
 ## 建议后续 Phase
 
@@ -390,26 +396,25 @@ Nomad 和宿主环境：
 
 - 普通用户、审批人、管理员、runner token 权限边界清晰。
 
-### Phase 6: 前端重构
+### Phase 6: 前端重构和治理入口
 
 目标：
 
-- 重做产品列表、构建创建、配置编辑、构建详情、日志、审批发布页面。
-- 用 HeroUI/Tailwind 建立统一布局和组件规范。
+- 已完成产品列表、构建创建、配置编辑、构建详情、日志、审批发布、上传、Runner、通知和可复现报告的 dashboard 化。
+- 使用本地 shadcn/Radix-style primitives 建立统一布局和组件规范。
 - 用结构化表单承载大部分配置，保留高级 JSON 编辑。
+- 后续补 visual regression 和更多大表单拆分。
 
 验收：
 
-- 用户能不看文档完成一次产品选择、配置修改、审批、构建、下载、发布。
+- 用户能不看文档完成一次产品选择、配置修改、审批、构建、下载、Preview 验证和 Release 发布。
 
 ## 下一步推荐
 
 优先顺序建议：
 
-1. 固化 manifest schema 和 build lock。
-2. 做 Linux 端到端 fixture 构建。
-3. 给 `lsapctl` 增加结构化 `status --json` 和集成测试。
-4. 完整验证 Nomad lifecycle。
-5. 再处理 Windows setup.exe。
-6. 最后系统性重做前端体验。
-
+1. 在真实生产 IdP 上跑 live acceptance，确认 token claims、角色映射、session store/logout 和 HTTPS 配置。
+2. 在 production-like RustFS/MinIO bucket 上跑 object-lock live acceptance，固化 retention policy。
+3. 在 Windows host 上跑真实 Inno/WiX + SignTool Preview 验收。
+4. 根据生产密钥体系决定是否增加云 KMS 原生 backend 和 refresh-token rotation。
+5. 补可选 visual regression 和更多 runner fixture matrix。

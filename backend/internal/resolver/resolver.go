@@ -13,6 +13,10 @@ type OverlayReader interface {
 	ReadUpload(id string) (domain.UploadRecord, error)
 }
 
+type ArtifactSourceResolver interface {
+	ResolveArtifactSource(source domain.ComponentSource, version string) (domain.ArtifactResolution, bool, error)
+}
+
 func ResolveBuild(
 	product domain.Product,
 	request domain.BuildRequest,
@@ -104,12 +108,23 @@ func resolveComponent(component domain.Component, source domain.ComponentSource,
 	if uri == "" {
 		switch source.Kind {
 		case "artifact-repository", "":
-			path := strings.ReplaceAll(source.Path, "{{version}}", version)
-			repo := source.Repository
-			if repo == "" {
-				repo = "minio"
+			if resolver, ok := uploads.(ArtifactSourceResolver); ok {
+				resolution, resolved, err := resolver.ResolveArtifactSource(source, version)
+				if err != nil {
+					return domain.ResolvedComponent{}, apperr.Wrap(
+						err,
+						apperr.KindDependency,
+						"ARTIFACT_RESOLVE_FAILED",
+						fmt.Sprintf("component %s artifact source could not be resolved", component.ID),
+					).WithField("components.source.path").WithParam("componentId", component.ID)
+				}
+				if resolved {
+					uri = resolution.URI
+					sha256 = resolution.SHA256
+					break
+				}
 			}
-			uri = fmt.Sprintf("%s://%s", repo, strings.TrimLeft(path, "/"))
+			uri = artifactRepositoryURI(source, version)
 		case "manual-upload":
 			if source.UploadID != "" && uploads != nil {
 				record, err := uploads.ReadUpload(source.UploadID)
@@ -154,6 +169,15 @@ func resolveComponent(component domain.Component, source domain.ComponentSource,
 		SHA256:   sha256,
 		Required: component.Required,
 	}, nil
+}
+
+func artifactRepositoryURI(source domain.ComponentSource, version string) string {
+	path := strings.ReplaceAll(source.Path, "{{version}}", version)
+	repo := source.Repository
+	if repo == "" {
+		repo = "minio"
+	}
+	return fmt.Sprintf("%s://%s", repo, strings.TrimLeft(path, "/"))
 }
 
 func resolveWorkloads(workloads []domain.Workload, config map[string]any, components []domain.ResolvedComponent) ([]domain.ResolvedWorkload, error) {

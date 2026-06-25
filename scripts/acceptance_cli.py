@@ -23,6 +23,13 @@ DEFAULT_API_URL = "http://127.0.0.1:8080"
 DEFAULT_RUNNER_IMAGE = "packaging-runner:local"
 DEFAULT_BASE_IMAGE = "alpine:latest"
 DEFAULT_DAGGER_ENGINE_IMAGE = "registry.dagger.io/engine:v0.21.3"
+DEFAULT_LINUX_FIXTURE_INSTALL_TOOLS = "apk add --no-cache python3 tar gzip coreutils bash"
+DEFAULT_WINDOWS_FIXTURE_COMMAND = "python3 /app/fixtures/windows_setup_packager.py"
+DEFAULT_WINDOWS_SIGNING_FIXTURE_COMMAND = "python3 /app/fixtures/windows_signing_fixture.py"
+WINDOWS_FIXTURE_MARKER = b"PACKAGING_PLATFORM_WINDOWS_SETUP_FIXTURE_V1"
+WINDOWS_SIGNING_FIXTURE_MARKER = b"PACKAGING_PLATFORM_WINDOWS_SIGNING_FIXTURE_V1"
+DEFAULT_LINUX_FIXTURE_COMMAND = "python3 /workspace/context/rendered/linux_package_packager.py"
+LINUX_FIXTURE_MARKER = b"PACKAGING_PLATFORM_LINUX_PACKAGE_FIXTURE_V1"
 
 
 @dataclass
@@ -213,16 +220,23 @@ def ensure_docker_network(args: argparse.Namespace, root: pathlib.Path) -> None:
             run_command(["docker", "network", "create", args.api_docker_network], root, timeout=60),
             f"create docker network {args.api_docker_network}",
         )
-    if args.postgres_container:
-        inspect = run_command(["docker", "container", "inspect", args.postgres_container], root, timeout=30)
-        require_success(inspect, f"inspect postgres container {args.postgres_container}")
+    if args.store_driver in {"postgres", "postgresql", ""}:
+        connect_container_to_network(args.postgres_container, args.api_docker_network, root, "postgres")
+    if args.artifact_store == "minio":
+        connect_container_to_network(args.minio_container, args.api_docker_network, root, "MinIO-compatible storage")
+
+
+def connect_container_to_network(container: str, network: str, root: pathlib.Path, label: str) -> None:
+    if container:
+        inspect = run_command(["docker", "container", "inspect", container], root, timeout=30)
+        require_success(inspect, f"inspect {label} container {container}")
         connect = run_command(
-            ["docker", "network", "connect", args.api_docker_network, args.postgres_container],
+            ["docker", "network", "connect", network, container],
             root,
             timeout=60,
         )
         if connect.returncode != 0 and "already exists" not in (connect.stderr + connect.stdout).lower():
-            require_success(connect, f"connect {args.postgres_container} to {args.api_docker_network}")
+            require_success(connect, f"connect {container} to {network}")
 
 
 def docker_database_url(args: argparse.Namespace) -> str:
@@ -230,6 +244,45 @@ def docker_database_url(args: argparse.Namespace) -> str:
     if args.database_url == default_host_url:
         return "postgres://packaging:packaging@packaging-postgres:5432/packaging?sslmode=disable"
     return args.database_url
+
+
+def api_minio_endpoint(args: argparse.Namespace) -> str:
+    if args.api_minio_endpoint:
+        return args.api_minio_endpoint
+    if args.api_mode == "docker" and args.minio_container:
+        return f"{args.minio_container}:9000"
+    return args.minio_endpoint
+
+
+def runner_minio_public_url(args: argparse.Namespace) -> str:
+    if args.runner_minio_public_url:
+        return args.runner_minio_public_url.rstrip("/")
+    if args.minio_public_url:
+        return args.minio_public_url.rstrip("/")
+    if args.docker_network and args.minio_container:
+        return f"http://{args.minio_container}:9000"
+    parsed = urllib.parse.urlparse(args.api_url)
+    scheme = parsed.scheme or "http"
+    return f"{scheme}://{args.minio_endpoint}"
+
+
+def artifact_store_env(args: argparse.Namespace, for_api_container: bool) -> dict[str, str]:
+    env = {"ARTIFACT_STORE": args.artifact_store}
+    if args.artifact_store != "minio":
+        return env
+    endpoint = api_minio_endpoint(args) if for_api_container else args.minio_endpoint
+    env.update(
+        {
+            "MINIO_ENDPOINT": endpoint,
+            "MINIO_ACCESS_KEY": args.minio_access_key,
+            "MINIO_SECRET_KEY": args.minio_secret_key,
+            "MINIO_BUCKET": args.minio_bucket,
+            "MINIO_USE_SSL": "true" if args.minio_use_ssl else "false",
+        }
+    )
+    if args.minio_public_url:
+        env["MINIO_PUBLIC_URL"] = args.minio_public_url.rstrip("/")
+    return env
 
 
 def build_api_binary(root: pathlib.Path, target: str) -> pathlib.Path:
@@ -265,11 +318,11 @@ def start_host_api(args: argparse.Namespace, root: pathlib.Path) -> StartedApi:
         "STORE_DRIVER": args.store_driver,
         "DATABASE_URL": args.database_url,
         "PRODUCTS_DIR": str(root / "products"),
-        "ARTIFACT_STORE": "local",
         "DATA_DIR": str(backend_dir / "data"),
         "DRY_RUN": "true",
         "PACKAGING_API_URL": args.api_url,
     }
+    env.update(artifact_store_env(args, for_api_container=False))
     process = subprocess.Popen(
         [str(api_binary)],
         cwd=backend_dir,
@@ -306,13 +359,11 @@ def start_docker_api(args: argparse.Namespace, root: pathlib.Path) -> StartedApi
         "-w",
         "/workspace",
         "-e",
-        "STORE_DRIVER=postgres",
+        f"STORE_DRIVER={args.store_driver}",
         "-e",
         f"DATABASE_URL={docker_database_url(args)}",
         "-e",
         "PRODUCTS_DIR=/workspace/products",
-        "-e",
-        "ARTIFACT_STORE=local",
         "-e",
         "DATA_DIR=/workspace/backend/data",
         "-e",
@@ -322,6 +373,8 @@ def start_docker_api(args: argparse.Namespace, root: pathlib.Path) -> StartedApi
         args.api_container_image,
         "/workspace/dist/packaging-api-acceptance-linux-amd64",
     ]
+    for key, value in artifact_store_env(args, for_api_container=True).items():
+        command[-2:-2] = ["-e", f"{key}={value}"]
     require_success(run_command(command, root, timeout=120), "start docker API")
     if not args.runner_api_url:
         args.runner_api_url = f"http://{args.api_container}:8080"
@@ -507,15 +560,26 @@ def upload_components(args: argparse.Namespace) -> dict[str, dict[str, Any]]:
     return uploads
 
 
-def component_overrides(uploads: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    return {
-        component_id: {
+def runner_download_url(args: argparse.Namespace, upload: dict[str, Any]) -> str:
+    download_url = upload.get("downloadUrl") or ""
+    parsed = urllib.parse.urlparse(download_url)
+    path = parsed.path or f"/api/uploads/{upload['id']}/download"
+    runner_base = (args.runner_api_url or default_runner_api_url(args.api_url)).rstrip("/")
+    return f"{runner_base}{path}"
+
+
+def component_overrides(args: argparse.Namespace, uploads: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    overrides: dict[str, dict[str, Any]] = {}
+    for component_id, upload in uploads.items():
+        uri = upload["uri"]
+        if args.artifact_store == "minio":
+            uri = runner_download_url(args, upload)
+        overrides[component_id] = {
             "kind": "manual-upload",
             "uploadId": upload["id"],
-            "uri": upload["uri"],
+            "uri": uri,
         }
-        for component_id, upload in uploads.items()
-    }
+    return overrides
 
 
 def create_build(args: argparse.Namespace, overrides: dict[str, Any]) -> dict[str, Any]:
@@ -578,6 +642,23 @@ def docker_runner_command(args: argparse.Namespace) -> list[str]:
         "DAGGER_LINUX_BASE_IMAGE": args.dagger_base_image,
         "DAGGER_LINUX_INSTALL_TOOLS": args.dagger_install_tools,
     }
+    if uses_linux_packager_fixture(args):
+        env["DAGGER_LINUX_PACKAGE_CMD"] = args.linux_fixture_command
+        if args.dagger_install_tools == "skip":
+            env["DAGGER_LINUX_INSTALL_TOOLS"] = DEFAULT_LINUX_FIXTURE_INSTALL_TOOLS
+    if args.artifact_store == "minio":
+        env["MINIO_PUBLIC_URL"] = runner_minio_public_url(args)
+    if args.target == "windows":
+        windows_command = args.windows_packager_command
+        if not windows_command and uses_windows_packager_fixture(args):
+            windows_command = args.windows_fixture_command
+        if windows_command:
+            env["WINDOWS_PACKAGER_CMD"] = windows_command
+        windows_signing_command = args.windows_signing_command
+        if not windows_signing_command and uses_windows_signing_fixture(args):
+            windows_signing_command = args.windows_signing_fixture_command
+        if windows_signing_command:
+            env["WINDOWS_SIGNING_CMD"] = windows_signing_command
     if args.dagger_base_image_tar:
         env["DAGGER_LINUX_BASE_IMAGE_TAR"] = args.dagger_base_image_tar
     if args.dagger_base_image_tar_tag:
@@ -618,13 +699,51 @@ def validate_preview(api_url: str, build_id: str) -> dict[str, Any]:
     return build
 
 
-def verify_download(url: str) -> None:
+def download_bytes(url: str) -> bytes:
     request = urllib.request.Request(url, method="GET")
     with urllib.request.urlopen(request, timeout=30) as response:
         if response.status != 200:
             raise RuntimeError(f"download returned HTTP {response.status}: {url}")
-        if len(response.read(1)) == 0:
+        data = response.read()
+        if len(data) == 0:
             raise RuntimeError(f"download returned an empty response: {url}")
+        return data
+
+
+def verify_download(url: str) -> None:
+    download_bytes(url)
+
+
+def uses_windows_packager_fixture(args: argparse.Namespace) -> bool:
+    return args.target == "windows" and args.windows_packager_fixture and not args.windows_packager_command
+
+
+def uses_windows_signing_fixture(args: argparse.Namespace) -> bool:
+    return args.target == "windows" and args.windows_signing_fixture and not args.windows_signing_command
+
+
+def uses_linux_packager_fixture(args: argparse.Namespace) -> bool:
+    return args.target == "linux" and args.linux_packager_fixture
+
+
+def verify_artifact_download(args: argparse.Namespace, build: dict[str, Any]) -> None:
+    url = build.get("downloadUrl") or f"{args.api_url}/api/builds/{build['id']}/download"
+    data = download_bytes(url)
+    if uses_linux_packager_fixture(args) and args.verify_linux_fixture:
+        if LINUX_FIXTURE_MARKER not in data:
+            raise RuntimeError("linux artifact was downloaded, but fixture marker was not found")
+        if str(build["id"]).encode("utf-8") not in data:
+            raise RuntimeError("linux artifact fixture does not contain the build id")
+    if uses_windows_packager_fixture(args) and args.verify_windows_fixture:
+        if WINDOWS_FIXTURE_MARKER not in data:
+            raise RuntimeError("windows artifact was downloaded, but fixture marker was not found")
+        if str(build["id"]).encode("utf-8") not in data:
+            raise RuntimeError("windows artifact fixture does not contain the build id")
+    if uses_windows_signing_fixture(args) and args.verify_windows_signing_fixture:
+        if WINDOWS_SIGNING_FIXTURE_MARKER not in data:
+            raise RuntimeError("windows artifact was downloaded, but signing fixture marker was not found")
+        if str(build["id"]).encode("utf-8") not in data:
+            raise RuntimeError("windows signing fixture does not contain the build id")
 
 
 def run_acceptance(args: argparse.Namespace) -> int:
@@ -646,20 +765,22 @@ def run_acceptance(args: argparse.Namespace) -> int:
         uploads = upload_components(args)
 
         progress.step("Create preview build")
-        build = create_build(args, component_overrides(uploads))
+        build = create_build(args, component_overrides(args, uploads))
         print(f"    buildId={build['id']} status={build['status']}")
 
         progress.step("Approve preview build")
         build = approve_build(args.api_url, build["id"])
         print(f"    buildId={build['id']} status={build['status']} nomadJobId={build.get('nomadJobId', '')}")
 
-        progress.step("Run Docker runner with Dagger")
+        progress.step("Run Docker runner")
         run_runner(args, root)
         build = assert_build_status(args.api_url, build["id"], "succeeded")
         print(f"    artifact={build.get('artifactUri', '')}")
+        if args.artifact_store == "minio" and not str(build.get("artifactUri", "")).startswith("minio://"):
+            raise RuntimeError(f"expected minio artifact URI, got {build.get('artifactUri', '')}")
 
         progress.step("Verify artifact download")
-        verify_download(build.get("downloadUrl") or f"{args.api_url}/api/builds/{build['id']}/download")
+        verify_artifact_download(args, build)
 
         progress.step("Validate Preview")
         build = validate_preview(args.api_url, build["id"])
@@ -718,6 +839,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dagger-base-image-tar", default="")
     parser.add_argument("--dagger-base-image-tar-tag", default="")
     parser.add_argument("--dagger-install-tools", default="skip")
+    parser.add_argument("--linux-packager-fixture", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--linux-fixture-command", default=DEFAULT_LINUX_FIXTURE_COMMAND)
+    parser.add_argument("--verify-linux-fixture", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--windows-packager-fixture", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--windows-fixture-command", default=DEFAULT_WINDOWS_FIXTURE_COMMAND)
+    parser.add_argument("--windows-packager-command", default=os.environ.get("WINDOWS_PACKAGER_CMD", ""))
+    parser.add_argument("--verify-windows-fixture", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--windows-signing-fixture", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--windows-signing-fixture-command", default=DEFAULT_WINDOWS_SIGNING_FIXTURE_COMMAND)
+    parser.add_argument("--windows-signing-command", default=os.environ.get("WINDOWS_SIGNING_CMD", ""))
+    parser.add_argument("--verify-windows-signing-fixture", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--docker-network", default="")
     parser.add_argument("--add-host-gateway", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--allow-existing-queued", action="store_true")
@@ -731,6 +863,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--keep-api", action="store_true")
     parser.add_argument("--api-start-timeout", type=int, default=45)
     parser.add_argument("--runner-timeout", type=int, default=600)
+    parser.add_argument("--artifact-store", choices=["local", "minio"], default=os.environ.get("ARTIFACT_STORE", "local"))
+    parser.add_argument("--minio-container", default=os.environ.get("MINIO_CONTAINER", "packaging-rustfs"))
+    parser.add_argument("--minio-endpoint", default=os.environ.get("MINIO_ENDPOINT") or os.environ.get("RUSTFS_ENDPOINT", "127.0.0.1:9000"))
+    parser.add_argument("--api-minio-endpoint", default=os.environ.get("API_MINIO_ENDPOINT", ""))
+    parser.add_argument("--minio-public-url", default=os.environ.get("MINIO_PUBLIC_URL", ""))
+    parser.add_argument("--runner-minio-public-url", default=os.environ.get("RUNNER_MINIO_PUBLIC_URL", ""))
+    parser.add_argument("--minio-access-key", default=os.environ.get("MINIO_ACCESS_KEY") or os.environ.get("RUSTFS_ACCESS_KEY", "rustfsadmin"))
+    parser.add_argument("--minio-secret-key", default=os.environ.get("MINIO_SECRET_KEY") or os.environ.get("RUSTFS_SECRET_KEY", "rustfsadmin"))
+    parser.add_argument("--minio-bucket", default=os.environ.get("MINIO_BUCKET") or os.environ.get("RUSTFS_BUCKET", "packaging-artifacts"))
+    parser.add_argument("--minio-use-ssl", action=argparse.BooleanOptionalAction, default=os.environ.get("MINIO_USE_SSL", "false") == "true")
     parser.add_argument("--store-driver", default=os.environ.get("STORE_DRIVER", "postgres"))
     parser.add_argument(
         "--database-url",
@@ -748,7 +890,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     parser = build_parser()
-    args = parser.parse_args()
+    argv = sys.argv[1:]
+    command = None
+    if argv and argv[0] in {"run", "check"}:
+        command = argv[0]
+        argv = argv[1:]
+    args = parser.parse_args(argv)
+    if command:
+        args.command = command
     if args.command in {None, "run"}:
         return run_acceptance(args)
     if args.command == "check":

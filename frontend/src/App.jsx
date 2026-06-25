@@ -25,8 +25,10 @@ import {
 import {
   AlertCircle,
   Ban,
+  Bell,
   Boxes,
   Check,
+  CheckCheck,
   ChevronRight,
   CircleDot,
   ClipboardList,
@@ -40,8 +42,10 @@ import {
   Gauge,
   GitCompare,
   History,
+  KeyRound,
   LayoutDashboard,
   ListChecks,
+  LogOut,
   PackageCheck,
   PanelLeft,
   Play,
@@ -64,22 +68,37 @@ import {
   buildLogStreamUrl,
   cancelBuild,
   createBuild,
+  clearAuthState,
+  completeOIDCRedirect,
+  downloadFile,
   dryRunProductManifest,
+  getAuthState,
   getBuildLock,
   getBuildLogs,
   getBuildReleaseCheck,
+  getBuildReproducibilityReport,
+  exportBuildReleaseEvidenceArchive,
   getProductManifest,
   getProductOverlay,
+  exportAuditArchive,
   listRunners,
+  listAuditEvents,
+  listNotifications,
   listProductManifestRevisions,
   listBuilds,
   listProductOverlays,
   listProducts,
   listUploads,
+  logoutAuth,
+  markAllNotificationsRead,
+  markNotificationRead,
   publishBuild,
   rejectBuild,
   restoreProductManifestRevision,
   retryBuild,
+  setAuthState,
+  startOIDCLogin,
+  oidcLoginConfigured,
   updateProductManifest,
   updateProductOverlay,
   uploadArtifact,
@@ -118,6 +137,7 @@ const navItems = [
   { key: "products", label: "产品配置", icon: FileJson },
   { key: "overlays", label: "覆盖配置", icon: GitCompare },
   { key: "uploads", label: "制品上传", icon: FileUp },
+  { key: "audit", label: "审计中心", icon: ClipboardList },
   { key: "logs", label: "日志与锁定", icon: ScrollText },
 ];
 
@@ -125,6 +145,7 @@ const navGroups = [
   { label: "运行", keys: ["overview", "create", "builds"] },
   { label: "交付", keys: ["runners", "uploads", "logs"] },
   { label: "配置", keys: ["products", "overlays"] },
+  { label: "治理", keys: ["audit"] },
 ];
 
 const buildFilterOptions = [
@@ -170,6 +191,94 @@ const sourceKindLabels = Object.fromEntries(
 
 const overlayNamePattern = /^[A-Za-z0-9._-]+$/;
 
+const authRoleOptions = [
+  { value: "admin", label: "管理员", description: "发布 Release、审批、配置和上传" },
+  { value: "operator", label: "操作员", description: "创建构建、审批、验证 Preview、上传和配置" },
+  { value: "viewer", label: "只读", description: "查看记录、日志和允许范围内的制品下载" },
+];
+
+const authRoleLabels = Object.fromEntries(authRoleOptions.map((item) => [item.value, item.label]));
+
+const notificationSeverityMeta = {
+  critical: { label: "严重", color: "red" },
+  error: { label: "错误", color: "red" },
+  warning: { label: "提醒", color: "orange" },
+  success: { label: "完成", color: "gray" },
+  info: { label: "信息", color: "gray" },
+};
+
+function roleCan(role, permission, hasToken) {
+  if (!hasToken) return true;
+  if (role === "admin") return true;
+  if (role === "operator") {
+    return [
+      "build.create",
+      "build.approve",
+      "build.reject",
+      "build.validate",
+      "build.cancel",
+      "build.retry",
+      "manifest.write",
+      "overlay.write",
+      "upload.write",
+      "download.platform",
+      "download.restricted",
+      "audit.read",
+    ].includes(permission);
+  }
+  if (role === "viewer") {
+    return ["download.platform", "audit.read"].includes(permission);
+  }
+  return false;
+}
+
+function permissionDeniedText(permission) {
+  const text = {
+    "build.create": "需要操作员或管理员才能创建构建",
+    "build.approve": "需要操作员或管理员才能审批构建",
+    "build.reject": "需要操作员或管理员才能拒绝构建",
+    "build.validate": "需要操作员或管理员才能验证 Preview",
+    "build.publish": "需要管理员才能发布 Release",
+    "build.cancel": "需要操作员或管理员才能取消构建",
+    "build.retry": "需要操作员或管理员才能重试构建",
+    "manifest.write": "需要操作员或管理员才能保存 Manifest",
+    "overlay.write": "需要操作员或管理员才能保存覆盖配置",
+    "upload.write": "需要操作员或管理员才能上传制品",
+    "download.restricted": "需要操作员或管理员才能下载受限制品",
+    "download.platform": "需要平台账号才能下载该制品",
+    "audit.read": "需要平台账号才能查看审计事件",
+  };
+  return text[permission] || "当前账号没有执行该操作的权限";
+}
+
+function authPermission(authState, permission) {
+  const hasToken = Boolean(authState?.token);
+  const role = authState?.role || "viewer";
+  return {
+    allowed: roleCan(role, permission, hasToken),
+    reason: roleCan(role, permission, hasToken) ? "" : permissionDeniedText(permission),
+  };
+}
+
+function buildActionPermission(label) {
+  return {
+    "审批通过": "build.approve",
+    "拒绝": "build.reject",
+    "验证 Preview": "build.validate",
+    "转 Release": "build.publish",
+    "取消": "build.cancel",
+    "重试": "build.retry",
+  }[label] || "";
+}
+
+function artifactFileName(build) {
+  const uri = build?.artifactUri || build?.downloadUrl || "";
+  const fromUri = decodeURIComponent(String(uri).split(/[/?#]/).pop() || "");
+  if (fromUri && fromUri.includes(".")) return fromUri;
+  const suffix = build?.target === "windows" ? "setup.exe" : "artifact.tar.gz";
+  return `${build?.productId || "build"}-${build?.target || "target"}-${build?.version || "version"}-${shortId(build?.id)}-${suffix}`;
+}
+
 export default function App() {
   const [activeSection, setActiveSection] = useState("overview");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
@@ -180,6 +289,20 @@ export default function App() {
   const [builds, setBuilds] = useState([]);
   const [uploads, setUploads] = useState([]);
   const [runners, setRunners] = useState([]);
+  const [notifications, setNotifications] = useState([]);
+  const [auditEvents, setAuditEvents] = useState([]);
+  const [auditArchive, setAuditArchive] = useState(null);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditExporting, setAuditExporting] = useState(false);
+  const [auditFilters, setAuditFilters] = useState({
+    action: "",
+    resourceType: "",
+    resourceId: "",
+    productId: "",
+    buildId: "",
+    uploadId: "",
+    limit: "50",
+  });
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [savingManifest, setSavingManifest] = useState(false);
@@ -192,6 +315,7 @@ export default function App() {
   const [logs, setLogs] = useState([]);
   const [buildLock, setBuildLock] = useState(null);
   const [releaseCheck, setReleaseCheck] = useState(null);
+  const [reproducibilityReport, setReproducibilityReport] = useState(null);
   const [manifestText, setManifestText] = useState("");
   const [originalManifestText, setOriginalManifestText] = useState("");
   const [manifestDryRun, setManifestDryRun] = useState(null);
@@ -210,6 +334,12 @@ export default function App() {
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [confirmAction, setConfirmAction] = useState(null);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [authDialogOpen, setAuthDialogOpen] = useState(false);
+  const [authState, setAuthStateValue] = useState(() => {
+    const saved = getAuthState();
+    return { token: saved.token, role: saved.role || "operator" };
+  });
   const [form, setForm] = useState({
     productId: "",
     target: "linux",
@@ -239,6 +369,69 @@ export default function App() {
   });
   const globalSearchRef = useRef(null);
   const apiEnvironment = apiEnvironmentLabel(API_URL);
+  const authRoleLabel = authState.token ? authRoleLabels[authState.role] || authState.role || "已配置" : "免登录";
+  const unreadNotifications = notifications.filter((notification) => !notification.readAt);
+
+  function can(permission) {
+    return authPermission(authState, permission);
+  }
+
+  function requirePermission(permission) {
+    const result = can(permission);
+    if (!result.allowed) {
+      setError(result.reason);
+      return false;
+    }
+    return true;
+  }
+
+  function saveAuth(nextAuth) {
+    setAuthState(nextAuth);
+    const saved = getAuthState();
+    setAuthStateValue({ token: saved.token, role: saved.role || nextAuth.role || "operator" });
+    setAuthDialogOpen(false);
+    setNotice("访问令牌已保存");
+    refresh({ silent: true });
+  }
+
+  function clearAuth() {
+    const token = authState.token;
+    if (token) {
+      logoutAuth(token).catch(() => {});
+    }
+    clearAuthState();
+    setAuthStateValue({ token: "", role: "operator" });
+    setAuthDialogOpen(false);
+    setNotice("访问令牌已清除，当前按本地免登录模式显示");
+    refresh({ silent: true });
+  }
+
+  async function handleOIDCLogin() {
+    try {
+      const started = await startOIDCLogin();
+      if (!started) {
+        setError("OIDC 登录未配置完整，请检查前端 OIDC 地址、Client ID 和 Token Endpoint");
+      }
+    } catch (error) {
+      setError(`OIDC 登录启动失败：${error?.message || "请检查浏览器 Web Crypto 和 OIDC 配置"}`);
+    }
+  }
+
+  useEffect(() => {
+    async function finishOIDCLogin() {
+      const result = await completeOIDCRedirect();
+      if (!result) return;
+      if (result.ok) {
+        const saved = getAuthState();
+        setAuthStateValue({ token: saved.token, role: saved.role || result.role || "viewer", source: saved.source || "oidc" });
+        setNotice("OIDC 登录已完成");
+        refresh({ silent: true });
+      } else {
+        setError(`OIDC 登录失败：${result.error}`);
+      }
+    }
+    finishOIDCLogin();
+  }, []);
 
   function dismissToast(id) {
     setToasts((current) => current.filter((toast) => toast.id !== id));
@@ -385,22 +578,30 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [autoRefresh, selectedBuild?.id, form.productId]);
 
+  useEffect(() => {
+    if (activeSection === "audit" && auditEvents.length === 0 && !auditLoading) {
+      loadAuditEvents({ quiet: true });
+    }
+  }, [activeSection]);
+
   async function refresh(options = {}) {
     if (!options.silent) {
       setLoading(true);
     }
     setError("");
     try {
-      const [nextProducts, nextBuilds, nextUploads, nextRunners] = await Promise.all([
+      const [nextProducts, nextBuilds, nextUploads, nextRunners, nextNotifications] = await Promise.all([
         listProducts(),
         listBuilds(),
         listUploads(),
         listRunners(),
+        listNotifications({ limit: 50 }),
       ]);
       setProducts(nextProducts);
       setBuilds(nextBuilds);
       setUploads(nextUploads);
       setRunners(nextRunners);
+      setNotifications(nextNotifications);
       if (!form.productId && nextProducts[0]) {
         applyProductDefaults(nextProducts[0], false);
         try {
@@ -536,6 +737,7 @@ export default function App() {
 
   async function saveOverlay() {
     if (!form.productId || !overlayName) return;
+    if (!requirePermission("overlay.write")) return;
     setError("");
     setSavingOverlay(true);
     try {
@@ -573,6 +775,7 @@ export default function App() {
 
   async function saveManifest() {
     if (!form.productId) return;
+    if (!requirePermission("manifest.write")) return;
     setError("");
     setSavingManifest(true);
     try {
@@ -642,6 +845,7 @@ export default function App() {
 
   async function restoreManifestRevision(revision) {
     if (!form.productId || !revision?.id) return;
+    if (!requirePermission("manifest.write")) return;
     setError("");
     try {
       await restoreProductManifestRevision(form.productId, revision.id);
@@ -674,6 +878,7 @@ export default function App() {
 
   async function submitBuild(event) {
     event.preventDefault();
+    if (!requirePermission("build.create")) return;
     setError("");
     setNotice("");
     try {
@@ -705,6 +910,7 @@ export default function App() {
 
   async function uploadComponent(componentId, file) {
     if (!file) return;
+    if (!requirePermission("upload.write")) return;
     setError("");
     try {
       const overrides = parseJsonObjectText(form.componentOverridesText, "组件覆盖");
@@ -727,6 +933,7 @@ export default function App() {
 
   async function uploadStandalone(file) {
     if (!file) return;
+    if (!requirePermission("upload.write")) return;
     setUploadingStandalone(true);
     setError("");
     try {
@@ -744,6 +951,19 @@ export default function App() {
       setError(err);
     } finally {
       setUploadingStandalone(false);
+    }
+  }
+
+  async function downloadArtifact(url, filename, downloadPolicy = "platform") {
+    if (!url) return;
+    const permission = downloadPolicy === "restricted" ? "download.restricted" : "download.platform";
+    if (!requirePermission(permission)) return;
+    setError("");
+    try {
+      await downloadFile(url, filename || "artifact");
+      setNotice("下载已开始");
+    } catch (err) {
+      setError(err);
     }
   }
 
@@ -775,6 +995,8 @@ export default function App() {
   }
 
   async function runBuildAction(fn, build, label) {
+    const permission = buildActionPermission(label);
+    if (permission && !requirePermission(permission)) return;
     const key = `${label}:${build.id}`;
     if (busyActionRef.current) return;
     busyActionRef.current = key;
@@ -812,19 +1034,103 @@ export default function App() {
     }
     setError("");
     try {
-      const [nextLogs, nextLock, nextReleaseCheck] = await Promise.all([
+      const [nextLogs, nextLock, nextReleaseCheck, nextReproducibilityReport] = await Promise.all([
         getBuildLogs(build.id),
         getBuildLock(build.id),
         getBuildReleaseCheck(build.id),
+        getBuildReproducibilityReport(build.id),
       ]);
       setLogs(nextLogs);
       setBuildLock(nextLock);
       setReleaseCheck(nextReleaseCheck);
+      setReproducibilityReport(nextReproducibilityReport);
       if (options.openDialog) {
         setDetailOpen(true);
       }
     } catch (err) {
       setError(err);
+    }
+  }
+
+  async function markNotificationAsRead(notification) {
+    if (!notification?.id) return;
+    setError("");
+    try {
+      const updated = await markNotificationRead(notification.id);
+      setNotifications((current) =>
+        current.map((item) => (item.id === updated.id ? updated : item)),
+      );
+    } catch (err) {
+      setError(err);
+    }
+  }
+
+  async function markAllNotifications() {
+    setError("");
+    try {
+      const updated = await markAllNotificationsRead();
+      const updatedById = new Map(updated.map((item) => [item.id, item]));
+      setNotifications((current) =>
+        current.map((item) => updatedById.get(item.id) || item),
+      );
+      setNotice("通知已全部标记为已读");
+    } catch (err) {
+      setError(err);
+    }
+  }
+
+  async function openNotificationResource(notification) {
+    await markNotificationAsRead(notification);
+    if (notification?.buildId) {
+      const build = builds.find((item) => item.id === notification.buildId) || { id: notification.buildId };
+      setNotificationsOpen(false);
+      await inspectBuild(build, { openDialog: true });
+    }
+  }
+
+  function auditFilterPayload(overrides = {}) {
+    const nextFilters = { ...auditFilters, ...overrides };
+    return Object.fromEntries(
+      Object.entries(nextFilters)
+        .map(([key, value]) => [key, String(value || "").trim()])
+        .filter(([, value]) => value !== ""),
+    );
+  }
+
+  async function loadAuditEvents(options = {}) {
+    if (!can("audit.read").allowed) {
+      setError(can("audit.read").reason);
+      return;
+    }
+    if (!options.quiet) setError("");
+    setAuditLoading(true);
+    try {
+      const events = await listAuditEvents(auditFilterPayload());
+      setAuditEvents(events);
+      if (!options.quiet) setNotice("审计事件已刷新");
+    } catch (err) {
+      setError(err);
+    } finally {
+      setAuditLoading(false);
+    }
+  }
+
+  async function exportCurrentAuditArchive() {
+    if (!can("audit.read").allowed) {
+      setError(can("audit.read").reason);
+      return;
+    }
+    setError("");
+    setAuditExporting(true);
+    try {
+      const archive = await exportAuditArchive(auditFilterPayload());
+      setAuditArchive(archive);
+      downloadText(`audit-archive-${archive.digest || Date.now()}.json`, JSON.stringify(archive, null, 2));
+      setNotice("审计归档已导出");
+    } catch (err) {
+      setError(err);
+    } finally {
+      setAuditExporting(false);
     }
   }
 
@@ -837,6 +1143,7 @@ export default function App() {
         uploads={uploads}
         onCreate={() => setActiveSection("create")}
         onInspect={inspectBuild}
+        authState={authState}
       />
     ),
     create: (
@@ -853,6 +1160,10 @@ export default function App() {
         updateComponentOverride={updateComponentOverride}
         uploadComponent={uploadComponent}
         advancedJsonValidation={advancedJsonValidation}
+        permissions={{
+          create: can("build.create"),
+          upload: can("upload.write"),
+        }}
       />
     ),
     builds: (
@@ -880,6 +1191,8 @@ export default function App() {
         }
         onRetry={(build) => runBuildAction(retryBuild, build, "重试")}
         onInspect={inspectBuild}
+        authState={authState}
+        onDownloadArtifact={(url, filename, policy) => downloadArtifact(url, filename, policy)}
       />
     ),
     products: (
@@ -902,6 +1215,9 @@ export default function App() {
         loadManifestRevisions={loadManifestRevisions}
         restoreManifestRevision={restoreManifestRevision}
         advancedJsonValidation={advancedJsonValidation}
+        permissions={{
+          write: can("manifest.write"),
+        }}
       />
     ),
     overlays: (
@@ -920,6 +1236,9 @@ export default function App() {
         loadOverlay={loadOverlay}
         saveOverlay={saveOverlay}
         savingOverlay={savingOverlay}
+        permissions={{
+          write: can("overlay.write"),
+        }}
       />
     ),
     uploads: (
@@ -929,10 +1248,31 @@ export default function App() {
         setUploadForm={setUploadForm}
         uploading={uploadingStandalone}
         onUpload={uploadStandalone}
+        permissions={{
+          upload: can("upload.write"),
+          downloadRestricted: can("download.restricted"),
+          downloadPlatform: can("download.platform"),
+        }}
+        onDownload={(upload) => downloadArtifact(upload.downloadUrl, upload.fileName || upload.id, upload.downloadPolicy)}
       />
     ),
     runners: (
       <RunnersSection runners={runners} builds={builds} onInspect={inspectBuild} />
+    ),
+    audit: (
+      <AuditCenterSection
+        events={auditEvents}
+        filters={auditFilters}
+        setFilters={setAuditFilters}
+        archive={auditArchive}
+        loading={auditLoading}
+        exporting={auditExporting}
+        permissions={{
+          read: can("audit.read"),
+        }}
+        onRefresh={() => loadAuditEvents()}
+        onExport={exportCurrentAuditArchive}
+      />
     ),
     logs: (
       <LogsAndLockSection
@@ -1052,6 +1392,28 @@ export default function App() {
             {apiEnvironment}
             <span className="toolbar-env-api">{shortApiUrl(API_URL)}</span>
           </div>
+          <Button
+            variant="soft"
+            className="notification-trigger"
+            aria-label={`通知${unreadNotifications.length ? `，${unreadNotifications.length} 条未读` : ""}`}
+            title={unreadNotifications.length ? `${unreadNotifications.length} 条未读通知` : "暂无未读通知"}
+            onClick={() => setNotificationsOpen(true)}
+          >
+            <Bell size={15} />
+            通知
+            {unreadNotifications.length > 0 && (
+              <span className="notification-count">{unreadNotifications.length}</span>
+            )}
+          </Button>
+          <Button
+            variant="soft"
+            className="auth-status-button"
+            title={authState.token ? `当前前端角色：${authRoleLabel}` : "本地免登录；生产开启 AUTH_ENABLED 后请配置 token"}
+            onClick={() => setAuthDialogOpen(true)}
+          >
+            <KeyRound size={15} />
+            {authRoleLabel}
+          </Button>
         </div>
 
         <header className="topbar">
@@ -1084,7 +1446,11 @@ export default function App() {
               {loading ? <Spinner /> : <RefreshCcw size={16} />}
               刷新
             </Button>
-            <Button onClick={() => setActiveSection("create")}>
+            <Button
+              onClick={() => setActiveSection("create")}
+              disabled={!can("build.create").allowed}
+              title={can("build.create").reason || "新建构建"}
+            >
               <Rocket size={16} />
               新建构建
             </Button>
@@ -1159,6 +1525,8 @@ export default function App() {
         build={selectedBuild}
         logs={logs}
         buildLock={buildLock}
+        releaseCheck={releaseCheck}
+        reproducibilityReport={reproducibilityReport}
         onApprove={(build) => runBuildAction(approveBuild, build, "审批通过")}
         onReject={(build) =>
           requestBuildAction(rejectBuild, build, "拒绝", "拒绝后该构建不会进入队列，后续只能重新审批或重新创建。")
@@ -1172,6 +1540,8 @@ export default function App() {
         }
         onRetry={(build) => runBuildAction(retryBuild, build, "重试")}
         busyAction={busyAction}
+        authState={authState}
+        onDownloadArtifact={(url, filename, policy) => downloadArtifact(url, filename, policy)}
       />
       <ConfirmActionDialog
         action={confirmAction}
@@ -1183,11 +1553,29 @@ export default function App() {
           setConfirmAction(null);
         }}
       />
+      <NotificationDialog
+        open={notificationsOpen}
+        onOpenChange={setNotificationsOpen}
+        notifications={notifications}
+        unreadCount={unreadNotifications.length}
+        onMarkRead={markNotificationAsRead}
+        onMarkAllRead={markAllNotifications}
+        onOpenResource={openNotificationResource}
+      />
+      <AuthDialog
+        open={authDialogOpen}
+        onOpenChange={setAuthDialogOpen}
+        authState={authState}
+        onSave={saveAuth}
+        onClear={clearAuth}
+        onOIDCLogin={handleOIDCLogin}
+        oidcEnabled={oidcLoginConfigured()}
+      />
     </div>
   );
 }
 
-function OverviewSection({ dashboard, builds, products, uploads, onCreate, onInspect }) {
+function OverviewSection({ dashboard, builds, products, uploads, onCreate, onInspect, authState }) {
   const recentBuilds = [...builds]
     .sort((a, b) => dateValue(b.updatedAt) - dateValue(a.updatedAt))
     .slice(0, 6);
@@ -1216,7 +1604,11 @@ function OverviewSection({ dashboard, builds, products, uploads, onCreate, onIns
           description="按状态聚合当前构建任务"
           icon={ClipboardList}
           action={
-            <Button onClick={onCreate}>
+            <Button
+              onClick={onCreate}
+              disabled={!authPermission(authState, "build.create").allowed}
+              title={authPermission(authState, "build.create").reason || "创建构建"}
+            >
               <Play size={16} />
               创建构建
             </Button>
@@ -1274,6 +1666,7 @@ function CreateBuildSection({
   updateComponentOverride,
   uploadComponent,
   advancedJsonValidation,
+  permissions,
 }) {
   const releasePrecheck = useMemo(
     () => getReleasePrecheck(form, selectedProduct),
@@ -1291,6 +1684,13 @@ function CreateBuildSection({
   const activeStepIndex = Math.max(0, stepItems.findIndex((item) => item.key === activeStep));
   const goNext = () => setActiveStep(stepItems[Math.min(activeStepIndex + 1, stepItems.length - 1)].key);
   const goBack = () => setActiveStep(stepItems[Math.max(activeStepIndex - 1, 0)].key);
+  const createGateReason = !form.productId
+    ? "请先选择产品"
+    : !advancedJsonValidation.valid
+      ? "请先修复高级 JSON 后再提交构建申请"
+      : !permissions.create.allowed
+        ? permissions.create.reason
+        : "";
 
   return (
     <form className="create-flow" onSubmit={submitBuild}>
@@ -1321,6 +1721,9 @@ function CreateBuildSection({
             高级 JSON 无效：{advancedJsonValidation.errors.join("；")}。请修复后再提交构建申请。
           </Callout.Text>
         </Callout.Root>
+      )}
+      {!permissions.create.allowed && (
+        <PermissionNotice text={permissions.create.reason} />
       )}
 
       <div className="build-step-body">
@@ -1423,6 +1826,7 @@ function CreateBuildSection({
               overridesText={form.componentOverridesText}
               onUpdate={updateComponentOverride}
               onUpload={uploadComponent}
+              permissions={permissions}
             />
           </Panel>
         )}
@@ -1466,8 +1870,8 @@ function CreateBuildSection({
             <Button
               type="submit"
               size="3"
-              disabled={!form.productId || submitting || !advancedJsonValidation.valid}
-              title={!advancedJsonValidation.valid ? "请先修复高级 JSON 后再提交构建申请" : "提交构建申请"}
+              disabled={submitting || Boolean(createGateReason)}
+              title={createGateReason || "提交构建申请"}
             >
               {submitting ? <Spinner /> : <Rocket size={18} />}
               提交构建申请
@@ -1542,6 +1946,174 @@ function AdvancedJsonDialog({ open, onOpenChange, form, setForm, validation }) {
   );
 }
 
+function AuthDialog({ open, onOpenChange, authState, onSave, onClear, onOIDCLogin, oidcEnabled }) {
+  const [draft, setDraft] = useState(authState);
+
+  useEffect(() => {
+    if (open) {
+      setDraft({ token: authState.token || "", role: authState.role || "operator" });
+    }
+  }, [open, authState.token, authState.role]);
+
+  const selectedRole = authRoleOptions.find((item) => item.value === draft.role) || authRoleOptions[1];
+  const canSave = draft.token.trim().length > 0;
+
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Content className="auth-dialog">
+        <Dialog.Title>访问令牌</Dialog.Title>
+        <Dialog.Description>
+          本地开发默认免登录；生产开启 AUTH_ENABLED 后，可以使用 OIDC 登录或填入 bearer token。
+        </Dialog.Description>
+        <Box mt="4">
+          <Field.Group className="auth-form">
+            {oidcEnabled ? (
+              <Field.Root className="field auth-oidc-field">
+                <Field.Label>企业身份登录</Field.Label>
+                <Button type="button" variant="outline" onClick={onOIDCLogin}>
+                  <ShieldCheck size={15} />
+                  使用 OIDC 登录
+                </Button>
+                <Field.Description>跳转到企业身份源，回调后会把 access token 保存到当前浏览器。</Field.Description>
+              </Field.Root>
+            ) : null}
+            <Field.Root className="field">
+              <Field.Label>前端角色</Field.Label>
+              <Select.Root value={draft.role || "operator"} onValueChange={(role) => setDraft({ ...draft, role })}>
+                <Select.Trigger />
+                <Select.Content>
+                  {authRoleOptions.map((role) => (
+                    <Select.Item key={role.value} value={role.value}>
+                      {role.label}
+                    </Select.Item>
+                  ))}
+                </Select.Content>
+              </Select.Root>
+              <Field.Description>{selectedRole.description}</Field.Description>
+            </Field.Root>
+            <Field.Root className="field">
+              <Field.Label htmlFor="auth-token-input">Bearer Token</Field.Label>
+              <TextField.Root
+                id="auth-token-input"
+                type="password"
+                value={draft.token}
+                placeholder="粘贴 AUTH_ADMIN_TOKEN / AUTH_OPERATOR_TOKEN / AUTH_VIEWER_TOKEN"
+                onChange={(event) => setDraft({ ...draft, token: event.target.value })}
+              />
+              <Field.Description>token 只保存在当前浏览器 localStorage，不会写入 Manifest 或构建配置。</Field.Description>
+            </Field.Root>
+          </Field.Group>
+        </Box>
+        <Callout.Root color="amber" variant="soft" className="manifest-gate-note">
+          <Callout.Icon>
+            <AlertCircle size={16} />
+          </Callout.Icon>
+          <Callout.Text>
+            角色用于前端按钮禁用和提示；最终权限仍以后端 token 校验结果为准。
+          </Callout.Text>
+        </Callout.Root>
+        <Flex mt="4" justify="between" align="center" gap="3" wrap="wrap">
+          <Button variant="soft" color="red" disabled={!authState.token} onClick={onClear}>
+            <LogOut size={15} />
+            清除令牌
+          </Button>
+          <Flex gap="2" justify="end">
+            <Dialog.Close>
+              <Button variant="soft">取消</Button>
+            </Dialog.Close>
+            <Button disabled={!canSave} title={canSave ? "保存访问令牌" : "请输入 token"} onClick={() => onSave(draft)}>
+              <KeyRound size={15} />
+              保存
+            </Button>
+          </Flex>
+        </Flex>
+      </Dialog.Content>
+    </Dialog.Root>
+  );
+}
+
+function NotificationDialog({
+  open,
+  onOpenChange,
+  notifications,
+  unreadCount,
+  onMarkRead,
+  onMarkAllRead,
+  onOpenResource,
+}) {
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Content className="notification-dialog">
+        <Dialog.Title>通知中心</Dialog.Title>
+        <Dialog.Description>
+          构建、Preview、Release 和平台治理事件的持久消息。
+        </Dialog.Description>
+        <div className="notification-dialog-toolbar">
+          <Text size="1" color="gray">
+            {unreadCount > 0 ? `${unreadCount} 条未读` : "没有未读通知"}
+          </Text>
+          <Button size="1" variant="soft" disabled={unreadCount === 0} onClick={onMarkAllRead}>
+            <CheckCheck size={14} />
+            全部已读
+          </Button>
+        </div>
+        <div className="notification-list" role="list" aria-label="通知列表">
+          {notifications.length === 0 ? (
+            <div className="empty-state compact">
+              <Text size="2" color="gray">暂无通知</Text>
+            </div>
+          ) : (
+            notifications.map((notification) => (
+              <NotificationItem
+                key={notification.id}
+                notification={notification}
+                onMarkRead={onMarkRead}
+                onOpenResource={onOpenResource}
+              />
+            ))
+          )}
+        </div>
+      </Dialog.Content>
+    </Dialog.Root>
+  );
+}
+
+function NotificationItem({ notification, onMarkRead, onOpenResource }) {
+  const meta = notificationSeverityMeta[notification.severity] || notificationSeverityMeta.info;
+  const unread = !notification.readAt;
+  return (
+    <div className={`notification-item ${unread ? "is-unread" : ""}`} role="listitem">
+      <div className="notification-item-main">
+        <div className="notification-item-header">
+          <span className="notification-unread-dot" aria-hidden="true" />
+          <Text weight="medium">{notification.title || "平台通知"}</Text>
+          <Badge color={meta.color}>{meta.label}</Badge>
+        </div>
+        <Text as="p" size="2" color="gray" className="notification-message">
+          {notification.message || "-"}
+        </Text>
+        <div className="notification-meta">
+          <span title={notification.createdAt || ""}>{formatDate(notification.createdAt)}</span>
+          {notification.productId && <span>{notification.productId}</span>}
+          {notification.buildId && <Code>{shortId(notification.buildId)}</Code>}
+        </div>
+      </div>
+      <div className="notification-actions">
+        {notification.buildId && (
+          <Button size="1" variant="ghost" onClick={() => onOpenResource(notification)}>
+            查看
+          </Button>
+        )}
+        {unread && (
+          <Button size="1" variant="soft" onClick={() => onMarkRead(notification)}>
+            已读
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function JsonValidationNote({ result }) {
   return (
     <Callout.Root color={result.valid ? "gray" : "red"} variant="soft" className="json-validation-note">
@@ -1549,6 +2121,18 @@ function JsonValidationNote({ result }) {
         {result.valid ? <Check size={15} /> : <AlertCircle size={15} />}
       </Callout.Icon>
       <Callout.Text>{result.valid ? "JSON 格式有效。" : result.error}</Callout.Text>
+    </Callout.Root>
+  );
+}
+
+function PermissionNotice({ text }) {
+  if (!text) return null;
+  return (
+    <Callout.Root color="amber" variant="soft" className="permission-note">
+      <Callout.Icon>
+        <ShieldCheck size={16} />
+      </Callout.Icon>
+      <Callout.Text>{text}</Callout.Text>
     </Callout.Root>
   );
 }
@@ -1582,6 +2166,8 @@ function BuildsSection({
   onCancel,
   onRetry,
   onInspect,
+  authState,
+  onDownloadArtifact,
 }) {
   return (
     <Panel
@@ -1632,6 +2218,8 @@ function BuildsSection({
         onCancel={onCancel}
         onRetry={onRetry}
         onInspect={onInspect}
+        authState={authState}
+        onDownloadArtifact={onDownloadArtifact}
       />
     </Panel>
   );
@@ -1773,6 +2361,7 @@ function ProductsSection({
   loadManifestRevisions,
   restoreManifestRevision,
   advancedJsonValidation,
+  permissions,
 }) {
   const [pendingReload, setPendingReload] = useState(false);
   const [pendingProduct, setPendingProduct] = useState(null);
@@ -1798,10 +2387,18 @@ function ProductsSection({
   const manifestDirty = manifestText !== originalManifestText;
   const manifestSaveGateReason = !form.productId
     ? "请先选择产品"
+    : !permissions.write.allowed
+      ? permissions.write.reason
     : !manifestValidation.valid
       ? "请先修复 Manifest 校验错误"
       : "";
-  const manifestDryRunGateReason = manifestSaveGateReason || (!advancedJsonValidation.valid ? "请先修复高级 JSON" : "");
+  const manifestDryRunGateReason = !form.productId
+    ? "请先选择产品"
+    : !manifestValidation.valid
+      ? "请先修复 Manifest 校验错误"
+      : !advancedJsonValidation.valid
+        ? "请先修复高级 JSON"
+        : "";
   const manifestSaveDisabled = Boolean(manifestSaveGateReason);
   const manifestDryRunDisabled = Boolean(manifestDryRunGateReason);
 
@@ -1972,6 +2569,9 @@ function ProductsSection({
             </Callout.Text>
           </Callout.Root>
         )}
+        {!permissions.write.allowed && (
+          <PermissionNotice text={permissions.write.reason} />
+        )}
         {pendingRevision && (
           <Callout.Root color="amber" variant="soft" className="manifest-gate-note">
             <Callout.Icon>
@@ -2033,6 +2633,7 @@ function ProductsSection({
                 loading={loadingManifestRevisions}
                 onRefresh={() => loadManifestRevisions()}
                 onRestore={requestManifestRevisionRestore}
+                restorePermission={permissions.write}
               />
             </Tabs.Content>
             <Tabs.Content value="diff">
@@ -2060,6 +2661,7 @@ function OverlaysSection({
   loadOverlay,
   saveOverlay,
   savingOverlay,
+  permissions,
 }) {
   const [draftName, setDraftName] = useState("");
   const [pendingOverlayAction, setPendingOverlayAction] = useState(null);
@@ -2091,6 +2693,8 @@ function OverlaysSection({
   const currentNameValid = !overlayName || isValidOverlayName(overlayName);
   const overlaySaveGateReason = !overlayName
     ? "请先选择或新建覆盖配置"
+    : !permissions.write.allowed
+      ? permissions.write.reason
     : !currentNameValid
       ? "覆盖名称只能包含字母、数字、点、下划线和中划线"
       : !validation.valid
@@ -2180,6 +2784,9 @@ function OverlaysSection({
   return (
     <div className="products-layout">
       <Panel title="覆盖列表" description="Profile 和客户覆盖会参与构建配置合并" icon={GitCompare}>
+        {!permissions.write.allowed && (
+          <PermissionNotice text={permissions.write.reason} />
+        )}
         <Tabs.Root value={overlayKind} onValueChange={switchKind}>
           <Tabs.List>
             <Tabs.Trigger value="profiles">配置面</Tabs.Trigger>
@@ -2195,9 +2802,11 @@ function OverlaysSection({
               <Button
                 variant="soft"
                 onClick={startNewOverlay}
-                disabled={!draftName.trim() || !nameValidation.valid}
+                disabled={!draftName.trim() || !nameValidation.valid || !permissions.write.allowed}
                 title={
-                  !draftName.trim()
+                  !permissions.write.allowed
+                    ? permissions.write.reason
+                    : !draftName.trim()
                     ? "输入覆盖名称后新建"
                     : !nameValidation.valid
                       ? nameValidation.errors[0]
@@ -2654,12 +3263,14 @@ function ManifestStructuredEditor({ manifest, onChange }) {
                   label="仓库名称"
                   value={component.source?.repository || ""}
                   onChange={(repository) => updateComponent(index, { source: { repository } })}
-                  placeholder="minio"
+                  placeholder="minio 或 gitlab:42"
                 />
                 <LabeledInput
                   label="仓库路径"
                   value={component.source?.path || ""}
                   onChange={(path) => updateComponent(index, { source: { path } })}
+                  placeholder="artifact/app/{{version}}/app.tar.gz"
+                  hint="MinIO/RustFS 支持精确路径和通配符；GitLab 使用精确 package/version/file，Release 需要锁定 sha256。"
                 />
               </Field.Group>
             )}
@@ -2849,7 +3460,7 @@ function ManifestDryRunPanel({ result, running, onRun, disabled, disabledReason 
   );
 }
 
-function ManifestRevisionsPanel({ revisions, loading, onRefresh, onRestore }) {
+function ManifestRevisionsPanel({ revisions, loading, onRefresh, onRestore, restorePermission }) {
   return (
     <div className="section-stack">
       <Flex justify="between" gap="3" align="center" wrap="wrap">
@@ -2883,7 +3494,13 @@ function ManifestRevisionsPanel({ revisions, loading, onRefresh, onRestore }) {
               <Text size="2" color="gray" title={revision.summary || "Manifest 已保存"}>
                 {revision.summary || "Manifest 已保存"}
               </Text>
-              <Button size="1" variant="soft" title={`恢复 Manifest 历史 ${revision.id}`} onClick={() => onRestore(revision)}>
+              <Button
+                size="1"
+                variant="soft"
+                title={restorePermission?.reason || `恢复 Manifest 历史 ${revision.id}`}
+                disabled={!restorePermission?.allowed}
+                onClick={() => onRestore(revision)}
+              >
                 <RotateCcw size={14} />
                 恢复
               </Button>
@@ -2958,10 +3575,13 @@ function isValidOverlayName(name) {
   return overlayNamePattern.test(name);
 }
 
-function UploadsSection({ uploads, uploadForm, setUploadForm, uploading, onUpload }) {
+function UploadsSection({ uploads, uploadForm, setUploadForm, uploading, onUpload, permissions, onDownload }) {
   return (
     <div className="section-stack">
       <Panel title="上传制品" description="上传文件后可在组件来源中选择手动上传记录" icon={Upload}>
+        {!permissions.upload.allowed && (
+          <PermissionNotice text={permissions.upload.reason} />
+        )}
         <div className="upload-policy-grid">
           <FieldSelect
             label="下载策略"
@@ -3005,7 +3625,7 @@ function UploadsSection({ uploads, uploadForm, setUploadForm, uploading, onUploa
             id="standalone-upload-file"
             label={uploading ? "上传中" : "选择文件"}
             description="上传后可在组件来源中复用"
-            disabled={uploading}
+            disabled={uploading || !permissions.upload.allowed}
             onFile={(file) => onUpload(file)}
           />
         </div>
@@ -3036,6 +3656,9 @@ function UploadsSection({ uploads, uploadForm, setUploadForm, uploading, onUploa
               ) : (
                 uploads.map((upload) => {
                   const canDownload = Boolean(upload.downloadUrl) && upload.retentionStatus !== "expired";
+                  const downloadPermission = upload.downloadPolicy === "restricted"
+                    ? permissions.downloadRestricted
+                    : permissions.downloadPlatform;
                   return (
                     <Table.Row key={upload.id}>
                       <Table.Cell>
@@ -3063,10 +3686,19 @@ function UploadsSection({ uploads, uploadForm, setUploadForm, uploading, onUploa
                       </Table.Cell>
                       <Table.Cell title={upload.createdAt}>{formatDate(upload.createdAt)}</Table.Cell>
                       <Table.Cell>
-                        {canDownload ? (
-                          <Link href={upload.downloadUrl} target="_blank">
+                        {canDownload && downloadPermission.allowed ? (
+                          <Button
+                            size="1"
+                            variant="soft"
+                            title={`下载 ${upload.fileName}`}
+                            onClick={() => onDownload(upload)}
+                          >
                             <Download size={14} /> 下载
-                          </Link>
+                          </Button>
+                        ) : canDownload ? (
+                          <Text size="1" color="gray" title={downloadPermission.reason}>
+                            无权限
+                          </Text>
                         ) : (
                           <Text size="1" color="gray">
                             {upload.retentionStatus === "expired" ? "已过期" : "无下载链接"}
@@ -3081,6 +3713,220 @@ function UploadsSection({ uploads, uploadForm, setUploadForm, uploading, onUploa
           </Table.Root>
         </div>
       </Panel>
+    </div>
+  );
+}
+
+function AuditCenterSection({
+  events,
+  filters,
+  setFilters,
+  archive,
+  loading,
+  exporting,
+  permissions,
+  onRefresh,
+  onExport,
+}) {
+  const actors = new Set(events.map((event) => event.actorId).filter(Boolean));
+  const successCount = events.filter((event) => event.status === "success").length;
+  const failureCount = events.filter((event) => event.status && event.status !== "success").length;
+  const updateFilter = (key, value) => setFilters((current) => ({ ...current, [key]: value }));
+  return (
+    <div className="section-stack">
+      <Panel
+        title="审计中心"
+        description="查询独立审计事件，导出带 digest、签名和对象锁证据的归档。"
+        icon={ClipboardList}
+        action={
+          <Flex gap="2" wrap="wrap" justify="end">
+            <Button variant="soft" onClick={onRefresh} disabled={loading || !permissions.read.allowed} title={permissions.read.reason || "刷新审计事件"}>
+              {loading ? <Spinner /> : <RefreshCcw size={14} />}
+              刷新
+            </Button>
+            <Button onClick={onExport} disabled={exporting || !permissions.read.allowed} title={permissions.read.reason || "导出当前筛选归档"}>
+              {exporting ? <Spinner /> : <FileDown size={14} />}
+              导出归档
+            </Button>
+          </Flex>
+        }
+      >
+        {!permissions.read.allowed && <PermissionNotice text={permissions.read.reason} />}
+        <div className="audit-filter-grid">
+          <LabeledInput
+            label="动作"
+            value={filters.action}
+            onChange={(value) => updateFilter("action", value)}
+            placeholder="例如 build.download"
+          />
+          <LabeledInput
+            label="资源类型"
+            value={filters.resourceType}
+            onChange={(value) => updateFilter("resourceType", value)}
+            placeholder="build / upload / audit_archive"
+          />
+          <LabeledInput
+            label="资源 ID"
+            value={filters.resourceId}
+            onChange={(value) => updateFilter("resourceId", value)}
+            placeholder="精确资源 ID"
+          />
+          <LabeledInput
+            label="产品 ID"
+            value={filters.productId}
+            onChange={(value) => updateFilter("productId", value)}
+            placeholder="例如 lsap"
+          />
+          <LabeledInput
+            label="构建 ID"
+            value={filters.buildId}
+            onChange={(value) => updateFilter("buildId", value)}
+            placeholder="build..."
+          />
+          <LabeledInput
+            label="上传 ID"
+            value={filters.uploadId}
+            onChange={(value) => updateFilter("uploadId", value)}
+            placeholder="upload..."
+          />
+          <LabeledInput
+            label="数量上限"
+            type="number"
+            value={filters.limit}
+            onChange={(value) => updateFilter("limit", value)}
+            placeholder="50"
+          />
+        </div>
+        <Flex gap="2" wrap="wrap">
+          <Button size="1" variant="soft" onClick={() => setFilters({
+            action: "",
+            resourceType: "",
+            resourceId: "",
+            productId: "",
+            buildId: "",
+            uploadId: "",
+            limit: "50",
+          })}>
+            清空筛选
+          </Button>
+          <Button size="1" variant="ghost" onClick={() => updateFilter("action", "build.download")}>
+            构建下载
+          </Button>
+          <Button size="1" variant="ghost" onClick={() => updateFilter("action", "audit.archive.export")}>
+            归档导出
+          </Button>
+          <Button size="1" variant="ghost" onClick={() => updateFilter("resourceType", "auth_session")}>
+            登录会话
+          </Button>
+        </Flex>
+      </Panel>
+
+      <div className="audit-summary-grid">
+        <AuditMetric label="当前事件" value={events.length} />
+        <AuditMetric label="成功事件" value={successCount} />
+        <AuditMetric label="异常事件" value={failureCount} />
+        <AuditMetric label="涉及账号" value={actors.size} />
+      </div>
+
+      {archive && <AuditArchiveEvidence archive={archive} />}
+
+      <Panel title="审计事件" description="按时间倒序显示当前筛选结果" icon={ScrollText}>
+        <AuditEventTable events={events} loading={loading} />
+      </Panel>
+    </div>
+  );
+}
+
+function AuditArchiveEvidence({ archive }) {
+  return (
+    <Panel title="最近归档证据" description="当前筛选导出的审计归档摘要" icon={ShieldCheck}>
+      <div className="audit-evidence-grid">
+        <DetailItem label="事件数量" value={archive.eventCount ?? 0} />
+        <DetailItem label="Digest" value={shortHash(archive.digest)} title={archive.digest || ""} mono />
+        <DetailItem label="签名算法" value={archive.signatureAlgorithm || "未启用"} />
+        <DetailItem label="签名 Key" value={archive.signatureKeyId || "-"} />
+        <DetailItem label="归档 URI" value={archive.archiveUri || "未持久化"} title={archive.archiveUri || ""} mono wide />
+        <DetailItem label="对象锁模式" value={archive.archiveRetentionMode || "-"} />
+        <DetailItem label="保留到" value={formatDate(archive.archiveRetainUntil)} title={archive.archiveRetainUntil || ""} />
+        <DetailItem label="Legal Hold" value={archive.archiveLegalHold || "-"} />
+      </div>
+    </Panel>
+  );
+}
+
+function AuditEventTable({ events, loading }) {
+  return (
+    <div className="table-scroll audit-table-scroll">
+      <Table.Root className="audit-table">
+        <Table.Header>
+          <Table.Row>
+            <Table.ColumnHeaderCell>时间</Table.ColumnHeaderCell>
+            <Table.ColumnHeaderCell>动作</Table.ColumnHeaderCell>
+            <Table.ColumnHeaderCell>资源</Table.ColumnHeaderCell>
+            <Table.ColumnHeaderCell>操作者</Table.ColumnHeaderCell>
+            <Table.ColumnHeaderCell>状态</Table.ColumnHeaderCell>
+            <Table.ColumnHeaderCell>链路</Table.ColumnHeaderCell>
+            <Table.ColumnHeaderCell>摘要</Table.ColumnHeaderCell>
+          </Table.Row>
+        </Table.Header>
+        <Table.Body>
+          {events.length === 0 ? (
+            <Table.Row>
+              <Table.Cell colSpan={7}>
+                <Text color="gray">{loading ? "正在加载审计事件" : "暂无审计事件"}</Text>
+              </Table.Cell>
+            </Table.Row>
+          ) : (
+            events.map((event) => (
+              <Table.Row key={event.id}>
+                <Table.Cell title={event.time || ""}>{formatDate(event.time)}</Table.Cell>
+                <Table.Cell>
+                  <Code title={event.action}>{event.action || "-"}</Code>
+                </Table.Cell>
+                <Table.Cell>
+                  <div className="cell-main">
+                    <Text weight="medium" title={auditEventResourceText(event)}>
+                      {auditEventResourceText(event)}
+                    </Text>
+                    <Text size="1" color="gray" title={auditEventLinkText(event)}>
+                      {auditEventLinkText(event)}
+                    </Text>
+                  </div>
+                </Table.Cell>
+                <Table.Cell>
+                  <div className="cell-main">
+                    <Text weight="medium" title={event.actorId || ""}>{event.actorId || "-"}</Text>
+                    <Text size="1" color="gray">{event.actorRole || "-"}</Text>
+                  </div>
+                </Table.Cell>
+                <Table.Cell>
+                  <Badge color={auditEventStatusColor(event.status)} variant="soft">
+                    {event.status || "unknown"}
+                  </Badge>
+                </Table.Cell>
+                <Table.Cell>
+                  <div className="cell-main">
+                    <Code title={event.requestId || ""}>{shortId(event.requestId)}</Code>
+                    <Text size="1" color="gray" title={event.correlationId || ""}>
+                      {shortId(event.correlationId)}
+                    </Text>
+                  </div>
+                </Table.Cell>
+                <Table.Cell>
+                  <Text as="div" size="2" title={event.summary || ""}>
+                    {event.summary || "-"}
+                  </Text>
+                  {event.metadata && Object.keys(event.metadata).length > 0 && (
+                    <Text as="div" size="1" color="gray" title={JSON.stringify(event.metadata)}>
+                      {auditMetadataSummary(event.metadata)}
+                    </Text>
+                  )}
+                </Table.Cell>
+              </Table.Row>
+            ))
+          )}
+        </Table.Body>
+      </Table.Root>
     </div>
   );
 }
@@ -3242,7 +4088,7 @@ function LogsAndLockSection({ build, logs, buildLock, releaseCheck, onRefresh })
   );
 }
 
-function ComponentSourceEditor({ components, uploads, overridesText, onUpdate, onUpload }) {
+function ComponentSourceEditor({ components, uploads, overridesText, onUpdate, onUpload, permissions }) {
   let overrides = {};
   try {
     overrides = JSON.parse(overridesText || "{}");
@@ -3277,6 +4123,9 @@ function ComponentSourceEditor({ components, uploads, overridesText, onUpdate, o
         <AuditMetric label="需确认" value={warningCount} />
         <AuditMetric label="阻塞" value={blockedCount} />
       </div>
+      {!permissions.upload.allowed && (
+        <PermissionNotice text={permissions.upload.reason} />
+      )}
       <div className="table-scroll">
         <Table.Root className="component-source-table">
           <Table.Header>
@@ -3322,6 +4171,8 @@ function ComponentSourceEditor({ components, uploads, overridesText, onUpdate, o
                     <LabeledInput
                       label="仓库路径"
                       value={source.path || ""}
+                      placeholder="artifact/app/{{version}}/app.tar.gz"
+                      hint="GitLab 可用 repository=gitlab:projectId，path=package/{{version}}/file.tar.gz。"
                       onChange={(value) =>
                         onUpdate(component.id, {
                           kind: "artifact-repository",
@@ -3381,6 +4232,7 @@ function ComponentSourceEditor({ components, uploads, overridesText, onUpdate, o
                         description="上传后自动绑定到该组件"
                         ariaLabel={`上传 ${component.id} 组件文件`}
                         compact
+                        disabled={!permissions.upload.allowed}
                         onFile={(file) => onUpload(component.id, file)}
                       />
                     </Field.Group>
@@ -3472,6 +4324,8 @@ function BuildsTable({
   onCancel,
   onRetry,
   onInspect,
+  authState,
+  onDownloadArtifact,
 }) {
   return (
     <>
@@ -3508,6 +4362,7 @@ function BuildsTable({
                 onCancel={onCancel}
                 onRetry={onRetry}
                 onInspect={onInspect}
+                authState={authState}
               />
             </div>
           ))
@@ -3560,13 +4415,20 @@ function BuildsTable({
                   <Table.Cell title={build.updatedAt || ""}>{formatDate(build.updatedAt)}</Table.Cell>
                   <Table.Cell>
                     {build.downloadUrl || build.artifactUri ? (
-                      <Link
-                        href={build.downloadUrl || buildDownloadUrl(build.id)}
-                        target="_blank"
+                      <Button
+                        size="1"
+                        variant="soft"
                         title={build.downloadUrl || build.artifactUri || buildDownloadUrl(build.id)}
+                        onClick={() =>
+                          onDownloadArtifact(
+                            build.downloadUrl || buildDownloadUrl(build.id),
+                            artifactFileName(build),
+                            build.downloadPolicy || "platform",
+                          )
+                        }
                       >
                         <Download size={14} /> 下载
-                      </Link>
+                      </Button>
                     ) : (
                       <Text color="gray">未生成</Text>
                     )}
@@ -3582,6 +4444,7 @@ function BuildsTable({
                       onCancel={onCancel}
                       onRetry={onRetry}
                       onInspect={onInspect}
+                      authState={authState}
                     />
                   </Table.Cell>
                 </Table.Row>
@@ -3661,18 +4524,36 @@ function BuildActions({
   onRetry,
   onInspect,
   showInspect = true,
+  authState,
 }) {
   const releaseReadiness = getReleaseReadiness(build);
   const busyTitle = (label) => (busyAction === `${label}:${build.id}` ? `${label}处理中` : "");
+  const actionState = (label, fallbackTitle) => {
+    const permission = buildActionPermission(label);
+    const result = permission ? authPermission(authState || { token: "", role: "operator" }, permission) : { allowed: true, reason: "" };
+    return {
+      disabled: !result.allowed || busyAction === `${label}:${build.id}`,
+      title: result.reason || busyTitle(label) || fallbackTitle,
+    };
+  };
+  const approveState = actionState("审批通过", `审批通过 ${build.id}`);
+  const rejectState = actionState("拒绝", `拒绝 ${build.id}`);
+  const validateState = actionState("验证 Preview", `验证 Preview ${build.id}`);
+  const publishPermission = actionState(
+    "转 Release",
+    releaseReadiness.ready ? `转 Release ${build.id}` : `Release 门禁阻塞：${releaseReadiness.reason || "发布门禁未通过"}`,
+  );
+  const cancelState = actionState("取消", `取消 ${build.id}`);
+  const retryState = actionState("重试", `重试 ${build.id}`);
   return (
     <Flex gap="2" wrap="wrap">
       {build.status === "pending_approval" && (
         <>
-          <Button size="1" color="gray" variant="soft" title={busyTitle("审批通过") || `审批通过 ${build.id}`} disabled={busyAction === `审批通过:${build.id}`} onClick={() => onApprove(build)}>
+          <Button size="1" color="gray" variant="soft" title={approveState.title} disabled={approveState.disabled} onClick={() => onApprove(build)}>
             <Check size={14} />
             通过
           </Button>
-          <Button size="1" color="red" variant="soft" title={busyTitle("拒绝") || `拒绝 ${build.id}`} disabled={busyAction === `拒绝:${build.id}`} onClick={() => onReject(build)}>
+          <Button size="1" color="red" variant="soft" title={rejectState.title} disabled={rejectState.disabled} onClick={() => onReject(build)}>
             <X size={14} />
             拒绝
           </Button>
@@ -3683,8 +4564,8 @@ function BuildActions({
           size="1"
           color="gray"
           variant="soft"
-          title={busyTitle("验证 Preview") || `验证 Preview ${build.id}`}
-          disabled={busyAction === `验证 Preview:${build.id}`}
+          title={validateState.title}
+          disabled={validateState.disabled}
           onClick={() => onValidate(build)}
         >
           <ShieldCheck size={14} />
@@ -3696,8 +4577,8 @@ function BuildActions({
           <Button
             size="1"
             variant="soft"
-            title={busyTitle("转 Release") || (releaseReadiness.ready ? `转 Release ${build.id}` : `Release 门禁阻塞：${releaseReadiness.reason || "发布门禁未通过"}`)}
-            disabled={!releaseReadiness.ready || busyAction === `转 Release:${build.id}`}
+            title={publishPermission.title}
+            disabled={!releaseReadiness.ready || publishPermission.disabled}
             onClick={() => onPublish(build)}
           >
             <ShieldCheck size={14} />
@@ -3706,13 +4587,13 @@ function BuildActions({
         </Tooltip>
       )}
       {["pending_approval", "queued", "running"].includes(build.status) && (
-        <Button size="1" color="amber" variant="soft" title={busyTitle("取消") || `取消 ${build.id}`} disabled={busyAction === `取消:${build.id}`} onClick={() => onCancel(build)}>
+        <Button size="1" color="amber" variant="soft" title={cancelState.title} disabled={cancelState.disabled} onClick={() => onCancel(build)}>
           <Ban size={14} />
           取消
         </Button>
       )}
       {["failed", "canceled"].includes(build.status) && (
-        <Button size="1" color="purple" variant="soft" title={busyTitle("重试") || `重试 ${build.id}`} disabled={busyAction === `重试:${build.id}`} onClick={() => onRetry(build)}>
+        <Button size="1" color="purple" variant="soft" title={retryState.title} disabled={retryState.disabled} onClick={() => onRetry(build)}>
           <RotateCcw size={14} />
           重试
         </Button>
@@ -3734,6 +4615,7 @@ function BuildDetailDialog({
   logs,
   buildLock,
   releaseCheck,
+  reproducibilityReport,
   onApprove,
   onReject,
   onValidate,
@@ -3741,6 +4623,7 @@ function BuildDetailDialog({
   onCancel,
   onRetry,
   busyAction,
+  authState,
 }) {
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -3756,7 +4639,13 @@ function BuildDetailDialog({
         </Dialog.Description>
         <Box mt="4">
           {build ? (
-            <BuildInspectTabs build={build} logs={logs} buildLock={buildLock} releaseCheck={releaseCheck} />
+            <BuildInspectTabs
+              build={build}
+              logs={logs}
+              buildLock={buildLock}
+              releaseCheck={releaseCheck}
+              reproducibilityReport={reproducibilityReport}
+            />
           ) : (
             <EmptyState icon={ClipboardList} title="暂无构建" text="请选择一个构建记录。" />
           )}
@@ -3774,6 +4663,7 @@ function BuildDetailDialog({
               onRetry={onRetry}
               onInspect={() => {}}
               showInspect={false}
+              authState={authState}
             />
           ) : (
             <span />
@@ -3787,7 +4677,7 @@ function BuildDetailDialog({
   );
 }
 
-function BuildInspectTabs({ build, logs, buildLock, releaseCheck }) {
+function BuildInspectTabs({ build, logs, buildLock, releaseCheck, reproducibilityReport }) {
   return (
     <Tabs.Root defaultValue="summary">
       <Tabs.List>
@@ -3796,6 +4686,7 @@ function BuildInspectTabs({ build, logs, buildLock, releaseCheck }) {
         <Tabs.Trigger value="components">组件锁定</Tabs.Trigger>
         <Tabs.Trigger value="workloads">工作负载</Tabs.Trigger>
         <Tabs.Trigger value="release">发布门禁</Tabs.Trigger>
+        <Tabs.Trigger value="reproducibility">可复现报告</Tabs.Trigger>
         <Tabs.Trigger value="audit">审计</Tabs.Trigger>
         <Tabs.Trigger value="lock">构建锁</Tabs.Trigger>
         <Tabs.Trigger value="logs">日志</Tabs.Trigger>
@@ -3831,6 +4722,9 @@ function BuildInspectTabs({ build, logs, buildLock, releaseCheck }) {
         </Tabs.Content>
         <Tabs.Content value="release">
           <ReleaseGatePanel build={build} releaseCheck={releaseCheck} />
+        </Tabs.Content>
+        <Tabs.Content value="reproducibility">
+          <ReproducibilityReportPanel report={reproducibilityReport} build={build} />
         </Tabs.Content>
         <Tabs.Content value="audit">
           <BuildLockAudit build={build} buildLock={buildLock || build.buildLock} />
@@ -4099,6 +4993,131 @@ function releaseCheckSummaryText(item, reason) {
   const statusText = item.status === "blocked" ? "阻塞" : "通过";
   const idText = item.id ? `（${item.id}）` : "";
   return `${item.title || "门禁检查"}${idText}：${statusText}，${reason || "检查通过"}`;
+}
+
+function ReproducibilityReportPanel({ report, build }) {
+  const [exportingEvidence, setExportingEvidence] = useState(false);
+  const [releaseEvidence, setReleaseEvidence] = useState(null);
+  if (!report) {
+    return <EmptyState icon={FileJson} title="暂无可复现报告" text="打开构建详情时会从后端生成报告。" />;
+  }
+  const sourceArtifacts = report.sourceArtifacts || [];
+  const output = report.outputArtifact || {};
+  const lifecycle = report.lifecycle || {};
+  const reportText = JSON.stringify(report, null, 2);
+  async function exportReleaseEvidence() {
+    setExportingEvidence(true);
+    try {
+      const archive = await exportBuildReleaseEvidenceArchive(report.buildId || build.id);
+      setReleaseEvidence(archive);
+      downloadText(`release-evidence-${report.buildId || build.id}.json`, JSON.stringify(archive, null, 2));
+    } finally {
+      setExportingEvidence(false);
+    }
+  }
+  return (
+    <div className="section-stack">
+      <Flex justify="between" align="center" gap="3" wrap="wrap">
+        <Flex gap="2" align="center" wrap="wrap">
+          <Badge color={report.reproducible ? "green" : "amber"} variant="soft">
+            {report.reproducible ? "可复现" : "仍有阻塞"}
+          </Badge>
+          <Text size="1" color="gray">
+            生成时间 {formatDate(report.generatedAt)}
+          </Text>
+        </Flex>
+        <Flex gap="2" align="center" wrap="wrap">
+          <Button
+            variant="soft"
+            title={`下载 ${report.buildId || build.id} 的可复现报告 JSON`}
+            onClick={() => downloadText(`reproducibility-${report.buildId || build.id}.json`, reportText)}
+          >
+            <FileDown size={16} />
+            下载报告
+          </Button>
+          <Button
+            variant="solid"
+            title="导出包含 digest、签名和归档 URI 的 Release 证据"
+            onClick={exportReleaseEvidence}
+            disabled={exportingEvidence}
+          >
+            {exportingEvidence ? <Spinner size="1" /> : <ShieldCheck size={16} />}
+            签名证据
+          </Button>
+        </Flex>
+      </Flex>
+      {releaseEvidence && (
+        <Panel title="签名证据归档" description="用于 Release 留存、验真和对象锁核对" icon={ShieldCheck}>
+          <div className="detail-grid">
+            <DetailItem label="Digest" value={releaseEvidence.digest || "-"} mono wide />
+            <DetailItem label="签名算法" value={releaseEvidence.signatureAlgorithm || "-"} />
+            <DetailItem label="签名 Key" value={releaseEvidence.signatureKeyId || "-"} />
+            <DetailItem label="归档 URI" value={releaseEvidence.archiveUri || "-"} mono wide />
+            <DetailItem label="对象锁模式" value={releaseEvidence.archiveRetentionMode || "-"} />
+            <DetailItem label="Legal Hold" value={releaseEvidence.archiveLegalHold || "-"} />
+          </div>
+        </Panel>
+      )}
+      <div className="audit-grid">
+        <AuditMetric label="Release 门禁" value={report.releaseCheck?.releaseReady ? "通过" : "阻塞"} />
+        <AuditMetric label="阻塞项" value={report.releaseCheck?.blockingCount || 0} />
+        <AuditMetric label="源组件" value={sourceArtifacts.length} />
+        <AuditMetric label="最终制品" value={output.sha256 ? "已记录 SHA" : output.uri ? "有 URI" : "缺失"} />
+      </div>
+      <Panel title="最终制品证据" description="用于发布归档和下载权限核对" icon={PackageCheck}>
+        <div className="detail-grid">
+          <DetailItem label="制品 URI" value={output.uri || "-"} mono wide />
+          <DetailItem label="下载地址" value={output.downloadUrl || "-"} mono wide />
+          <DetailItem label="Upload ID" value={output.uploadId || "-"} mono />
+          <DetailItem label="SHA256" value={output.sha256 || "-"} mono wide />
+          <DetailItem label="大小" value={output.size ? `${output.size} bytes` : "-"} />
+          <DetailItem label="下载策略" value={downloadPolicyText(output.downloadPolicy)} />
+          <DetailItem label="保留状态" value={output.retentionStatus || "-"} />
+        </div>
+      </Panel>
+      <Panel title="源组件锁定" description="Release 需要固定版本、精确 URI 和可追溯 SHA" icon={Boxes}>
+        <div className="table-scroll">
+          <Table.Root className="component-lock-table">
+            <Table.Header>
+              <Table.Row>
+                <Table.ColumnHeaderCell>组件</Table.ColumnHeaderCell>
+                <Table.ColumnHeaderCell>来源</Table.ColumnHeaderCell>
+                <Table.ColumnHeaderCell>版本</Table.ColumnHeaderCell>
+                <Table.ColumnHeaderCell>URI</Table.ColumnHeaderCell>
+                <Table.ColumnHeaderCell>SHA256</Table.ColumnHeaderCell>
+              </Table.Row>
+            </Table.Header>
+            <Table.Body>
+              {sourceArtifacts.map((artifact) => (
+                <Table.Row key={artifact.componentId}>
+                  <Table.Cell>
+                    <Flex gap="2" align="center" wrap="wrap">
+                      <Text>{artifact.componentId}</Text>
+                      {artifact.required && <Badge variant="soft" color="red">必需</Badge>}
+                    </Flex>
+                  </Table.Cell>
+                  <Table.Cell>{sourceKindLabels[artifact.sourceKind] || artifact.sourceKind || "-"}</Table.Cell>
+                  <Table.Cell>{artifact.version || "-"}</Table.Cell>
+                  <Table.Cell><Code title={artifact.uri || "-"}>{artifact.uri || "-"}</Code></Table.Cell>
+                  <Table.Cell><Code title={artifact.sha256 || "-"}>{shortHash(artifact.sha256)}</Code></Table.Cell>
+                </Table.Row>
+              ))}
+            </Table.Body>
+          </Table.Root>
+        </div>
+      </Panel>
+      <Panel title="执行时间线" description="构建、验证和发布节点" icon={History}>
+        <div className="detail-grid">
+          <DetailItem label="创建时间" value={formatDate(lifecycle.createdAt)} />
+          <DetailItem label="审批时间" value={lifecycle.approvedAt ? formatDate(lifecycle.approvedAt) : "-"} />
+          <DetailItem label="验证时间" value={lifecycle.validatedAt ? formatDate(lifecycle.validatedAt) : "-"} />
+          <DetailItem label="发布时间" value={lifecycle.publishedAt ? formatDate(lifecycle.publishedAt) : "-"} />
+          <DetailItem label="Runner" value={report.runner?.runnerId || "-"} />
+          <DetailItem label="Nomad 任务" value={report.runner?.nomadJobId || "-"} mono />
+        </div>
+      </Panel>
+    </div>
+  );
 }
 
 function BuildLockAudit({ build, buildLock }) {
@@ -4559,7 +5578,7 @@ function FieldSelect({ label, value, onValueChange, options }) {
   );
 }
 
-function LabeledInput({ label, value, onChange, type = "text", placeholder }) {
+function LabeledInput({ label, value, onChange, type = "text", placeholder, hint }) {
   const id = useId();
   return (
     <Field.Root className="field">
@@ -4573,6 +5592,7 @@ function LabeledInput({ label, value, onChange, type = "text", placeholder }) {
         placeholder={placeholder}
         onChange={(event) => onChange(event.target.value)}
       />
+      {hint ? <Text size="1" color="gray">{hint}</Text> : null}
     </Field.Root>
   );
 }
@@ -4638,6 +5658,33 @@ function downloadPolicyText(policy) {
     public: "公开",
   };
   return labels[policy] || policy || "平台内";
+}
+
+function auditEventStatusColor(status) {
+  if (status === "success") return "gray";
+  if (status === "failed" || status === "error") return "red";
+  if (status === "warning") return "orange";
+  return "blue";
+}
+
+function auditEventResourceText(event) {
+  const type = event.resourceType || "resource";
+  const id = event.resourceId || "-";
+  return `${type}:${shortId(id)}`;
+}
+
+function auditEventLinkText(event) {
+  return [
+    event.productId ? `product ${event.productId}` : "",
+    event.buildId ? `build ${shortId(event.buildId)}` : "",
+    event.uploadId ? `upload ${shortId(event.uploadId)}` : "",
+  ].filter(Boolean).join(" / ") || "-";
+}
+
+function auditMetadataSummary(metadata = {}) {
+  const entries = Object.entries(metadata).filter(([, value]) => value !== "");
+  if (!entries.length) return "";
+  return entries.slice(0, 3).map(([key, value]) => `${key}=${value}`).join(" / ");
 }
 
 function retentionText(upload) {

@@ -1,11 +1,14 @@
 package api
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"sort"
 	"strconv"
@@ -13,65 +16,155 @@ import (
 	"time"
 
 	"packaging-platform/backend/internal/apperr"
-	"packaging-platform/backend/internal/artifact"
 	"packaging-platform/backend/internal/domain"
 	manifestvalidator "packaging-platform/backend/internal/manifest"
 	"packaging-platform/backend/internal/nomad"
 	"packaging-platform/backend/internal/resolver"
+	"packaging-platform/backend/internal/secret"
 	"packaging-platform/backend/internal/store"
 )
 
 type Server struct {
-	store     store.Store
-	scheduler nomad.Scheduler
-	artifacts *artifact.Store
+	store      store.Store
+	scheduler  nomad.Scheduler
+	artifacts  artifactBackend
+	auth       AuthConfig
+	auditKey   string
+	auditKeyID string
 }
 
-func NewServer(store store.Store, scheduler nomad.Scheduler, artifacts *artifact.Store) Server {
+type resolveDependencies struct {
+	store     store.Store
+	artifacts artifactResolver
+}
+
+type artifactResolver interface {
+	ResolveArtifactSource(source domain.ComponentSource, version string) (domain.ArtifactResolution, bool, error)
+}
+
+type artifactBackend interface {
+	artifactResolver
+	SaveUpload(file multipart.File, header *multipart.FileHeader) (domain.UploadRecord, error)
+	ServeUpload(w http.ResponseWriter, r *http.Request, id string) error
+	AuditArchiveURI(digest string) (string, error)
+	AuditArchiveStoragePolicy(now time.Time) domain.AuditArchiveStoragePolicy
+	SaveAuditArchive(digest string, payload []byte, policy domain.AuditArchiveStoragePolicy) (string, error)
+	ReleaseEvidenceArchiveURI(digest string) (string, error)
+	SaveReleaseEvidenceArchive(digest string, payload []byte, policy domain.AuditArchiveStoragePolicy) (string, error)
+}
+
+type ServerOptions struct {
+	Auth                  AuthConfig
+	AuditArchiveHMACKey   string
+	AuditArchiveHMACKeyID string
+}
+
+func NewServer(store store.Store, scheduler nomad.Scheduler, artifacts artifactBackend) Server {
 	return Server{store: store, scheduler: scheduler, artifacts: artifacts}
+}
+
+func NewServerWithAuth(store store.Store, scheduler nomad.Scheduler, artifacts artifactBackend, auth AuthConfig) Server {
+	return Server{store: store, scheduler: scheduler, artifacts: artifacts, auth: auth}
+}
+
+func NewServerWithOptions(store store.Store, scheduler nomad.Scheduler, artifacts artifactBackend, options ServerOptions) Server {
+	return Server{
+		store:      store,
+		scheduler:  scheduler,
+		artifacts:  artifacts,
+		auth:       options.Auth,
+		auditKey:   options.AuditArchiveHMACKey,
+		auditKeyID: options.AuditArchiveHMACKeyID,
+	}
+}
+
+func (s Server) resolveDependencies() resolveDependencies {
+	return resolveDependencies{store: s.store, artifacts: s.artifacts}
+}
+
+func (d resolveDependencies) ReadOverlay(productID string, kind string, name string) (map[string]any, error) {
+	return d.store.ReadOverlay(productID, kind, name)
+}
+
+func (d resolveDependencies) ReadUpload(id string) (domain.UploadRecord, error) {
+	return d.store.ReadUpload(id)
+}
+
+func (d resolveDependencies) ResolveArtifactSource(source domain.ComponentSource, version string) (domain.ArtifactResolution, bool, error) {
+	if d.artifacts == nil {
+		return domain.ArtifactResolution{}, false, nil
+	}
+	return d.artifacts.ResolveArtifactSource(source, version)
 }
 
 func (s Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", s.health)
+	mux.HandleFunc("POST /api/auth/oidc/token", s.oidcTokenBroker)
+	mux.HandleFunc("POST /api/auth/logout", s.withAuth(s.logout, roleViewer, roleOperator, roleAdmin))
+	mux.HandleFunc("GET /metrics", s.withAuth(s.metrics, roleViewer, roleOperator, roleAdmin))
 	mux.HandleFunc("GET /api/products", s.listProducts)
 	mux.HandleFunc("GET /api/products/{id}", s.getProduct)
 	mux.HandleFunc("GET /api/products/{id}/manifest", s.getProductManifest)
-	mux.HandleFunc("PUT /api/products/{id}/manifest", s.updateProductManifest)
+	mux.HandleFunc("PUT /api/products/{id}/manifest", s.withAuth(s.updateProductManifest, roleOperator, roleAdmin))
 	mux.HandleFunc("POST /api/products/{id}/manifest/dry-run", s.dryRunProductManifest)
 	mux.HandleFunc("GET /api/products/{id}/manifest/revisions", s.listProductManifestRevisions)
-	mux.HandleFunc("POST /api/products/{id}/manifest/revisions/{revision}/restore", s.restoreProductManifestRevision)
+	mux.HandleFunc("POST /api/products/{id}/manifest/revisions/{revision}/restore", s.withAuth(s.restoreProductManifestRevision, roleOperator, roleAdmin))
 	mux.HandleFunc("GET /api/products/{id}/overlays/{kind}", s.listProductOverlays)
 	mux.HandleFunc("GET /api/products/{id}/overlays/{kind}/{name}", s.getProductOverlay)
-	mux.HandleFunc("PUT /api/products/{id}/overlays/{kind}/{name}", s.updateProductOverlay)
+	mux.HandleFunc("PUT /api/products/{id}/overlays/{kind}/{name}", s.withAuth(s.updateProductOverlay, roleOperator, roleAdmin))
 	mux.HandleFunc("GET /api/products/{id}/versions", s.getProductVersions)
 	mux.HandleFunc("GET /api/builds", s.listBuilds)
-	mux.HandleFunc("POST /api/builds", s.createBuild)
+	mux.HandleFunc("POST /api/builds", s.withAuth(s.createBuild, roleOperator, roleAdmin))
 	mux.HandleFunc("GET /api/builds/{id}", s.getBuild)
 	mux.HandleFunc("GET /api/builds/{id}/lock", s.getBuildLock)
 	mux.HandleFunc("GET /api/builds/{id}/release-check", s.getBuildReleaseCheck)
+	mux.HandleFunc("GET /api/builds/{id}/reproducibility-report", s.getBuildReproducibilityReport)
+	mux.HandleFunc("GET /api/builds/{id}/release-evidence/archive", s.withAuth(s.exportBuildReleaseEvidenceArchive, roleViewer, roleOperator, roleAdmin))
 	mux.HandleFunc("GET /api/builds/{id}/download", s.downloadBuild)
-	mux.HandleFunc("POST /api/builds/{id}/approve", s.approveBuild)
-	mux.HandleFunc("POST /api/builds/{id}/reject", s.rejectBuild)
-	mux.HandleFunc("POST /api/builds/{id}/validate-preview", s.validatePreviewBuild)
-	mux.HandleFunc("POST /api/builds/{id}/publish", s.publishBuild)
-	mux.HandleFunc("POST /api/builds/{id}/retry", s.retryBuild)
-	mux.HandleFunc("POST /api/builds/{id}/cancel", s.cancelBuild)
+	mux.HandleFunc("POST /api/builds/{id}/approve", s.withAuth(s.approveBuild, roleOperator, roleAdmin))
+	mux.HandleFunc("POST /api/builds/{id}/reject", s.withAuth(s.rejectBuild, roleOperator, roleAdmin))
+	mux.HandleFunc("POST /api/builds/{id}/validate-preview", s.withAuth(s.validatePreviewBuild, roleOperator, roleAdmin))
+	mux.HandleFunc("POST /api/builds/{id}/publish", s.withAuth(s.publishBuild, roleAdmin))
+	mux.HandleFunc("POST /api/builds/{id}/retry", s.withAuth(s.retryBuild, roleOperator, roleAdmin))
+	mux.HandleFunc("POST /api/builds/{id}/cancel", s.withAuth(s.cancelBuild, roleOperator, roleAdmin))
 	mux.HandleFunc("GET /api/builds/{id}/logs", s.getBuildLogs)
 	mux.HandleFunc("GET /api/builds/{id}/logs/stream", s.streamBuildLogs)
-	mux.HandleFunc("POST /api/builds/{id}/logs", s.appendBuildLog)
-	mux.HandleFunc("POST /api/runner/tasks/claim", s.claimRunnerTask)
-	mux.HandleFunc("POST /api/runner/tasks/{id}/complete", s.completeRunnerTask)
-	mux.HandleFunc("POST /api/runner/heartbeat", s.runnerHeartbeat)
+	mux.HandleFunc("POST /api/builds/{id}/logs", s.withAuth(s.appendBuildLog, roleRunner, roleAdmin))
+	mux.HandleFunc("POST /api/runner/tasks/claim", s.withAuth(s.claimRunnerTask, roleRunner, roleAdmin))
+	mux.HandleFunc("POST /api/runner/tasks/{id}/complete", s.withAuth(s.completeRunnerTask, roleRunner, roleAdmin))
+	mux.HandleFunc("POST /api/runner/heartbeat", s.withAuth(s.runnerHeartbeat, roleRunner, roleAdmin))
 	mux.HandleFunc("GET /api/runners", s.listRunners)
-	mux.HandleFunc("POST /api/uploads", s.uploadArtifact)
+	mux.HandleFunc("POST /api/uploads", s.withAuth(s.uploadArtifact, roleOperator, roleAdmin))
 	mux.HandleFunc("GET /api/uploads", s.listUploads)
 	mux.HandleFunc("GET /api/uploads/{id}/download", s.downloadUpload)
+	mux.HandleFunc("GET /api/audit-events", s.withAuth(s.listAuditEvents, roleViewer, roleOperator, roleAdmin))
+	mux.HandleFunc("GET /api/audit-events/archive", s.withAuth(s.exportAuditArchive, roleViewer, roleOperator, roleAdmin))
+	mux.HandleFunc("GET /api/notifications", s.withAuth(s.listNotifications, roleViewer, roleOperator, roleAdmin))
+	mux.HandleFunc("POST /api/notifications/{id}/read", s.withAuth(s.markNotificationRead, roleViewer, roleOperator, roleAdmin))
+	mux.HandleFunc("POST /api/notifications/read-all", s.withAuth(s.markAllNotificationsRead, roleViewer, roleOperator, roleAdmin))
 	return requestContext(cors(mux))
 }
 
 func (s Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s Server) metrics(w http.ResponseWriter, r *http.Request) {
+	builds, err := s.store.ListBuilds()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	uploads, err := s.store.ListUploads()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	body := buildMetrics(builds, uploads, time.Now().UTC())
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(body))
 }
 
 func (s Server) listProducts(w http.ResponseWriter, r *http.Request) {
@@ -116,6 +209,14 @@ func (s Server) updateProductManifest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	s.recordAudit(r, domain.AuditEvent{
+		Action:       "manifest.update",
+		ResourceType: "product",
+		ResourceID:   product.ID,
+		ProductID:    product.ID,
+		Status:       "success",
+		Summary:      "product manifest updated",
+	})
 	writeJSON(w, http.StatusOK, product)
 }
 
@@ -152,7 +253,7 @@ func (s Server) dryRunProductManifest(w http.ResponseWriter, r *http.Request) {
 		ConfigOverrides:    request.ConfigOverrides,
 		ComponentOverrides: request.ComponentOverrides,
 	}
-	config, components, lock, err := resolver.ResolveBuild(product, buildRequest, "dry-run", s.store)
+	config, components, lock, err := resolver.ResolveBuild(product, buildRequest, "dry-run", s.resolveDependencies())
 	if err != nil {
 		writeJSON(w, http.StatusOK, domain.ManifestDryRunResult{Valid: false, Errors: []string{err.Error()}})
 		return
@@ -181,6 +282,17 @@ func (s Server) restoreProductManifestRevision(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	s.recordAudit(r, domain.AuditEvent{
+		Action:       "manifest.restore",
+		ResourceType: "product",
+		ResourceID:   product.ID,
+		ProductID:    product.ID,
+		Status:       "success",
+		Summary:      "product manifest revision restored",
+		Metadata: map[string]string{
+			"revision": r.PathValue("revision"),
+		},
+	})
 	writeJSON(w, http.StatusOK, product)
 }
 
@@ -217,6 +329,18 @@ func (s Server) updateProductOverlay(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	s.recordAudit(r, domain.AuditEvent{
+		Action:       "overlay.update",
+		ResourceType: "overlay",
+		ResourceID:   r.PathValue("id") + "/" + record.Kind + "/" + record.Name,
+		ProductID:    r.PathValue("id"),
+		Status:       "success",
+		Summary:      "product overlay updated",
+		Metadata: map[string]string{
+			"kind": record.Kind,
+			"name": record.Name,
+		},
+	})
 	writeJSON(w, http.StatusOK, record)
 }
 
@@ -257,7 +381,29 @@ func (s Server) downloadBuild(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
+	var linkedUpload domain.UploadRecord
+	if uploadID := uploadIDFromDownloadURL(build.DownloadURL); uploadID != "" {
+		linkedUpload, err = s.store.ReadUpload(uploadID)
+		if err != nil {
+			writeError(w, http.StatusNotFound, err)
+			return
+		}
+		now := time.Now().UTC()
+		linkedUpload = normalizeUploadRecord(linkedUpload, now)
+		if uploadRetentionStatus(linkedUpload, now) == "expired" {
+			writeAPIError(w, http.StatusGone, "ARTIFACT_EXPIRED", "", nil)
+			return
+		}
+		if !s.authorizeUploadDownload(w, r, linkedUpload) {
+			return
+		}
+	} else if s.auth.Enabled {
+		if _, ok := s.requireAuth(w, r, roleViewer, roleOperator, roleAdmin); !ok {
+			return
+		}
+	}
 	if build.DownloadURL != "" {
+		s.recordBuildDownloadAudit(r, build, linkedUpload)
 		http.Redirect(w, r, build.DownloadURL, http.StatusFound)
 		return
 	}
@@ -265,7 +411,28 @@ func (s Server) downloadBuild(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusNotFound, "BUILD_ARTIFACT_NOT_AVAILABLE", "", nil)
 		return
 	}
+	s.recordBuildDownloadAudit(r, build, linkedUpload)
 	writeJSON(w, http.StatusOK, map[string]string{"artifactUri": build.ArtifactURI})
+}
+
+func (s Server) recordBuildDownloadAudit(r *http.Request, build domain.Build, linkedUpload domain.UploadRecord) {
+	metadata := map[string]string{
+		"artifactUri":  build.ArtifactURI,
+		"downloadUrl":  build.DownloadURL,
+		"uploadPolicy": linkedUpload.DownloadPolicy,
+		"retention":    linkedUpload.RetentionStatus,
+	}
+	s.recordAudit(r, domain.AuditEvent{
+		Action:       "build.download",
+		ResourceType: "build",
+		ResourceID:   build.ID,
+		BuildID:      build.ID,
+		ProductID:    firstNonEmpty(build.ProductID, linkedUpload.Metadata["productId"]),
+		UploadID:     linkedUpload.ID,
+		Status:       "success",
+		Summary:      "build artifact download requested",
+		Metadata:     metadata,
+	})
 }
 
 func (s Server) createBuild(w http.ResponseWriter, r *http.Request) {
@@ -301,12 +468,9 @@ func (s Server) createBuild(w http.ResponseWriter, r *http.Request) {
 		Variables:      request.Variables,
 		CreatedAt:      now,
 		UpdatedAt:      now,
-		Logs: []domain.BuildLog{{
-			Time:    now,
-			Source:  "system",
-			Message: "build request created and waiting for approval",
-		}},
+		Logs:           []domain.BuildLog{logEntryForRequest(r, "system", "build request created and waiting for approval")},
 	}
+	build.Logs[0].Time = now
 	if build.Profile == "" && len(product.Profiles) > 0 {
 		build.Profile = product.Profiles[0]
 	}
@@ -324,7 +488,7 @@ func (s Server) createBuild(w http.ResponseWriter, r *http.Request) {
 	request.Version = build.Version
 	request.ReleaseChannel = build.ReleaseChannel
 
-	finalConfig, components, lock, err := resolver.ResolveBuild(product, request, build.ID, s.store)
+	finalConfig, components, lock, err := resolver.ResolveBuild(product, request, build.ID, s.resolveDependencies())
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -333,12 +497,27 @@ func (s Server) createBuild(w http.ResponseWriter, r *http.Request) {
 	build.Components = components
 	build.BuildLock = lock
 	build.Workloads = lock.Workloads
-	build.Logs = append(build.Logs, logEntry("resolver", "final config and component lock generated"))
+	build.Logs = append(build.Logs, logEntryForRequest(r, "resolver", "final config and component lock generated"))
 
 	if err := s.store.SaveBuild(build); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	s.recordAudit(r, domain.AuditEvent{
+		Action:       "build.create",
+		ResourceType: "build",
+		ResourceID:   build.ID,
+		BuildID:      build.ID,
+		ProductID:    build.ProductID,
+		Status:       "success",
+		Summary:      "build request created",
+		Metadata: map[string]string{
+			"target":         build.Target,
+			"profile":        build.Profile,
+			"version":        build.Version,
+			"releaseChannel": build.ReleaseChannel,
+		},
+	})
 
 	writeJSON(w, http.StatusAccepted, withReleaseCheckSummary(build))
 }
@@ -361,6 +540,73 @@ func (s Server) getBuildReleaseCheck(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, buildReleaseCheck(build))
 }
 
+func (s Server) getBuildReproducibilityReport(w http.ResponseWriter, r *http.Request) {
+	build, err := s.store.ReadBuild(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.reproducibilityReport(build, time.Now().UTC()))
+}
+
+func (s Server) exportBuildReleaseEvidenceArchive(w http.ResponseWriter, r *http.Request) {
+	build, err := s.store.ReadBuild(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	generatedAt := time.Now().UTC()
+	report := s.reproducibilityReport(build, generatedAt)
+	archive, err := buildReleaseEvidenceArchive(report, s.auditKey, s.auditKeyID, generatedAt)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if s.artifacts != nil {
+		archiveURI, err := s.artifacts.ReleaseEvidenceArchiveURI(archive.Digest)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		storedAt := time.Now().UTC()
+		policy := s.artifacts.AuditArchiveStoragePolicy(storedAt)
+		archive.ArchiveURI = archiveURI
+		archive.ArchiveStoredAt = &storedAt
+		archive.ArchiveRetentionMode = policy.RetentionMode
+		archive.ArchiveRetainUntil = policy.RetainUntil
+		archive.ArchiveLegalHold = policy.LegalHold
+		payload, err := json.Marshal(archive)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if _, err := s.artifacts.SaveReleaseEvidenceArchive(archive.Digest, payload, policy); err != nil {
+			s.recordStorageNotification("release_evidence_archive", build.ID, build.ProductID, "Release 证据归档存储失败", "Release 可复现证据无法写入制品存储，需要检查本地磁盘或对象存储。", err)
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	s.recordAudit(r, domain.AuditEvent{
+		Action:       "release.evidence.archive.export",
+		ResourceType: "release_evidence",
+		ResourceID:   archive.Digest,
+		BuildID:      build.ID,
+		ProductID:    build.ProductID,
+		Status:       "success",
+		Summary:      "release evidence archive exported",
+		Metadata: map[string]string{
+			"digest":          archive.Digest,
+			"digestAlgorithm": archive.DigestAlgorithm,
+			"archiveUri":      archive.ArchiveURI,
+			"retentionMode":   archive.ArchiveRetentionMode,
+			"legalHold":       archive.ArchiveLegalHold,
+			"reproducible":    strconv.FormatBool(archive.Reproducible),
+		},
+	})
+	w.Header().Set("Content-Disposition", `attachment; filename="packaging-release-evidence.json"`)
+	writeJSON(w, http.StatusOK, archive)
+}
+
 func (s Server) approveBuild(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	current, err := s.store.ReadBuild(id)
@@ -378,21 +624,29 @@ func (s Server) approveBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	secretRefs := secret.SecretRefs(current)
 	jobID, schedulerLog, err := s.scheduler.Submit(current, product)
 	if err != nil {
-		_, _ = s.store.UpdateBuild(id, func(build *domain.Build) error {
+		s.recordSecretResolutionAudit(r, current, secretRefs, "approve", "failed")
+		failedBuild, _ := s.store.UpdateBuild(id, func(build *domain.Build) error {
 			build.Status = domain.BuildFailed
 			build.Error = err.Error()
 			build.SchedulerLog = schedulerLog
 			build.UpdatedAt = time.Now().UTC()
-			build.Logs = append(build.Logs, logEntry("system", "approval failed: "+err.Error()))
+			build.Logs = append(build.Logs, logEntryForRequest(r, "system", "approval failed: "+err.Error()))
 			return nil
 		})
+		if failedBuild.ID != "" {
+			s.recordBuildNotification("build.scheduler_failed", "critical", "构建调度失败",
+				buildNotificationMessage(failedBuild, "审批通过后提交 Runner 调度失败，需要检查调度器或 Runner 配置。"),
+				failedBuild, map[string]string{"error": err.Error()})
+		}
 		writeAPIErrorWithCause(w, http.StatusBadGateway, "SCHEDULER_SUBMIT_FAILED", "", []domain.APIErrorDetail{
 			{Message: "scheduler failed to submit build"},
 		}, err)
 		return
 	}
+	s.recordSecretResolutionAudit(r, current, secretRefs, "approve", "success")
 
 	now := time.Now().UTC()
 	updated, err := s.store.UpdateBuild(id, func(build *domain.Build) error {
@@ -401,13 +655,26 @@ func (s Server) approveBuild(w http.ResponseWriter, r *http.Request) {
 		build.SchedulerLog = schedulerLog
 		build.ApprovedAt = &now
 		build.UpdatedAt = now
-		build.Logs = append(build.Logs, logEntry("system", "approved and queued for runner"))
+		build.Logs = append(build.Logs, logEntryForRequest(r, "system", "approved and queued for runner"))
 		return nil
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	s.recordAudit(r, domain.AuditEvent{
+		Action:       "build.approve",
+		ResourceType: "build",
+		ResourceID:   updated.ID,
+		BuildID:      updated.ID,
+		ProductID:    updated.ProductID,
+		Status:       "success",
+		Summary:      "build approved and queued",
+		Metadata: map[string]string{
+			"nomadJobId": updated.NomadJobID,
+			"target":     updated.Target,
+		},
+	})
 	writeJSON(w, http.StatusOK, withReleaseCheckSummary(updated))
 }
 
@@ -418,13 +685,22 @@ func (s Server) rejectBuild(w http.ResponseWriter, r *http.Request) {
 		}
 		build.Status = domain.BuildRejected
 		build.UpdatedAt = time.Now().UTC()
-		build.Logs = append(build.Logs, logEntry("system", "build rejected"))
+		build.Logs = append(build.Logs, logEntryForRequest(r, "system", "build rejected"))
 		return nil
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	s.recordAudit(r, domain.AuditEvent{
+		Action:       "build.reject",
+		ResourceType: "build",
+		ResourceID:   updated.ID,
+		BuildID:      updated.ID,
+		ProductID:    updated.ProductID,
+		Status:       "success",
+		Summary:      "build rejected",
+	})
 	writeJSON(w, http.StatusOK, withReleaseCheckSummary(updated))
 }
 
@@ -442,13 +718,25 @@ func (s Server) validatePreviewBuild(w http.ResponseWriter, r *http.Request) {
 		build.ReleaseChannel = "preview"
 		build.ValidatedAt = &now
 		build.UpdatedAt = now
-		build.Logs = append(build.Logs, logEntry("system", "preview artifact validated"))
+		build.Logs = append(build.Logs, logEntryForRequest(r, "system", "preview artifact validated"))
 		return nil
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	s.recordAudit(r, domain.AuditEvent{
+		Action:       "build.validate_preview",
+		ResourceType: "build",
+		ResourceID:   updated.ID,
+		BuildID:      updated.ID,
+		ProductID:    updated.ProductID,
+		Status:       "success",
+		Summary:      "preview artifact validated",
+	})
+	s.recordBuildNotification("build.preview_validated", "info", "Preview 已验证",
+		buildNotificationMessage(updated, "该构建已通过 Preview 验证，可以进入 Release 门禁检查。"),
+		updated, nil)
 	writeJSON(w, http.StatusOK, withReleaseCheckSummary(updated))
 }
 
@@ -480,13 +768,29 @@ func (s Server) publishBuild(w http.ResponseWriter, r *http.Request) {
 		build.ReleaseChannel = "release"
 		build.PublishedAt = &now
 		build.UpdatedAt = now
-		build.Logs = append(build.Logs, logEntry("system", "validated preview promoted to release"))
+		build.Logs = append(build.Logs, logEntryForRequest(r, "system", "validated preview promoted to release"))
 		return nil
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	s.recordAudit(r, domain.AuditEvent{
+		Action:       "build.publish",
+		ResourceType: "build",
+		ResourceID:   updated.ID,
+		BuildID:      updated.ID,
+		ProductID:    updated.ProductID,
+		Status:       "success",
+		Summary:      "validated preview promoted to release",
+		Metadata: map[string]string{
+			"artifactUri": updated.ArtifactURI,
+			"downloadUrl": updated.DownloadURL,
+		},
+	})
+	s.recordBuildNotification("build.published", "success", "Release 已发布",
+		buildNotificationMessage(updated, "验证通过的 Preview 已提升为 Release。"),
+		updated, map[string]string{"artifactUri": updated.ArtifactURI, "downloadUrl": updated.DownloadURL})
 	writeJSON(w, http.StatusOK, withReleaseCheckSummary(updated))
 }
 
@@ -506,13 +810,16 @@ func (s Server) retryBuild(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
+	secretRefs := secret.SecretRefs(current)
 	jobID, schedulerLog, err := s.scheduler.Submit(current, product)
 	if err != nil {
+		s.recordSecretResolutionAudit(r, current, secretRefs, "retry", "failed")
 		writeAPIErrorWithCause(w, http.StatusBadGateway, "SCHEDULER_SUBMIT_FAILED", "", []domain.APIErrorDetail{
 			{Message: "scheduler failed to submit build"},
 		}, err)
 		return
 	}
+	s.recordSecretResolutionAudit(r, current, secretRefs, "retry", "success")
 	updated, err := s.store.UpdateBuild(id, func(build *domain.Build) error {
 		build.Status = domain.BuildQueued
 		build.Error = ""
@@ -520,13 +827,22 @@ func (s Server) retryBuild(w http.ResponseWriter, r *http.Request) {
 		build.NomadJobID = jobID
 		build.SchedulerLog = schedulerLog
 		build.UpdatedAt = time.Now().UTC()
-		build.Logs = append(build.Logs, logEntry("system", "build queued for retry"))
+		build.Logs = append(build.Logs, logEntryForRequest(r, "system", "build queued for retry"))
 		return nil
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	s.recordAudit(r, domain.AuditEvent{
+		Action:       "build.retry",
+		ResourceType: "build",
+		ResourceID:   updated.ID,
+		BuildID:      updated.ID,
+		ProductID:    updated.ProductID,
+		Status:       "success",
+		Summary:      "build queued for retry",
+	})
 	writeJSON(w, http.StatusOK, withReleaseCheckSummary(updated))
 }
 
@@ -544,11 +860,32 @@ func (s Server) cancelBuild(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	updated, err := s.store.CancelBuild(r.PathValue("id"))
+	now := time.Now().UTC()
+	updated, err := s.store.UpdateBuild(r.PathValue("id"), func(build *domain.Build) error {
+		switch build.Status {
+		case domain.BuildQueued, domain.BuildRunning, domain.BuildPendingApproval:
+			build.Status = domain.BuildCanceled
+			build.CanceledAt = &now
+			build.UpdatedAt = now
+			build.Logs = appendBuildLogForRequest(build.Logs, r, "system", "build canceled")
+			return nil
+		default:
+			return buildStateConflict("only pending, queued, or running builds can be canceled")
+		}
+	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	s.recordAudit(r, domain.AuditEvent{
+		Action:       "build.cancel",
+		ResourceType: "build",
+		ResourceID:   updated.ID,
+		BuildID:      updated.ID,
+		ProductID:    updated.ProductID,
+		Status:       "success",
+		Summary:      "build canceled",
+	})
 	writeJSON(w, http.StatusOK, withReleaseCheckSummary(updated))
 }
 
@@ -571,7 +908,7 @@ func (s Server) appendBuildLog(w http.ResponseWriter, r *http.Request) {
 		request.Source = "runner"
 	}
 	updated, err := s.store.UpdateBuild(r.PathValue("id"), func(build *domain.Build) error {
-		build.Logs = appendBuildLog(build.Logs, request.Source, request.Message)
+		build.Logs = appendBuildLogForRequest(build.Logs, r, request.Source, request.Message)
 		build.UpdatedAt = time.Now().UTC()
 		return nil
 	})
@@ -649,7 +986,8 @@ func (s Server) claimRunnerTask(w http.ResponseWriter, r *http.Request) {
 		writeErrorText(w, http.StatusBadRequest, "runnerId is required")
 		return
 	}
-	build, ok, err := s.store.ClaimBuild(request.Target, request.RunnerID)
+	requestID, correlationID := requestIDs(r)
+	build, ok, err := s.store.ClaimBuild(request.Target, request.RunnerID, requestID, correlationID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -682,15 +1020,25 @@ func (s Server) completeRunnerTask(w http.ResponseWriter, r *http.Request) {
 		build.Error = request.Error
 		build.UpdatedAt = time.Now().UTC()
 		if status == domain.BuildSucceeded {
-			build.Logs = append(build.Logs, logEntry("runner", "build completed successfully"))
+			build.Logs = append(build.Logs, logEntryForRequest(r, "runner", "build completed successfully"))
 		} else {
-			build.Logs = append(build.Logs, logEntry("runner", "build failed: "+request.Error))
+			build.Logs = append(build.Logs, logEntryForRequest(r, "runner", "build failed: "+request.Error))
 		}
 		return nil
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
+	}
+	if updated.Status == domain.BuildSucceeded {
+		s.recordBuildNotification("build.preview_ready", "info", "Preview 已生成",
+			buildNotificationMessage(updated, "Runner 已生成 Preview 制品，等待人工验证。"),
+			updated, map[string]string{"artifactUri": updated.ArtifactURI, "downloadUrl": updated.DownloadURL})
+	}
+	if updated.Status == domain.BuildFailed {
+		s.recordBuildNotification("build.failed", "critical", "构建失败",
+			buildNotificationMessage(updated, firstNonEmpty(updated.Error, "Runner 报告构建失败。")),
+			updated, map[string]string{"error": updated.Error})
 	}
 	writeJSON(w, http.StatusOK, withReleaseCheckSummary(updated))
 }
@@ -712,7 +1060,7 @@ func (s Server) runnerHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if request.BuildID != "" {
 		_, err := s.store.UpdateBuild(request.BuildID, func(build *domain.Build) error {
 			build.UpdatedAt = time.Now().UTC()
-			build.Logs = appendBuildLog(build.Logs, request.RunnerID, message)
+			build.Logs = appendBuildLogForRequest(build.Logs, r, request.RunnerID, message)
 			return nil
 		})
 		if err != nil {
@@ -745,6 +1093,203 @@ func (s Server) listUploads(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, records)
 }
 
+func (s Server) listAuditEvents(w http.ResponseWriter, r *http.Request) {
+	events, err := s.store.ListAuditEvents(auditEventFilterFromRequest(r))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, events)
+}
+
+func (s Server) exportAuditArchive(w http.ResponseWriter, r *http.Request) {
+	filter := auditEventFilterFromRequest(r)
+	events, err := s.store.ListAuditEvents(filter)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	archive, err := buildAuditArchive(filter, events, s.auditKey, s.auditKeyID, time.Now().UTC())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if s.artifacts != nil {
+		archiveURI, err := s.artifacts.AuditArchiveURI(archive.Digest)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		storedAt := time.Now().UTC()
+		policy := s.artifacts.AuditArchiveStoragePolicy(storedAt)
+		archive.ArchiveURI = archiveURI
+		archive.ArchiveStoredAt = &storedAt
+		archive.ArchiveRetentionMode = policy.RetentionMode
+		archive.ArchiveRetainUntil = policy.RetainUntil
+		archive.ArchiveLegalHold = policy.LegalHold
+		payload, err := json.Marshal(archive)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if _, err := s.artifacts.SaveAuditArchive(archive.Digest, payload, policy); err != nil {
+			s.recordStorageNotification("audit_archive", "", "", "审计归档存储失败", "审计归档无法写入制品存储，需要检查本地磁盘或对象存储。", err)
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	s.recordAudit(r, domain.AuditEvent{
+		Action:       "audit.archive.export",
+		ResourceType: "audit_archive",
+		ResourceID:   archive.Digest,
+		Status:       "success",
+		Summary:      "audit archive exported",
+		Metadata: map[string]string{
+			"digest":          archive.Digest,
+			"eventCount":      strconv.Itoa(archive.EventCount),
+			"digestAlgorithm": archive.DigestAlgorithm,
+			"archiveUri":      archive.ArchiveURI,
+			"retentionMode":   archive.ArchiveRetentionMode,
+			"legalHold":       archive.ArchiveLegalHold,
+		},
+	})
+	w.Header().Set("Content-Disposition", `attachment; filename="packaging-audit-archive.json"`)
+	writeJSON(w, http.StatusOK, archive)
+}
+
+func auditEventFilterFromRequest(r *http.Request) domain.AuditEventFilter {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	return domain.AuditEventFilter{
+		ResourceType: r.URL.Query().Get("resourceType"),
+		ResourceID:   r.URL.Query().Get("resourceId"),
+		BuildID:      r.URL.Query().Get("buildId"),
+		ProductID:    r.URL.Query().Get("productId"),
+		UploadID:     r.URL.Query().Get("uploadId"),
+		Action:       r.URL.Query().Get("action"),
+		Limit:        limit,
+	}
+}
+
+func buildAuditArchive(filter domain.AuditEventFilter, events []domain.AuditEvent, hmacKey string, hmacKeyID string, generatedAt time.Time) (domain.AuditArchive, error) {
+	payload := struct {
+		SchemaVersion string                  `json:"schemaVersion"`
+		GeneratedAt   time.Time               `json:"generatedAt"`
+		EventCount    int                     `json:"eventCount"`
+		Filter        domain.AuditEventFilter `json:"filter"`
+		Events        []domain.AuditEvent     `json:"events"`
+	}{
+		SchemaVersion: "packaging.audit.archive/v1",
+		GeneratedAt:   generatedAt,
+		EventCount:    len(events),
+		Filter:        filter,
+		Events:        events,
+	}
+	canonical, err := json.Marshal(payload)
+	if err != nil {
+		return domain.AuditArchive{}, err
+	}
+	sum := sha256.Sum256(canonical)
+	digest := hex.EncodeToString(sum[:])
+	archive := domain.AuditArchive{
+		SchemaVersion:   payload.SchemaVersion,
+		GeneratedAt:     payload.GeneratedAt,
+		EventCount:      payload.EventCount,
+		Filter:          payload.Filter,
+		Events:          payload.Events,
+		DigestAlgorithm: "sha256",
+		Digest:          digest,
+	}
+	if hmacKey != "" {
+		mac := hmac.New(sha256.New, []byte(hmacKey))
+		_, _ = mac.Write(canonical)
+		archive.SignatureAlgorithm = "hmac-sha256"
+		archive.SignatureKeyID = strings.TrimSpace(hmacKeyID)
+		archive.Signature = hex.EncodeToString(mac.Sum(nil))
+	}
+	return archive, nil
+}
+
+func buildReleaseEvidenceArchive(report domain.ReproducibilityReport, hmacKey string, hmacKeyID string, generatedAt time.Time) (domain.ReleaseEvidenceArchive, error) {
+	payload := struct {
+		SchemaVersion string                       `json:"schemaVersion"`
+		GeneratedAt   time.Time                    `json:"generatedAt"`
+		BuildID       string                       `json:"buildId"`
+		ProductID     string                       `json:"productId"`
+		Reproducible  bool                         `json:"reproducible"`
+		Report        domain.ReproducibilityReport `json:"report"`
+	}{
+		SchemaVersion: "packaging.release.evidence/v1",
+		GeneratedAt:   generatedAt,
+		BuildID:       report.BuildID,
+		ProductID:     report.ProductID,
+		Reproducible:  report.Reproducible,
+		Report:        report,
+	}
+	canonical, err := json.Marshal(payload)
+	if err != nil {
+		return domain.ReleaseEvidenceArchive{}, err
+	}
+	sum := sha256.Sum256(canonical)
+	digest := hex.EncodeToString(sum[:])
+	archive := domain.ReleaseEvidenceArchive{
+		SchemaVersion:   payload.SchemaVersion,
+		GeneratedAt:     payload.GeneratedAt,
+		BuildID:         payload.BuildID,
+		ProductID:       payload.ProductID,
+		Reproducible:    payload.Reproducible,
+		Report:          payload.Report,
+		DigestAlgorithm: "sha256",
+		Digest:          digest,
+	}
+	if hmacKey != "" {
+		mac := hmac.New(sha256.New, []byte(hmacKey))
+		_, _ = mac.Write(canonical)
+		archive.SignatureAlgorithm = "hmac-sha256"
+		archive.SignatureKeyID = strings.TrimSpace(hmacKeyID)
+		archive.Signature = hex.EncodeToString(mac.Sum(nil))
+	}
+	return archive, nil
+}
+
+func (s Server) listNotifications(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	notifications, err := s.store.ListNotifications(domain.NotificationFilter{
+		Type:         r.URL.Query().Get("type"),
+		Severity:     r.URL.Query().Get("severity"),
+		ResourceType: r.URL.Query().Get("resourceType"),
+		ResourceID:   r.URL.Query().Get("resourceId"),
+		BuildID:      r.URL.Query().Get("buildId"),
+		ProductID:    r.URL.Query().Get("productId"),
+		UploadID:     r.URL.Query().Get("uploadId"),
+		RunnerID:     r.URL.Query().Get("runnerId"),
+		ReadStatus:   normalizedReadStatus(r.URL.Query().Get("read")),
+		Limit:        limit,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, notifications)
+}
+
+func (s Server) markNotificationRead(w http.ResponseWriter, r *http.Request) {
+	notification, err := s.store.MarkNotificationRead(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, notification)
+}
+
+func (s Server) markAllNotificationsRead(w http.ResponseWriter, r *http.Request) {
+	notifications, err := s.store.MarkAllNotificationsRead()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, notifications)
+}
+
 func (s Server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(512 << 20); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -757,8 +1302,15 @@ func (s Server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
+	if s.artifacts == nil {
+		err := errors.New("artifact store is not configured")
+		s.recordStorageNotification("upload", "", "", "制品存储未配置", "上传制品前需要配置可用的制品存储。", err)
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	record, err := s.artifacts.SaveUpload(file, header)
 	if err != nil {
+		s.recordStorageNotification("upload", "", "", "制品上传失败", "制品无法写入存储，需要检查本地磁盘或对象存储。", err)
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -767,6 +1319,20 @@ func (s Server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	s.recordAudit(r, domain.AuditEvent{
+		Action:       "upload.create",
+		ResourceType: "upload",
+		ResourceID:   record.ID,
+		UploadID:     record.ID,
+		ProductID:    record.Metadata["productId"],
+		Status:       "success",
+		Summary:      "artifact uploaded",
+		Metadata: map[string]string{
+			"fileName":       record.FileName,
+			"sha256":         record.SHA256,
+			"downloadPolicy": record.DownloadPolicy,
+		},
+	})
 	writeJSON(w, http.StatusCreated, record)
 }
 
@@ -782,9 +1348,213 @@ func (s Server) downloadUpload(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusGone, "ARTIFACT_EXPIRED", "", nil)
 		return
 	}
+	if !s.authorizeUploadDownload(w, r, record) {
+		return
+	}
+	if s.artifacts == nil {
+		err := errors.New("artifact store is not configured")
+		s.recordStorageNotification("download", r.PathValue("id"), record.Metadata["productId"], "制品存储未配置", "下载制品前需要配置可用的制品存储。", err)
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	s.recordAudit(r, domain.AuditEvent{
+		Action:       "upload.download",
+		ResourceType: "upload",
+		ResourceID:   record.ID,
+		UploadID:     record.ID,
+		ProductID:    record.Metadata["productId"],
+		Status:       "success",
+		Summary:      "artifact downloaded",
+		Metadata: map[string]string{
+			"fileName":       record.FileName,
+			"downloadPolicy": record.DownloadPolicy,
+			"retention":      record.RetentionStatus,
+		},
+	})
 	if err := s.artifacts.ServeUpload(w, r, r.PathValue("id")); err != nil {
+		s.recordStorageNotification("download", r.PathValue("id"), record.Metadata["productId"], "制品下载失败", "制品无法从存储读取，需要检查本地磁盘或对象存储。", err)
 		writeError(w, http.StatusNotFound, err)
 	}
+}
+
+func (s Server) authorizeUploadDownload(w http.ResponseWriter, r *http.Request, record domain.UploadRecord) bool {
+	if !s.auth.Enabled {
+		return true
+	}
+	switch normalizedDownloadPolicy(record.DownloadPolicy) {
+	case "public":
+		return true
+	case "restricted":
+		_, ok := s.requireAuth(w, r, roleOperator, roleAdmin)
+		return ok
+	default:
+		_, ok := s.requireAuth(w, r, roleViewer, roleOperator, roleAdmin)
+		return ok
+	}
+}
+
+func (s Server) recordAudit(r *http.Request, event domain.AuditEvent) {
+	if s.store == nil {
+		return
+	}
+	if event.ID == "" {
+		event.ID = "aud_" + randomID()
+	}
+	if event.Time.IsZero() {
+		event.Time = time.Now().UTC()
+	}
+	principal := s.auditPrincipal(r)
+	if event.ActorID == "" {
+		event.ActorID = principal.ID
+	}
+	if event.ActorRole == "" {
+		event.ActorRole = principal.Role
+	}
+	if event.Status == "" {
+		event.Status = "success"
+	}
+	if event.RequestID == "" {
+		event.RequestID = r.Header.Get("X-Request-Id")
+	}
+	if event.CorrelationID == "" {
+		event.CorrelationID = r.Header.Get("X-Correlation-Id")
+	}
+	if event.Metadata == nil {
+		event.Metadata = map[string]string{}
+	}
+	if err := s.store.SaveAuditEvent(event); err != nil {
+		slog.Warn("audit event write failed",
+			"error", err,
+			"action", event.Action,
+			"resource_type", event.ResourceType,
+			"resource_id", event.ResourceID,
+			"request_id", event.RequestID,
+			"correlation_id", event.CorrelationID,
+		)
+	}
+}
+
+func (s Server) recordSecretResolutionAudit(r *http.Request, build domain.Build, refs []string, stage string, status string) {
+	if len(refs) == 0 {
+		return
+	}
+	s.recordAudit(r, domain.AuditEvent{
+		Action:       "secret.resolve",
+		ResourceType: "secret_resolution",
+		ResourceID:   build.ID,
+		BuildID:      build.ID,
+		ProductID:    build.ProductID,
+		Status:       status,
+		Summary:      "build secret references resolved for runner submission",
+		Metadata: map[string]string{
+			"secretCount": strconv.Itoa(len(refs)),
+			"secretRefs":  strings.Join(refs, ","),
+			"stage":       stage,
+			"target":      build.Target,
+		},
+	})
+}
+
+func (s Server) recordBuildNotification(notificationType string, severity string, title string, message string, build domain.Build, metadata map[string]string) {
+	notification := domain.Notification{
+		ID:           "ntf_" + randomID(),
+		CreatedAt:    time.Now().UTC(),
+		Type:         notificationType,
+		Severity:     severity,
+		Title:        title,
+		Message:      message,
+		ResourceType: "build",
+		ResourceID:   build.ID,
+		ProductID:    build.ProductID,
+		BuildID:      build.ID,
+		ActionURL:    "/builds/" + build.ID,
+		Metadata: map[string]string{
+			"target":         build.Target,
+			"profile":        build.Profile,
+			"version":        build.Version,
+			"releaseChannel": build.ReleaseChannel,
+			"status":         build.Status,
+		},
+	}
+	for key, value := range metadata {
+		if value != "" {
+			notification.Metadata[key] = value
+		}
+	}
+	if err := s.store.SaveNotification(notification); err != nil {
+		slog.Warn("notification write failed",
+			"error", err,
+			"type", notification.Type,
+			"severity", notification.Severity,
+			"resource_type", notification.ResourceType,
+			"resource_id", notification.ResourceID,
+		)
+	}
+}
+
+func (s Server) recordStorageNotification(operation string, resourceID string, productID string, title string, message string, cause error) {
+	notification := domain.Notification{
+		ID:           "ntf_" + randomID(),
+		CreatedAt:    time.Now().UTC(),
+		Type:         "storage.unavailable",
+		Severity:     "critical",
+		Title:        title,
+		Message:      message,
+		ResourceType: "artifact_store",
+		ResourceID:   resourceID,
+		ProductID:    productID,
+		UploadID:     resourceID,
+		ActionURL:    "/uploads",
+		Metadata: map[string]string{
+			"operation": operation,
+			"error":     cause.Error(),
+		},
+	}
+	if err := s.store.SaveNotification(notification); err != nil {
+		slog.Warn("storage notification write failed",
+			"error", err,
+			"operation", operation,
+			"resource_id", resourceID,
+		)
+	}
+}
+
+func buildNotificationMessage(build domain.Build, suffix string) string {
+	parts := []string{build.ProductID, build.Target, build.Profile, build.Version}
+	compact := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if strings.TrimSpace(part) != "" {
+			compact = append(compact, part)
+		}
+	}
+	if len(compact) == 0 {
+		return suffix
+	}
+	return strings.Join(compact, " / ") + "：" + suffix
+}
+
+func normalizedReadStatus(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "read", "true":
+		return "read"
+	case "unread", "false":
+		return "unread"
+	default:
+		return ""
+	}
+}
+
+func (s Server) auditPrincipal(r *http.Request) authPrincipal {
+	if principal, ok := r.Context().Value(authPrincipalContextKey{}).(authPrincipal); ok && principal.ID != "" {
+		return principal
+	}
+	if !s.auth.Enabled {
+		return authPrincipal{ID: "system", Role: roleAdmin}
+	}
+	if principal, ok := s.authenticate(r); ok {
+		return principal
+	}
+	return authPrincipal{ID: "anonymous", Role: ""}
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
@@ -928,6 +1698,24 @@ type errorSpec struct {
 }
 
 var errorSpecs = map[string]errorSpec{
+	"AUTH_REQUIRED": {
+		Code:          "AUTH_REQUIRED",
+		MessageKey:    "errors.auth.required",
+		Message:       "authentication is required",
+		Severity:      "error",
+		Category:      "security",
+		UserActionKey: "actions.signIn",
+		UserAction:    "sign in before continuing",
+	},
+	"AUTH_FORBIDDEN": {
+		Code:          "AUTH_FORBIDDEN",
+		MessageKey:    "errors.auth.forbidden",
+		Message:       "permission denied",
+		Severity:      "warning",
+		Category:      "security",
+		UserActionKey: "actions.requestPermission",
+		UserAction:    "request the required permission before continuing",
+	},
 	"VALIDATION_INVALID_JSON": {
 		Code:       "VALIDATION_INVALID_JSON",
 		MessageKey: "errors.validation.invalidJson",
@@ -1179,6 +1967,10 @@ func errorDetails(messages []string) []domain.APIErrorDetail {
 
 func defaultErrorCode(status int) string {
 	switch status {
+	case http.StatusUnauthorized:
+		return "AUTH_REQUIRED"
+	case http.StatusForbidden:
+		return "AUTH_FORBIDDEN"
 	case http.StatusBadRequest:
 		return "VALIDATION_INVALID_REQUEST"
 	case http.StatusNotFound:
@@ -1213,6 +2005,9 @@ func errorCategory(status int, code string) string {
 	if strings.HasPrefix(code, "BUILD_") {
 		return "business"
 	}
+	if strings.HasPrefix(code, "AUTH_") || status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return "security"
+	}
 	if status >= 500 || status == http.StatusBadGateway || status == http.StatusServiceUnavailable {
 		return "system"
 	}
@@ -1241,6 +2036,7 @@ func errorUserAction(code string) string {
 }
 
 func applyUploadMetadata(record domain.UploadRecord, r *http.Request) domain.UploadRecord {
+	record.RequestID, record.CorrelationID = requestIDs(r)
 	record.DownloadPolicy = normalizedDownloadPolicy(firstNonEmpty(r.FormValue("downloadPolicy"), record.DownloadPolicy, "platform"))
 	record.RetentionDays = parseRetentionDays(r.FormValue("retentionDays"), record.RetentionDays)
 	if record.RetentionDays == 0 {
@@ -1412,6 +2208,353 @@ func runnerAvailability(status domain.RunnerStatus, now time.Time) string {
 	return "online"
 }
 
+func buildMetrics(builds []domain.Build, uploads []domain.UploadRecord, now time.Time) string {
+	builder := &strings.Builder{}
+	writeMetricHelp(builder, "packaging_builds_total", "Build count by status, target, and release channel.")
+	writeMetricType(builder, "packaging_builds_total", "gauge")
+	buildCounts := map[string]int{}
+	for _, build := range builds {
+		key := metricKey(
+			metricLabel{"status", firstNonEmpty(build.Status, "unknown")},
+			metricLabel{"target", firstNonEmpty(build.Target, "unknown")},
+			metricLabel{"release_channel", firstNonEmpty(build.ReleaseChannel, "unknown")},
+		)
+		buildCounts[key]++
+	}
+	writeMetricIntMap(builder, "packaging_builds_total", buildCounts)
+
+	writeMetricHelp(builder, "packaging_release_gate_blockers_total", "Blocked release gate checks by stage.")
+	writeMetricType(builder, "packaging_release_gate_blockers_total", "gauge")
+	gateBlockers := map[string]int{}
+	releaseReady := 0
+	previewReady := 0
+	for _, build := range builds {
+		check := buildReleaseCheck(build)
+		if check.PreviewReady {
+			previewReady++
+		}
+		if check.ReleaseReady {
+			releaseReady++
+		}
+		for _, item := range check.Checks {
+			if item.Status == "blocked" {
+				gateBlockers[metricKey(metricLabel{"stage", firstNonEmpty(item.Stage, "unknown")})]++
+			}
+		}
+	}
+	writeMetricIntMap(builder, "packaging_release_gate_blockers_total", gateBlockers)
+	writeMetricHelp(builder, "packaging_preview_ready_builds_total", "Builds currently satisfying preview validation gates.")
+	writeMetricType(builder, "packaging_preview_ready_builds_total", "gauge")
+	writeMetricInt(builder, "packaging_preview_ready_builds_total", nil, previewReady)
+	writeMetricHelp(builder, "packaging_release_ready_builds_total", "Builds currently satisfying release gates.")
+	writeMetricType(builder, "packaging_release_ready_builds_total", "gauge")
+	writeMetricInt(builder, "packaging_release_ready_builds_total", nil, releaseReady)
+
+	writeMetricHelp(builder, "packaging_uploads_total", "Upload count by retention status and download policy.")
+	writeMetricType(builder, "packaging_uploads_total", "gauge")
+	uploadCounts := map[string]int{}
+	uploadBytes := map[string]int64{}
+	for _, upload := range uploads {
+		upload = normalizeUploadRecord(upload, now)
+		key := metricKey(
+			metricLabel{"retention_status", firstNonEmpty(upload.RetentionStatus, "unknown")},
+			metricLabel{"download_policy", normalizedDownloadPolicy(upload.DownloadPolicy)},
+		)
+		uploadCounts[key]++
+		uploadBytes[key] += upload.Size
+	}
+	writeMetricIntMap(builder, "packaging_uploads_total", uploadCounts)
+	writeMetricHelp(builder, "packaging_upload_bytes_total", "Total uploaded artifact bytes by retention status and download policy.")
+	writeMetricType(builder, "packaging_upload_bytes_total", "gauge")
+	writeMetricInt64Map(builder, "packaging_upload_bytes_total", uploadBytes)
+
+	writeMetricHelp(builder, "packaging_runners_total", "Runner count by availability status and target.")
+	writeMetricType(builder, "packaging_runners_total", "gauge")
+	runners := runnerStatuses(builds, now)
+	runnerCounts := map[string]int{}
+	for _, runner := range runners {
+		key := metricKey(
+			metricLabel{"status", firstNonEmpty(runner.Status, "unknown")},
+			metricLabel{"target", firstNonEmpty(runner.Target, "unknown")},
+		)
+		runnerCounts[key]++
+	}
+	writeMetricIntMap(builder, "packaging_runners_total", runnerCounts)
+	writeMetricHelp(builder, "packaging_runner_running_builds", "Running build count by runner.")
+	writeMetricType(builder, "packaging_runner_running_builds", "gauge")
+	writeMetricHelp(builder, "packaging_runner_last_heartbeat_age_seconds", "Seconds since runner last heartbeat or log.")
+	writeMetricType(builder, "packaging_runner_last_heartbeat_age_seconds", "gauge")
+	for _, runner := range runners {
+		labels := []metricLabel{
+			{"runner_id", runner.RunnerID},
+			{"status", firstNonEmpty(runner.Status, "unknown")},
+			{"target", firstNonEmpty(runner.Target, "unknown")},
+		}
+		writeMetricInt(builder, "packaging_runner_running_builds", labels, runner.RunningBuilds)
+		if last := runner.LastHeartbeatAt; last != nil {
+			writeMetricInt(builder, "packaging_runner_last_heartbeat_age_seconds", labels, int(now.Sub(*last).Seconds()))
+		} else if last := runner.LastLogAt; last != nil {
+			writeMetricInt(builder, "packaging_runner_last_heartbeat_age_seconds", labels, int(now.Sub(*last).Seconds()))
+		}
+	}
+	writeRunnerCacheMetrics(builder, builds)
+	return builder.String()
+}
+
+type runnerCacheMetric struct {
+	RunnerID  string
+	Target    string
+	Stage     string
+	CacheName string
+	Status    string
+	Bytes     int64
+	Files     int
+	Truncated bool
+	LogTime   time.Time
+}
+
+func writeRunnerCacheMetrics(builder *strings.Builder, builds []domain.Build) {
+	writeMetricHelp(builder, "packaging_runner_cache_entries", "Runner cache entry status by runner, target, stage, and cache name.")
+	writeMetricType(builder, "packaging_runner_cache_entries", "gauge")
+	writeMetricHelp(builder, "packaging_runner_cache_bytes", "Runner cache bytes parsed from latest cache heartbeat or log summary.")
+	writeMetricType(builder, "packaging_runner_cache_bytes", "gauge")
+	writeMetricHelp(builder, "packaging_runner_cache_files", "Runner cache file count parsed from latest cache heartbeat or log summary.")
+	writeMetricType(builder, "packaging_runner_cache_files", "gauge")
+	writeMetricHelp(builder, "packaging_runner_cache_scan_truncated", "Whether runner cache scan hit RUNNER_CACHE_SCAN_FILE_LIMIT.")
+	writeMetricType(builder, "packaging_runner_cache_scan_truncated", "gauge")
+
+	entries := map[string]int{}
+	bytesByCache := map[string]int64{}
+	filesByCache := map[string]int{}
+	truncatedByCache := map[string]int{}
+	for _, metric := range latestRunnerCacheMetrics(builds) {
+		baseLabels := []metricLabel{
+			{"runner_id", metric.RunnerID},
+			{"target", firstNonEmpty(metric.Target, "unknown")},
+			{"stage", metric.Stage},
+			{"cache", metric.CacheName},
+		}
+		statusLabels := append([]metricLabel{}, baseLabels...)
+		statusLabels = append(statusLabels, metricLabel{"status", metric.Status})
+		entries[metricKey(statusLabels...)] = 1
+		key := metricKey(baseLabels...)
+		bytesByCache[key] = metric.Bytes
+		filesByCache[key] = metric.Files
+		if metric.Truncated {
+			truncatedByCache[key] = 1
+		} else {
+			truncatedByCache[key] = 0
+		}
+	}
+	writeMetricIntMap(builder, "packaging_runner_cache_entries", entries)
+	writeMetricInt64Map(builder, "packaging_runner_cache_bytes", bytesByCache)
+	writeMetricIntMap(builder, "packaging_runner_cache_files", filesByCache)
+	writeMetricIntMap(builder, "packaging_runner_cache_scan_truncated", truncatedByCache)
+}
+
+func latestRunnerCacheMetrics(builds []domain.Build) []runnerCacheMetric {
+	latest := map[string]runnerCacheMetric{}
+	for _, build := range builds {
+		for _, log := range logsWithSequence(build.Logs) {
+			if log.Source == "" || log.Source == "system" || log.Source == "resolver" {
+				continue
+			}
+			for _, metric := range parseRunnerCacheLog(log.Message) {
+				metric.RunnerID = log.Source
+				metric.Target = build.Target
+				metric.LogTime = log.Time
+				key := strings.Join([]string{metric.RunnerID, metric.Target, metric.Stage, metric.CacheName}, "\x00")
+				if current, ok := latest[key]; !ok || metric.LogTime.After(current.LogTime) {
+					latest[key] = metric
+				}
+			}
+		}
+	}
+	result := make([]runnerCacheMetric, 0, len(latest))
+	for _, metric := range latest {
+		result = append(result, metric)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		left := strings.Join([]string{result[i].RunnerID, result[i].Target, result[i].Stage, result[i].CacheName}, "\x00")
+		right := strings.Join([]string{result[j].RunnerID, result[j].Target, result[j].Stage, result[j].CacheName}, "\x00")
+		return left < right
+	})
+	return result
+}
+
+func parseRunnerCacheLog(message string) []runnerCacheMetric {
+	index := strings.Index(message, "cache ")
+	if index < 0 {
+		return nil
+	}
+	rest := message[index+len("cache "):]
+	stageEnd := strings.Index(rest, ":")
+	if stageEnd <= 0 {
+		return nil
+	}
+	stage := strings.TrimSpace(rest[:stageEnd])
+	if stage == "" || strings.ContainsAny(stage, " \t\r\n") {
+		return nil
+	}
+	summary := rest[stageEnd+1:]
+	metrics := []runnerCacheMetric{}
+	for _, part := range strings.Split(summary, ";") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		name, rawValue, ok := strings.Cut(part, "=")
+		if !ok {
+			continue
+		}
+		name = strings.TrimSpace(name)
+		rawValue = strings.TrimSpace(rawValue)
+		if name == "" || rawValue == "" {
+			continue
+		}
+		metric := runnerCacheMetric{Stage: stage, CacheName: name, Status: "ok"}
+		switch {
+		case strings.HasPrefix(rawValue, "unconfigured"):
+			metric.Status = "unconfigured"
+		case strings.HasPrefix(rawValue, "missing"):
+			metric.Status = "missing"
+		default:
+			metric.Status = "ok"
+			if strings.Contains(rawValue, " error=") {
+				metric.Status = "error"
+			}
+			value := strings.Fields(rawValue)
+			if len(value) == 0 {
+				continue
+			}
+			sizeText, fileText, ok := strings.Cut(value[0], "/")
+			if !ok {
+				continue
+			}
+			bytes, ok := parseCacheBytes(sizeText)
+			if !ok {
+				continue
+			}
+			metric.Bytes = bytes
+			if strings.HasSuffix(fileText, "+") {
+				metric.Truncated = true
+				fileText = strings.TrimSuffix(fileText, "+")
+			}
+			files, err := strconv.Atoi(fileText)
+			if err != nil {
+				continue
+			}
+			metric.Files = files
+		}
+		metrics = append(metrics, metric)
+	}
+	return metrics
+}
+
+func parseCacheBytes(value string) (int64, bool) {
+	value = strings.TrimSpace(value)
+	multipliers := []struct {
+		suffix     string
+		multiplier float64
+	}{
+		{"GB", 1024 * 1024 * 1024},
+		{"MB", 1024 * 1024},
+		{"KB", 1024},
+		{"B", 1},
+	}
+	for _, entry := range multipliers {
+		if strings.HasSuffix(value, entry.suffix) {
+			number := strings.TrimSuffix(value, entry.suffix)
+			parsed, err := strconv.ParseFloat(number, 64)
+			if err != nil {
+				return 0, false
+			}
+			return int64(parsed*entry.multiplier + 0.5), true
+		}
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return parsed, true
+}
+
+type metricLabel struct {
+	name  string
+	value string
+}
+
+func writeMetricHelp(builder *strings.Builder, name string, help string) {
+	builder.WriteString("# HELP ")
+	builder.WriteString(name)
+	builder.WriteByte(' ')
+	builder.WriteString(help)
+	builder.WriteByte('\n')
+}
+
+func writeMetricType(builder *strings.Builder, name string, metricType string) {
+	builder.WriteString("# TYPE ")
+	builder.WriteString(name)
+	builder.WriteByte(' ')
+	builder.WriteString(metricType)
+	builder.WriteByte('\n')
+}
+
+func writeMetricIntMap(builder *strings.Builder, name string, values map[string]int) {
+	keys := sortedMetricKeys(values)
+	for _, key := range keys {
+		writeMetricLine(builder, name, key, strconv.Itoa(values[key]))
+	}
+}
+
+func writeMetricInt64Map(builder *strings.Builder, name string, values map[string]int64) {
+	keys := sortedMetricKeys(values)
+	for _, key := range keys {
+		writeMetricLine(builder, name, key, strconv.FormatInt(values[key], 10))
+	}
+}
+
+func writeMetricInt(builder *strings.Builder, name string, labels []metricLabel, value int) {
+	writeMetricLine(builder, name, metricKey(labels...), strconv.Itoa(value))
+}
+
+func writeMetricLine(builder *strings.Builder, name string, labels string, value string) {
+	builder.WriteString(name)
+	if labels != "" {
+		builder.WriteByte('{')
+		builder.WriteString(labels)
+		builder.WriteByte('}')
+	}
+	builder.WriteByte(' ')
+	builder.WriteString(value)
+	builder.WriteByte('\n')
+}
+
+func metricKey(labels ...metricLabel) string {
+	if len(labels) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(labels))
+	for _, label := range labels {
+		parts = append(parts, label.name+"=\""+escapeMetricLabel(label.value)+"\"")
+	}
+	return strings.Join(parts, ",")
+}
+
+func escapeMetricLabel(value string) string {
+	replacer := strings.NewReplacer("\\", "\\\\", "\n", "\\n", "\"", "\\\"")
+	return replacer.Replace(value)
+}
+
+func sortedMetricKeys[T any](values map[string]T) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func logsWithSequence(logs []domain.BuildLog) []domain.BuildLog {
 	next := make([]domain.BuildLog, len(logs))
 	for index, log := range logs {
@@ -1427,6 +2570,19 @@ func appendBuildLog(logs []domain.BuildLog, source string, message string) []dom
 	entry := logEntry(source, message)
 	entry.Sequence = len(logs) + 1
 	return append(logs, entry)
+}
+
+func appendBuildLogForRequest(logs []domain.BuildLog, r *http.Request, source string, message string) []domain.BuildLog {
+	entry := logEntryForRequest(r, source, message)
+	entry.Sequence = len(logs) + 1
+	return append(logs, entry)
+}
+
+func requestIDs(r *http.Request) (string, string) {
+	if r == nil {
+		return "", ""
+	}
+	return r.Header.Get("X-Request-Id"), r.Header.Get("X-Correlation-Id")
 }
 
 func requestContext(next http.Handler) http.Handler {
@@ -1445,6 +2601,8 @@ func requestContext(next http.Handler) http.Handler {
 		}
 		w.Header().Set("X-Request-Id", requestID)
 		w.Header().Set("X-Correlation-Id", correlationID)
+		r.Header.Set("X-Request-Id", requestID)
+		r.Header.Set("X-Correlation-Id", correlationID)
 		recorder := &statusResponseWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(recorder, r)
 		slog.Info("http request",
@@ -1531,6 +2689,99 @@ func buildReleaseCheck(build domain.Build) domain.ReleaseCheckResult {
 		BlockingCount: blockingCount,
 		Checks:        checks,
 	}
+}
+
+func (s Server) reproducibilityReport(build domain.Build, generatedAt time.Time) domain.ReproducibilityReport {
+	check := buildReleaseCheck(build)
+	components := build.BuildLock.Components
+	if len(components) == 0 {
+		components = build.Components
+	}
+	sourceArtifacts := make([]domain.ReproducibilitySourceArtifact, 0, len(components))
+	for _, component := range components {
+		sourceArtifacts = append(sourceArtifacts, domain.ReproducibilitySourceArtifact{
+			ComponentID: component.ID,
+			Type:        component.Type,
+			Version:     component.Version,
+			SourceKind:  component.Source.Kind,
+			URI:         component.URI,
+			SHA256:      component.SHA256,
+			Required:    component.Required,
+		})
+	}
+	output := domain.ReproducibilityArtifact{
+		URI:         build.ArtifactURI,
+		DownloadURL: build.DownloadURL,
+	}
+	if uploadID := buildOutputUploadID(build); uploadID != "" {
+		if record, err := s.store.ReadUpload(uploadID); err == nil {
+			now := generatedAt
+			record = normalizeUploadRecord(record, now)
+			output.UploadID = record.ID
+			output.SHA256 = record.SHA256
+			output.Size = record.Size
+			output.ContentType = record.ContentType
+			output.DownloadPolicy = record.DownloadPolicy
+			output.RetentionStatus = record.RetentionStatus
+			createdAt := record.CreatedAt
+			output.CreatedAt = &createdAt
+		}
+	}
+	return domain.ReproducibilityReport{
+		GeneratedAt:     generatedAt,
+		BuildID:         build.ID,
+		ProductID:       build.ProductID,
+		Target:          build.Target,
+		Profile:         build.Profile,
+		Customer:        build.Customer,
+		Version:         build.Version,
+		ReleaseChannel:  build.ReleaseChannel,
+		Status:          build.Status,
+		Reproducible:    check.ReleaseReady,
+		ReleaseCheck:    check,
+		BuildLock:       build.BuildLock,
+		SourceArtifacts: sourceArtifacts,
+		OutputArtifact:  output,
+		Runner: domain.ReproducibilityRunner{
+			RunnerID:   build.RunnerID,
+			NomadJobID: build.NomadJobID,
+		},
+		Lifecycle: domain.ReproducibilityLifecycle{
+			CreatedAt:   build.CreatedAt,
+			ApprovedAt:  build.ApprovedAt,
+			ValidatedAt: build.ValidatedAt,
+			PublishedAt: build.PublishedAt,
+			UpdatedAt:   build.UpdatedAt,
+		},
+	}
+}
+
+func buildOutputUploadID(build domain.Build) string {
+	if id := uploadIDFromDownloadURL(build.DownloadURL); id != "" {
+		return id
+	}
+	if strings.HasPrefix(build.ArtifactURI, "local-upload://") {
+		rest := strings.TrimPrefix(build.ArtifactURI, "local-upload://")
+		return strings.Split(rest, "/")[0]
+	}
+	return ""
+}
+
+func uploadIDFromDownloadURL(downloadURL string) string {
+	if downloadURL == "" {
+		return ""
+	}
+	const marker = "/api/uploads/"
+	index := strings.Index(downloadURL, marker)
+	if index < 0 {
+		return ""
+	}
+	rest := downloadURL[index+len(marker):]
+	parts := strings.Split(rest, "/")
+	if len(parts) == 0 || parts[0] == "" {
+		return ""
+	}
+	return parts[0]
 }
 
 func withReleaseCheckSummaries(builds []domain.Build) []domain.Build {
@@ -1650,6 +2901,14 @@ func (e errText) Error() string {
 
 func logEntry(source string, message string) domain.BuildLog {
 	return domain.BuildLog{Time: time.Now().UTC(), Source: source, Message: message}
+}
+
+func logEntryForRequest(r *http.Request, source string, message string) domain.BuildLog {
+	requestID, correlationID := requestIDs(r)
+	entry := logEntry(source, message)
+	entry.RequestID = requestID
+	entry.CorrelationID = correlationID
+	return entry
 }
 
 func randomID() string {

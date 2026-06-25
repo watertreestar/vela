@@ -97,6 +97,11 @@ type ResolvedComponent struct {
 	Required bool            `json:"required"`
 }
 
+type ArtifactResolution struct {
+	URI    string
+	SHA256 string
+}
+
 type BuildLock struct {
 	BuildID        string              `json:"buildId"`
 	ProductID      string              `json:"productId"`
@@ -171,6 +176,173 @@ type ReleaseCheckItem struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+type ReproducibilityReport struct {
+	GeneratedAt       time.Time                       `json:"generatedAt"`
+	BuildID           string                          `json:"buildId"`
+	ProductID         string                          `json:"productId"`
+	Target            string                          `json:"target"`
+	Profile           string                          `json:"profile"`
+	Customer          string                          `json:"customer"`
+	Version           string                          `json:"version"`
+	ReleaseChannel    string                          `json:"releaseChannel"`
+	Status            string                          `json:"status"`
+	Reproducible      bool                            `json:"reproducible"`
+	ReleaseCheck      ReleaseCheckResult              `json:"releaseCheck"`
+	BuildLock         BuildLock                       `json:"buildLock"`
+	SourceArtifacts   []ReproducibilitySourceArtifact `json:"sourceArtifacts"`
+	OutputArtifact    ReproducibilityArtifact         `json:"outputArtifact"`
+	Runner            ReproducibilityRunner           `json:"runner"`
+	Lifecycle         ReproducibilityLifecycle        `json:"lifecycle"`
+	ConfigFingerprint map[string]string               `json:"configFingerprint,omitempty"`
+	Metadata          map[string]string               `json:"metadata,omitempty"`
+}
+
+type ReleaseEvidenceArchive struct {
+	SchemaVersion        string                `json:"schemaVersion"`
+	GeneratedAt          time.Time             `json:"generatedAt"`
+	ArchiveURI           string                `json:"archiveUri,omitempty"`
+	ArchiveStoredAt      *time.Time            `json:"archiveStoredAt,omitempty"`
+	ArchiveRetentionMode string                `json:"archiveRetentionMode,omitempty"`
+	ArchiveRetainUntil   *time.Time            `json:"archiveRetainUntil,omitempty"`
+	ArchiveLegalHold     string                `json:"archiveLegalHold,omitempty"`
+	BuildID              string                `json:"buildId"`
+	ProductID            string                `json:"productId"`
+	Reproducible         bool                  `json:"reproducible"`
+	Report               ReproducibilityReport `json:"report"`
+	DigestAlgorithm      string                `json:"digestAlgorithm"`
+	Digest               string                `json:"digest"`
+	SignatureAlgorithm   string                `json:"signatureAlgorithm,omitempty"`
+	SignatureKeyID       string                `json:"signatureKeyId,omitempty"`
+	Signature            string                `json:"signature,omitempty"`
+}
+
+type ReproducibilitySourceArtifact struct {
+	ComponentID string `json:"componentId"`
+	Type        string `json:"type"`
+	Version     string `json:"version"`
+	SourceKind  string `json:"sourceKind"`
+	URI         string `json:"uri"`
+	SHA256      string `json:"sha256,omitempty"`
+	Required    bool   `json:"required"`
+}
+
+type ReproducibilityArtifact struct {
+	URI             string     `json:"uri"`
+	DownloadURL     string     `json:"downloadUrl"`
+	UploadID        string     `json:"uploadId,omitempty"`
+	SHA256          string     `json:"sha256,omitempty"`
+	Size            int64      `json:"size,omitempty"`
+	ContentType     string     `json:"contentType,omitempty"`
+	DownloadPolicy  string     `json:"downloadPolicy,omitempty"`
+	RetentionStatus string     `json:"retentionStatus,omitempty"`
+	CreatedAt       *time.Time `json:"createdAt,omitempty"`
+}
+
+type ReproducibilityRunner struct {
+	RunnerID   string `json:"runnerId,omitempty"`
+	NomadJobID string `json:"nomadJobId,omitempty"`
+}
+
+type ReproducibilityLifecycle struct {
+	CreatedAt   time.Time  `json:"createdAt"`
+	ApprovedAt  *time.Time `json:"approvedAt,omitempty"`
+	ValidatedAt *time.Time `json:"validatedAt,omitempty"`
+	PublishedAt *time.Time `json:"publishedAt,omitempty"`
+	UpdatedAt   time.Time  `json:"updatedAt"`
+}
+
+type AuditEvent struct {
+	ID            string            `json:"id"`
+	Time          time.Time         `json:"time"`
+	Action        string            `json:"action"`
+	ActorID       string            `json:"actorId"`
+	ActorRole     string            `json:"actorRole,omitempty"`
+	ResourceType  string            `json:"resourceType"`
+	ResourceID    string            `json:"resourceId"`
+	ProductID     string            `json:"productId,omitempty"`
+	BuildID       string            `json:"buildId,omitempty"`
+	UploadID      string            `json:"uploadId,omitempty"`
+	RequestID     string            `json:"requestId,omitempty"`
+	CorrelationID string            `json:"correlationId,omitempty"`
+	Status        string            `json:"status"`
+	Summary       string            `json:"summary"`
+	Metadata      map[string]string `json:"metadata,omitempty"`
+}
+
+type AuditEventFilter struct {
+	ResourceType string `json:"resourceType,omitempty"`
+	ResourceID   string `json:"resourceId,omitempty"`
+	BuildID      string `json:"buildId,omitempty"`
+	ProductID    string `json:"productId,omitempty"`
+	UploadID     string `json:"uploadId,omitempty"`
+	Action       string `json:"action,omitempty"`
+	Limit        int    `json:"limit,omitempty"`
+}
+
+type AuditArchive struct {
+	SchemaVersion        string           `json:"schemaVersion"`
+	GeneratedAt          time.Time        `json:"generatedAt"`
+	ArchiveURI           string           `json:"archiveUri,omitempty"`
+	ArchiveStoredAt      *time.Time       `json:"archiveStoredAt,omitempty"`
+	ArchiveRetentionMode string           `json:"archiveRetentionMode,omitempty"`
+	ArchiveRetainUntil   *time.Time       `json:"archiveRetainUntil,omitempty"`
+	ArchiveLegalHold     string           `json:"archiveLegalHold,omitempty"`
+	EventCount           int              `json:"eventCount"`
+	Filter               AuditEventFilter `json:"filter"`
+	Events               []AuditEvent     `json:"events"`
+	DigestAlgorithm      string           `json:"digestAlgorithm"`
+	Digest               string           `json:"digest"`
+	SignatureAlgorithm   string           `json:"signatureAlgorithm,omitempty"`
+	SignatureKeyID       string           `json:"signatureKeyId,omitempty"`
+	Signature            string           `json:"signature,omitempty"`
+}
+
+type AuditArchiveStoragePolicy struct {
+	RetentionMode string
+	RetainUntil   *time.Time
+	LegalHold     string
+}
+
+type AuthSession struct {
+	ID        string     `json:"id"`
+	Subject   string     `json:"subject"`
+	Role      string     `json:"role"`
+	IssuedAt  time.Time  `json:"issuedAt"`
+	ExpiresAt time.Time  `json:"expiresAt"`
+	RevokedAt *time.Time `json:"revokedAt,omitempty"`
+}
+
+type Notification struct {
+	ID           string            `json:"id"`
+	CreatedAt    time.Time         `json:"createdAt"`
+	ReadAt       *time.Time        `json:"readAt,omitempty"`
+	Type         string            `json:"type"`
+	Severity     string            `json:"severity"`
+	Title        string            `json:"title"`
+	Message      string            `json:"message"`
+	ResourceType string            `json:"resourceType,omitempty"`
+	ResourceID   string            `json:"resourceId,omitempty"`
+	ProductID    string            `json:"productId,omitempty"`
+	BuildID      string            `json:"buildId,omitempty"`
+	UploadID     string            `json:"uploadId,omitempty"`
+	RunnerID     string            `json:"runnerId,omitempty"`
+	ActionURL    string            `json:"actionUrl,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+}
+
+type NotificationFilter struct {
+	Type         string
+	Severity     string
+	ResourceType string
+	ResourceID   string
+	BuildID      string
+	ProductID    string
+	UploadID     string
+	RunnerID     string
+	ReadStatus   string
+	Limit        int
+}
+
 type APIErrorDetail struct {
 	Code       string            `json:"code,omitempty"`
 	Field      string            `json:"field,omitempty"`
@@ -234,10 +406,12 @@ type Build struct {
 }
 
 type BuildLog struct {
-	Time     time.Time `json:"time"`
-	Source   string    `json:"source"`
-	Message  string    `json:"message"`
-	Sequence int       `json:"sequence,omitempty"`
+	Time          time.Time `json:"time"`
+	Source        string    `json:"source"`
+	Message       string    `json:"message"`
+	Sequence      int       `json:"sequence,omitempty"`
+	RequestID     string    `json:"requestId,omitempty"`
+	CorrelationID string    `json:"correlationId,omitempty"`
 }
 
 type RunnerClaimRequest struct {
@@ -276,6 +450,8 @@ type UploadRecord struct {
 	RetentionDays   int               `json:"retentionDays"`
 	ExpiresAt       *time.Time        `json:"expiresAt,omitempty"`
 	RetentionStatus string            `json:"retentionStatus"`
+	RequestID       string            `json:"requestId,omitempty"`
+	CorrelationID   string            `json:"correlationId,omitempty"`
 	Metadata        map[string]string `json:"metadata,omitempty"`
 	CreatedAt       time.Time         `json:"createdAt"`
 }

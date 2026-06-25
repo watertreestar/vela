@@ -75,6 +75,24 @@ ARTIFACT_ROOT=/var/cache/packaging/artifacts
 DAGGER_DOCKER_SOCKET=/var/run/docker.sock
 ```
 
+API variables that control Nomad production job policy:
+
+```bash
+RUNNER_CPU=2000
+RUNNER_MEMORY_MB=4096
+RUNNER_MEMORY_MAX_MB=0
+RUNNER_DISK_MB=4096
+RUNNER_LOG_MAX_FILES=10
+RUNNER_LOG_MAX_FILE_MB=20
+RUNNER_KILL_TIMEOUT_SECONDS=30
+RUNNER_MAX_RUN_SECONDS=3600
+RUNNER_RESTART_ATTEMPTS=0
+RUNNER_RESCHEDULE_ATTEMPTS=0
+RUNNER_DOCKER_PRIVILEGED=false
+```
+
+Default retry policy is intentionally strict: Nomad does not automatically restart or reschedule failed packaging tasks. The platform records the failed build and operators retry through the API/UI after fixing the root cause. Increase restart/reschedule attempts only for environments where runner startup failures are known to be transient and idempotent.
+
 The client is selected by:
 
 ```hcl
@@ -190,7 +208,7 @@ Windows installation checklist:
 6. Create and approve one preview Windows build.
 7. Verify raw_exec starts the runner, the runner claims the task, and the generated `setup.exe` is uploaded.
 
-Production Windows builds should configure a real packager command. Without `WINDOWS_PACKAGER_CMD`, the runner produces a placeholder setup file only for local control-plane tests.
+Production Windows builds should configure a real packager command. Without `WINDOWS_PACKAGER_CMD`, the runner produces a placeholder setup file only for local control-plane tests. If production releases require signed installers, configure `WINDOWS_SIGNING_CMD`; the runner executes it after the setup file is generated and before checksum/upload.
 
 Example:
 
@@ -200,7 +218,15 @@ Example:
   "iscc C:\packaging-runner\context\rendered\setup.iss",
   "Machine"
 )
+
+[Environment]::SetEnvironmentVariable(
+  "WINDOWS_SIGNING_CMD",
+  "signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 %OUTPUT%",
+  "Machine"
+)
 ```
+
+`WINDOWS_PACKAGER_CMD` receives `OUTPUT` and must write the final `setup.exe` to that path. `WINDOWS_SIGNING_CMD` receives `OUTPUT`, `ARTIFACT`, `BUILD_ID`, `PRODUCT_ID`, `TARGET`, and `VERSION`; it should sign in place or replace the file at the same path. Any non-zero exit code fails the build before the artifact is uploaded.
 
 ## Job Lifecycle
 
@@ -243,6 +269,27 @@ sequenceDiagram
 - Canceling a queued/running build deregisters the Nomad job.
 - Retrying a failed/canceled build registers a fresh Nomad job version and returns the build to `queued`.
 
+Lifecycle reconciliation can be checked without a live Nomad cluster by running the deterministic fake-scheduler acceptance tests:
+
+```bash
+python scripts/lifecycle_cli.py check
+python scripts/lifecycle_cli.py check --full-backend
+```
+
+The check covers Nomad failed allocations, premature Nomad completion before runner success, runner heartbeat timeout, terminal-build safety, and scheduler inspection errors. Live cluster verification should still be run after Nomad topology changes.
+
+Live Nomad cluster readiness can be checked separately:
+
+```bash
+python scripts/nomad_check_cli.py check \
+  --production \
+  --address "$NOMAD_ADDR" \
+  --require-linux-node \
+  --require-windows-node
+```
+
+This check calls Nomad's leader and node APIs, verifies at least one ready node, and can require ready nodes with `meta.node_class=linux-packager` and `meta.node_class=windows-packager`. Production mode expects `NOMAD_ADDR` to use HTTPS; for an explicitly accepted internal HTTP cluster, add `--allow-http` so the exception is visible in the confirmation lights.
+
 ## Deployment Verification
 
 Use the same verification flow for Linux and Windows:
@@ -255,6 +302,8 @@ Use the same verification flow for Linux and Windows:
 6. The build reaches `succeeded`.
 7. `GET /api/builds/{id}/release-check` reports Preview readiness.
 8. The admin console can validate Preview. Release promotion remains blocked until fixed versions and exact component URIs are present.
+9. `python scripts/lifecycle_cli.py check --full-backend` passes in CI or deployment verification.
+10. `python scripts/nomad_check_cli.py check --production --address "$NOMAD_ADDR" --require-linux-node --require-windows-node` passes against the live cluster, or records a deliberate `--allow-http` exception for an internal HTTP endpoint.
 
 If a build is stuck:
 
@@ -286,6 +335,17 @@ Controls:
 ```bash
 RUNNER_TIMEOUT_SECONDS=1800
 RECONCILE_INTERVAL_SECONDS=30
+RUNNER_CPU=2000
+RUNNER_MEMORY_MB=4096
+RUNNER_MEMORY_MAX_MB=0
+RUNNER_DISK_MB=4096
+RUNNER_LOG_MAX_FILES=10
+RUNNER_LOG_MAX_FILE_MB=20
+RUNNER_KILL_TIMEOUT_SECONDS=30
+RUNNER_MAX_RUN_SECONDS=3600
+RUNNER_RESTART_ATTEMPTS=0
+RUNNER_RESCHEDULE_ATTEMPTS=0
+RUNNER_DOCKER_PRIVILEGED=false
 NOMAD_LINUX_NODE_CLASS=linux-packager
 NOMAD_WINDOWS_NODE_CLASS=windows-packager
 WINDOWS_RUNNER_COMMAND='bun C:\packaging-runner\package-runner.js'

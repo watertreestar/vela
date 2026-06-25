@@ -164,13 +164,34 @@ powershell -ExecutionPolicy Bypass -File infra\windows\start-nomad-client.ps1 `
   -ServerAddr <nomad-server-ip>:4647
 ```
 
-Production Windows builds should set `WINDOWS_PACKAGER_CMD`. Without it, the runner only creates a clearly marked placeholder file for local control-plane testing.
+Production Windows builds should set `WINDOWS_PACKAGER_CMD`. Without it, the runner only creates a clearly marked placeholder file for local control-plane testing. If release candidates require code signing, set `WINDOWS_SIGNING_CMD` as well. The signing command runs after the setup file is created and before checksum/upload, so the uploaded digest always describes the signed artifact.
 
 Example Inno Setup command:
 
 ```powershell
 WINDOWS_PACKAGER_CMD='iscc C:\packaging-runner\context\rendered\setup.iss'
+WINDOWS_SIGNING_CMD='signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "$env:OUTPUT"'
 ```
+
+Before using a Windows host for Release candidates, run the Python readiness check on that host:
+
+```powershell
+python scripts\windows_runner_check_cli.py check `
+  --api-url http://<api-host>:8080 `
+  --packager-command "iscc C:\packaging-runner\context\rendered\setup.iss" `
+  --signing-command "signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 %OUTPUT%"
+```
+
+The check fails if production packaging would fall back to the fixture packager/signing command, if `WINDOWS_PACKAGER_CMD` is missing, if signing is required but missing, or if the expected Inno/WiX/SignTool executables are not visible from the runner host. Use `--no-require-signing` only for an explicitly unsigned Preview environment; Release candidate hosts should keep signing required.
+
+For local or CI acceptance without a Windows packager host, the Docker runner image includes a deterministic fixture packager:
+
+```bash
+WINDOWS_PACKAGER_CMD='python3 /app/fixtures/windows_setup_packager.py'
+WINDOWS_SIGNING_CMD='python3 /app/fixtures/windows_signing_fixture.py'
+```
+
+The packager fixture reads the generated runner workspace, writes a `*-setup.exe` fixture artifact, and embeds the marker `PACKAGING_PLATFORM_WINDOWS_SETUP_FIXTURE_V1` plus build metadata and context checksums. The signing fixture appends marker `PACKAGING_PLATFORM_WINDOWS_SIGNING_FIXTURE_V1` plus deterministic signing metadata. They are intended for Preview/control-plane validation only; production Release builds should use the real Inno/WiX/signing toolchain.
 
 Linux builds use Dagger by default. The runner generates `context/rendered/pipeline-plan.json` from the build lock, final config, and resolved components, then runs:
 
@@ -179,6 +200,28 @@ dagger run -- bun runner/dagger/linux-package.mjs ...
 ```
 
 Set `USE_DAGGER_FOR_LINUX=false` for local fallback packaging.
+
+For local or CI acceptance of the Linux Dagger path, the Docker runner image includes a deterministic Linux package fixture. The runner copies it into the Dagger context, so the command runs inside the Dagger container:
+
+```bash
+DAGGER_LINUX_PACKAGE_CMD='python3 /workspace/context/rendered/linux_package_packager.py'
+```
+
+The fixture writes a `.tar.gz` artifact containing marker `PACKAGING_PLATFORM_LINUX_PACKAGE_FIXTURE_V1`, build metadata, component/workload counts, and context checksums. With the default Alpine base image, install Python for the fixture with:
+
+```bash
+DAGGER_LINUX_INSTALL_TOOLS='apk add --no-cache python3 tar gzip coreutils bash'
+```
+
+Fixture golden checks can be run without starting the API or Docker runner:
+
+```bash
+python scripts/fixture_golden_cli.py check
+```
+
+The check runs the Linux package fixture, Windows setup fixture, and Windows signing fixture twice against deterministic workspaces, then verifies artifact digests, markers, metadata, component/workload counts, and signing evidence.
+
+It is intended for Dagger/control-plane validation only; production Release builds should use the real product packaging command.
 
 In production, Nomad starts this runner on Linux or Windows builder nodes. The API submits a batch job whose Docker image is controlled by `PACKAGING_RUNNER_IMAGE` and whose command defaults to `bun /app/package-runner.js`.
 
@@ -191,6 +234,8 @@ Core:
 - `TARGET` - `linux` or `windows`.
 - `ARTIFACT_ROOT` - local artifact mirror for test runners.
 - `MINIO_PUBLIC_URL` - HTTP base URL used to download `minio://...` component URIs.
+- `GITLAB_PACKAGE_BASE_URL` - optional GitLab base URL; runner only attaches GitLab auth headers to downloads under this URL.
+- `GITLAB_PACKAGE_TOKEN` - optional token sent as `PRIVATE-TOKEN` for GitLab Generic Package Registry component downloads.
 - `HEARTBEAT_INTERVAL_MS` - runner heartbeat interval, default `30000`.
 - `LSAPCTL_BUILD_CMD` - optional `lsapctl` compile command. Linux runs it inside the Dagger container; Windows runs it on the Windows runner host before `WINDOWS_PACKAGER_CMD`.
 - `LSAPCTL_SOURCE_DIR` - optional local source directory copied into the build context as `lsapctl-src`.
@@ -210,6 +255,19 @@ Linux Dagger:
 Windows:
 
 - `WINDOWS_PACKAGER_CMD` - optional custom Windows packaging command, usually an Inno Setup or WiX invocation.
+- `OUTPUT` - set by the runner when invoking `WINDOWS_PACKAGER_CMD`; the packager must write the final `setup.exe` to this path.
+- `WINDOWS_SIGNING_CMD` - optional Windows signing command, usually a SignTool invocation. It runs after packaging and before checksum/upload.
+- `OUTPUT` / `ARTIFACT` - set by the runner when invoking `WINDOWS_SIGNING_CMD`; both point to the setup file that should be signed in place or replaced at the same path.
+- `BUILD_ID`, `PRODUCT_ID`, `TARGET`, and `VERSION` - also set for `WINDOWS_SIGNING_CMD` so signing wrappers can write deterministic evidence logs without reading runner internals.
+
+Secret references:
+
+- Manifest values may contain `secret:<name>` or `secret://<name>`.
+- The API resolves these references before Nomad submission and injects `PACKAGING_SECRET_*` environment variables into the runner.
+- The runner replaces secret references in `finalConfig`, `variables`, and `workloads` before rendering runtime files and package context.
+- Example: `secret:db/root-password` is read from `PACKAGING_SECRET_DB_ROOT_PASSWORD`.
+- If the backend uses a custom `SECRET_ENV_PREFIX`, Nomad forwards that prefix to the runner and the runner reads the matching environment variable names.
+- Missing secret env values fail the build before packaging starts.
 
 Proxy variables are supported by normal process inheritance and are passed to `fetch`, `bun`, Dagger, and child commands:
 
@@ -230,6 +288,7 @@ Cache variables:
 - `XDG_CACHE_HOME` - common Linux cache root.
 - `DAGGER_CACHE_DIR` - optional local directory you can mount/use for Dagger-related cache metadata.
 - `ARTIFACT_ROOT` - local component mirror for offline/dev builds.
+- `RUNNER_CACHE_SCAN_FILE_LIMIT` - maximum files scanned per cache path when reporting cache status, default `5000`.
 
 For Nomad Linux Docker tasks, cache is most useful when the host mounts stable directories into the runner container. Example paths:
 
@@ -246,10 +305,37 @@ C:\packaging-cache\bun
 C:\packaging-cache\artifacts
 ```
 
+Runtime cache observability:
+
+- The runner records cache snapshots at `before`, `components`, and `after` stages.
+- Each snapshot is appended to the build log as `cache <stage>: bun=...; dagger=...; artifacts=...; components=...`.
+- The same summary is sent through heartbeat messages so `/api/runners` recent messages show cache health.
+- The API `/metrics` endpoint parses the latest cache summaries into `packaging_runner_cache_entries`, `packaging_runner_cache_bytes`, `packaging_runner_cache_files`, and `packaging_runner_cache_scan_truncated`.
+- Full JSON snapshots are written into the runner workspace under `context/rendered/runner-cache-<stage>.json`.
+- Missing or unconfigured cache paths are reported as `missing` or `unconfigured`; large paths are capped by `RUNNER_CACHE_SCAN_FILE_LIMIT` and marked with `+ files`.
+
+Host-side cache inspection and cleanup use the Python CLI:
+
+```bash
+python scripts/runner_cache_cli.py report \
+  --path bun=/var/cache/packaging/bun \
+  --path dagger=/var/cache/packaging/dagger \
+  --path artifacts=/var/cache/packaging/artifacts
+
+# Dry-run cleanup; prints what would be deleted.
+python scripts/runner_cache_cli.py cleanup --path artifacts=/var/cache/packaging/artifacts
+
+# Actual cleanup; deletes children of the cache directory, not the directory itself.
+python scripts/runner_cache_cli.py cleanup --apply --path artifacts=/var/cache/packaging/artifacts
+```
+
+Cleanup refuses paths that do not look like cache or packaging paths, to reduce accidental deletion risk.
+
 Default behavior:
 
 - Linux creates a `tar.gz` from the generated build context. Production packages should set `LSAPCTL_SOURCE_DIR` and `LSAPCTL_BUILD_CMD` so `lsapctl` is written to the context root before packaging.
 - Windows creates a placeholder setup file unless `WINDOWS_PACKAGER_CMD` is configured.
+- Local/CI Windows acceptance can set `WINDOWS_PACKAGER_CMD='python3 /app/fixtures/windows_setup_packager.py'` and `WINDOWS_SIGNING_CMD='python3 /app/fixtures/windows_signing_fixture.py'` to generate a deterministic signed fixture instead of the placeholder.
 - Both targets upload the resulting file through the Packaging API upload endpoint.
 
 ## Deployment Verification

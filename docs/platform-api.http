@@ -20,9 +20,27 @@
 @failedBuildId = 43ef975ef9a3
 
 @runnerId = http-seed-runner-01
+@auditBuildId = {{releaseReadyBuildId}}
+@oidcCode = replace-with-idp-code
+@oidcCodeVerifier = replace-with-pkce-verifier
+@oidcRedirectUri = http://localhost:5173/
 
 ### 健康检查
 GET {{baseUrl}}/api/health
+
+### OIDC Broker：用 Authorization Code + PKCE 换平台 session token
+POST {{baseUrl}}/api/auth/oidc/token
+Content-Type: application/json
+
+{
+  "code": "{{oidcCode}}",
+  "codeVerifier": "{{oidcCodeVerifier}}",
+  "redirectUri": "{{oidcRedirectUri}}"
+}
+
+### Auth Logout：撤销 broker 持久化 session，静态 token/原始 OIDC token 为 no-op
+POST {{baseUrl}}/api/auth/logout
+Authorization: Bearer {{adminToken}}
 
 ### 产品列表
 GET {{baseUrl}}/api/products
@@ -47,6 +65,15 @@ GET {{baseUrl}}/api/products/{{productId}}/overlays/customers
 
 ### example-customer 客户覆盖
 GET {{baseUrl}}/api/products/{{productId}}/overlays/customers/example-customer
+
+### Metrics
+GET {{baseUrl}}/metrics
+
+### 审计事件列表
+GET {{baseUrl}}/api/audit-events?buildId={{auditBuildId}}
+
+### 审计归档导出：返回 digest；配置 AUDIT_ARCHIVE_HMAC_KEY 后还会返回 signature
+GET {{baseUrl}}/api/audit-events/archive?buildId={{auditBuildId}}
 
 ### Manifest Dry Run：固定版本，Release 可复现路径
 POST {{baseUrl}}/api/products/{{productId}}/manifest/dry-run
@@ -180,6 +207,9 @@ GET {{baseUrl}}/api/builds/{{releaseReadyBuildId}}/logs
 
 ### 查看发布门禁：Release Ready 应通过
 GET {{baseUrl}}/api/builds/{{releaseReadyBuildId}}/release-check
+
+### 导出签名 Release 证据归档：包含 digest/signature/archiveUri
+GET {{baseUrl}}/api/builds/{{releaseReadyBuildId}}/release-evidence/archive
 
 ### 查看发布门禁：latest 应阻塞 Release
 GET {{baseUrl}}/api/builds/{{releaseBlockedLatestBuildId}}/release-check

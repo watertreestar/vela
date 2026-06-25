@@ -1,0 +1,79 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: packaging-default
+  group_by: ["alertname", "category", "severity"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - receiver: packaging-critical-oncall
+      matchers:
+        - severity="critical"
+      group_wait: 10s
+      repeat_interval: 30m
+      continue: true
+
+    - receiver: packaging-runner-ops
+      matchers:
+        - category="runner"
+      group_by: ["alertname", "runner_id", "target", "severity"]
+      repeat_interval: 1h
+
+    - receiver: packaging-release-managers
+      matchers:
+        - category="release-gate"
+      group_by: ["alertname", "severity"]
+      repeat_interval: 2h
+
+    - receiver: packaging-artifact-ops
+      matchers:
+        - category="artifact"
+      group_by: ["alertname", "severity"]
+      repeat_interval: 6h
+
+    - receiver: packaging-build-ops
+      matchers:
+        - category="build"
+      group_by: ["alertname", "status", "target", "severity"]
+      repeat_interval: 2h
+
+receivers:
+  - name: packaging-default
+    webhook_configs:
+      - url: http://alert-router.internal/packaging/default
+        send_resolved: true
+
+  - name: packaging-critical-oncall
+    webhook_configs:
+      - url: http://alert-router.internal/packaging/critical
+        send_resolved: true
+
+  - name: packaging-runner-ops
+    webhook_configs:
+      - url: http://alert-router.internal/packaging/runner
+        send_resolved: true
+
+  - name: packaging-release-managers
+    webhook_configs:
+      - url: http://alert-router.internal/packaging/release
+        send_resolved: true
+
+  - name: packaging-artifact-ops
+    webhook_configs:
+      - url: http://alert-router.internal/packaging/artifact
+        send_resolved: true
+
+  - name: packaging-build-ops
+    webhook_configs:
+      - url: http://alert-router.internal/packaging/build
+        send_resolved: true
+
+inhibit_rules:
+  - source_matchers:
+      - severity="critical"
+    target_matchers:
+      - severity="warning"
+    equal: ["alertname", "category"]
+

@@ -452,6 +452,10 @@ func uploadRequest(t *testing.T, handler http.Handler, filename string, content 
 }
 
 func uploadRequestWithFields(t *testing.T, handler http.Handler, filename string, content string, fields map[string]string) *httptest.ResponseRecorder {
+	return uploadRequestWithFieldsAndHeaders(t, handler, filename, content, fields, nil)
+}
+
+func uploadRequestWithFieldsAndHeaders(t *testing.T, handler http.Handler, filename string, content string, fields map[string]string, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
@@ -472,6 +476,9 @@ func uploadRequestWithFields(t *testing.T, handler http.Handler, filename string
 	}
 	request := httptest.NewRequest(http.MethodPost, "/api/uploads", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
+	for key, value := range headers {
+		request.Header.Set(key, value)
+	}
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response

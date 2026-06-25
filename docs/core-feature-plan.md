@@ -261,7 +261,7 @@ Deliverables:
 - Manual upload endpoint.
 - Build-specific upload staging area.
 - Component checksum capture.
-- Status: manual upload and source override are implemented; full MinIO resolver is represented by artifact URIs and ready for adapter implementation.
+- Status: manual upload, source override, local `ARTIFACT_ROOT`, MinIO/RustFS exact/wildcard resolver, `.sha256` sidecar, and GitLab Generic Package Registry exact-file resolver are implemented. GitLab wildcard/listing remains optional future work.
 
 Acceptance:
 
@@ -297,7 +297,7 @@ Deliverables:
 - Setup exe compilation.
 - Optional signing hook.
 - Upload final exe, checksum, build-info.
-- Status: runner supports Windows target and `WINDOWS_PACKAGER_CMD`; without it, a clearly marked placeholder setup artifact is generated so the API flow can still be tested.
+- Status: runner supports Windows target, `WINDOWS_PACKAGER_CMD`, `WINDOWS_SIGNING_CMD`, deterministic setup/signing fixtures, and production host readiness checks. Without a production packager command, placeholder output is only suitable for control-plane tests.
 
 Acceptance:
 
@@ -312,7 +312,7 @@ Deliverables:
 - Publish promotion without rebuild.
 - Audit log.
 - Artifact retention policy.
-- Status: approve/reject/publish/cancel/retry transitions and release channel metadata are implemented; role enforcement and retention remain production hardening tasks.
+- Status: approve/reject/publish/cancel/retry transitions, release channel metadata, role enforcement, audit events, download policy enforcement, upload retention metadata, and release gate checks are implemented.
 
 Acceptance:
 
@@ -328,7 +328,7 @@ Deliverables:
 - Runner heartbeat.
 - Retry/cancel.
 - Log streaming.
-- Status: PostgreSQL is the default active store for products, builds, uploads, build locks, and logs. JSON store remains available only through `STORE_DRIVER=json`. Runner heartbeat and append-only build logs are implemented.
+- Status: PostgreSQL is the default active store for products, builds, uploads, build locks, logs, audit events, notifications, and optional auth sessions. JSON store remains available through `STORE_DRIVER=json`. Runner heartbeat, append-only build logs, lifecycle reconciliation, metrics, and alert rules are implemented.
 
 Acceptance:
 
