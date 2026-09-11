@@ -518,7 +518,7 @@ async function packageWindows(build, workspace) {
   await writeFile(
     output,
     [
-      "Packaging Platform Windows setup placeholder.",
+      "Vela Windows setup placeholder.",
       "Set WINDOWS_PACKAGER_CMD to run Inno Setup or WiX on a Windows runner.",
       `Build: ${build.id}`,
     ].join("\n"),

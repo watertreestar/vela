@@ -103,7 +103,7 @@ class OIDCCheckCliTest(unittest.TestCase):
         token = make_token(
             {
                 "iss": "https://issuer.example.test",
-                "aud": ["packaging-platform", "other"],
+                "aud": ["vela", "other"],
                 "sub": "alice",
                 "groups": ["packaging-operator"],
                 "exp": 1999999999,
@@ -113,7 +113,7 @@ class OIDCCheckCliTest(unittest.TestCase):
         results = oidc_check_cli.validate_token_claims(
             token,
             issuer="https://issuer.example.test",
-            audience="packaging-platform",
+            audience="vela",
             role_claim="groups",
             expected_role="packaging-operator",
             subject_claim="sub",
@@ -126,7 +126,7 @@ class OIDCCheckCliTest(unittest.TestCase):
         expired_token = make_token(
             {
                 "iss": "https://issuer.example.test",
-                "aud": "packaging-platform",
+                "aud": "vela",
                 "sub": "alice",
                 "roles": "operator",
                 "exp": now - 60,
@@ -135,7 +135,7 @@ class OIDCCheckCliTest(unittest.TestCase):
         future_token = make_token(
             {
                 "iss": "https://issuer.example.test",
-                "aud": "packaging-platform",
+                "aud": "vela",
                 "sub": "alice",
                 "roles": "operator",
                 "exp": now + 3600,
@@ -146,7 +146,7 @@ class OIDCCheckCliTest(unittest.TestCase):
         expired_results = oidc_check_cli.validate_token_claims(
             expired_token,
             issuer="https://issuer.example.test",
-            audience="packaging-platform",
+            audience="vela",
             role_claim="roles",
             expected_role="operator",
             subject_claim="sub",
@@ -154,7 +154,7 @@ class OIDCCheckCliTest(unittest.TestCase):
         future_results = oidc_check_cli.validate_token_claims(
             future_token,
             issuer="https://issuer.example.test",
-            audience="packaging-platform",
+            audience="vela",
             role_claim="roles",
             expected_role="operator",
             subject_claim="sub",
@@ -187,7 +187,7 @@ class OIDCCheckCliTest(unittest.TestCase):
         self.assertEqual(oidc_check_cli.result_exit_code(results), 1)
         self.assertTrue(any(result.name == "OIDC issuer configured" and result.status == "fail" for result in results))
 
-    def test_live_backend_acceptance_marks_401_as_failure(self):
+    def test_live_conductor_acceptance_marks_401_as_failure(self):
         JSONHandler.api_status = 401
         try:
             result = oidc_check_cli.protected_api_check(self.base_url, "token")
@@ -201,7 +201,7 @@ class OIDCCheckCliTest(unittest.TestCase):
         token = make_token(
             {
                 "iss": "https://issuer.example.test",
-                "aud": "packaging-platform",
+                "aud": "vela",
                 "sub": "reader",
                 "roles": "viewer",
                 "exp": 1999999999,
@@ -209,7 +209,7 @@ class OIDCCheckCliTest(unittest.TestCase):
         )
         args = Namespace(
             issuer="https://issuer.example.test",
-            audience="packaging-platform",
+            audience="vela",
             jwks_url=f"{self.base_url}/jwks",
             discovery_url="",
             authorization_url="",
@@ -227,7 +227,7 @@ class OIDCCheckCliTest(unittest.TestCase):
         results = oidc_check_cli.validate(args)
 
         self.assertEqual(oidc_check_cli.result_exit_code(results), 0, results)
-        self.assertTrue(any(result.name == "Backend OIDC acceptance" and result.status == "ok" for result in results))
+        self.assertTrue(any(result.name == "Conductor OIDC acceptance" and result.status == "ok" for result in results))
 
     def test_production_mode_checks_discovery_and_https(self):
         issuer = self.base_url
@@ -241,7 +241,7 @@ class OIDCCheckCliTest(unittest.TestCase):
         token = make_token(
             {
                 "iss": issuer,
-                "aud": "packaging-platform",
+                "aud": "vela",
                 "sub": "reader",
                 "roles": "viewer",
                 "exp": 1999999999,
@@ -249,7 +249,7 @@ class OIDCCheckCliTest(unittest.TestCase):
         )
         args = Namespace(
             issuer=issuer,
-            audience="packaging-platform",
+            audience="vela",
             jwks_url=f"{self.base_url}/jwks",
             discovery_url=f"{self.base_url}/.well-known/openid-configuration",
             authorization_url=f"{self.base_url}/auth",
@@ -275,10 +275,10 @@ class OIDCCheckCliTest(unittest.TestCase):
         self.assertEqual(oidc_check_cli.result_exit_code(strict_results), 1)
         self.assertTrue(any(result.name == "OIDC issuer uses HTTPS" and result.status == "fail" for result in strict_results))
 
-    def test_production_mode_requires_endpoints_expected_role_and_backend_live_api(self):
+    def test_production_mode_requires_endpoints_expected_role_and_conductor_live_api(self):
         args = Namespace(
             issuer="https://issuer.example.test",
-            audience="packaging-platform",
+            audience="vela",
             jwks_url="https://issuer.example.test/jwks",
             discovery_url="",
             authorization_url="",
@@ -301,7 +301,7 @@ class OIDCCheckCliTest(unittest.TestCase):
         self.assertTrue(any(result.name == "Production authorization endpoint" and result.status == "fail" for result in results))
         self.assertTrue(any(result.name == "Production token endpoint" and result.status == "fail" for result in results))
         self.assertTrue(any(result.name == "Production expected role" and result.status == "fail" for result in results))
-        self.assertTrue(any(result.name == "Production backend live API" and result.status == "fail" for result in results))
+        self.assertTrue(any(result.name == "Production conductor live API" and result.status == "fail" for result in results))
 
     def test_broker_live_acceptance_exchanges_session_and_logout(self):
         JSONHandler.api_status_after_logout = 401
@@ -320,7 +320,7 @@ class OIDCCheckCliTest(unittest.TestCase):
 
         self.assertEqual(oidc_check_cli.result_exit_code(results), 0, results)
         self.assertTrue(any(result.name == "OIDC broker token exchange" and result.status == "ok" for result in results))
-        self.assertTrue(any(result.name == "Backend OIDC acceptance" and result.status == "ok" for result in results))
+        self.assertTrue(any(result.name == "Conductor OIDC acceptance" and result.status == "ok" for result in results))
         self.assertTrue(any(result.name == "Broker logout" and result.status == "ok" for result in results))
         self.assertTrue(any(result.name == "Broker session revocation" and result.status == "ok" for result in results))
 
@@ -361,7 +361,7 @@ class OIDCCheckCliTest(unittest.TestCase):
     def test_require_broker_fails_without_broker_live(self):
         args = Namespace(
             issuer="https://issuer.example.test",
-            audience="packaging-platform",
+            audience="vela",
             jwks_url="",
             discovery_url="",
             authorization_url="",

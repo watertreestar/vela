@@ -1,4 +1,4 @@
-module packaging-platform/lsapctl
+module vela/lsapctl
 
 go 1.25.0
 

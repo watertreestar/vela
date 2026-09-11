@@ -1,4 +1,4 @@
-# Packaging Platform API
+# Vela API
 
 Base URL:
 
@@ -17,7 +17,7 @@ Supported token types:
 
 OIDC tokens currently require RS256 and must pass JWKS signature verification, issuer check, audience check, `exp`, and optional `nbf`. The role claim defaults to `roles`; external role values are mapped through `OIDC_ADMIN_ROLE`, `OIDC_OPERATOR_ROLE`, and `OIDC_VIEWER_ROLE`. The audit actor id is `oidc:<subject>`, where subject defaults to the `sub` claim. Runner APIs should use `AUTH_RUNNER_TOKEN`.
 
-The admin frontend can obtain that bearer token either from an implicit/bearer callback or through Authorization Code + PKCE when `VITE_OIDC_RESPONSE_TYPE=code` and `VITE_OIDC_TOKEN_URL` are configured. The API boundary remains `Authorization: Bearer <token>`. By default that token is the IdP token; with the optional broker below it becomes a short-lived platform session token.
+The admin studio can obtain that bearer token either from an implicit/bearer callback or through Authorization Code + PKCE when `VITE_OIDC_RESPONSE_TYPE=code` and `VITE_OIDC_TOKEN_URL` are configured. The API boundary remains `Authorization: Bearer <token>`. By default that token is the IdP token; with the optional broker below it becomes a short-lived platform session token.
 
 When `OIDC_TOKEN_URL`, `OIDC_CLIENT_ID`, and `AUTH_SESSION_HMAC_KEY` are configured, the API also exposes an optional broker:
 
@@ -55,7 +55,7 @@ POST /api/auth/logout
 Authorization: Bearer <platform-session-token>
 ```
 
-Logout revokes the persisted platform session when `AUTH_SESSION_STORE_ENABLED=true`. For static tokens or raw IdP access tokens it is a no-op for the server and can still be used by the frontend as a unified "clear local token" action.
+Logout revokes the persisted platform session when `AUTH_SESSION_STORE_ENABLED=true`. For static tokens or raw IdP access tokens it is a no-op for the server and can still be used by the studio as a unified "clear local token" action.
 
 ## Operations
 
@@ -214,7 +214,7 @@ Release publishing is gated:
 
 `GET /api/builds/{id}/release-check` returns the shared gate used by preview validation and release publishing:
 
-`GET /api/builds`, `GET /api/builds/{id}`, and build state mutation responses include `releaseCheckSummary` so the admin UI can use the same backend gate for list filters and Release button availability.
+`GET /api/builds`, `GET /api/builds/{id}`, and build state mutation responses include `releaseCheckSummary` so the admin UI can use the same conductor gate for list filters and Release button availability.
 
 ```json
 {

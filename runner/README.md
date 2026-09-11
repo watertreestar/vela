@@ -103,7 +103,7 @@ export DAGGER_DOCKER_SOCKET=/var/run/docker.sock
 For production Linux packages, set `LSAPCTL_SOURCE_DIR` and `LSAPCTL_BUILD_CMD` so the final tarball includes `lsapctl` at the package root:
 
 ```bash
-export LSAPCTL_SOURCE_DIR=/opt/packaging-platform/lsapctl
+export LSAPCTL_SOURCE_DIR=/opt/vela/lsapctl
 export LSAPCTL_BUILD_CMD='cd /workspace/context/lsapctl-src && GOOS=linux GOARCH=amd64 go build -o "$OUTPUT_DIR/lsapctl" .'
 ```
 
@@ -266,7 +266,7 @@ Secret references:
 - The API resolves these references before Nomad submission and injects `PACKAGING_SECRET_*` environment variables into the runner.
 - The runner replaces secret references in `finalConfig`, `variables`, and `workloads` before rendering runtime files and package context.
 - Example: `secret:db/root-password` is read from `PACKAGING_SECRET_DB_ROOT_PASSWORD`.
-- If the backend uses a custom `SECRET_ENV_PREFIX`, Nomad forwards that prefix to the runner and the runner reads the matching environment variable names.
+- If the conductor uses a custom `SECRET_ENV_PREFIX`, Nomad forwards that prefix to the runner and the runner reads the matching environment variable names.
 - Missing secret env values fail the build before packaging starts.
 
 Proxy variables are supported by normal process inheritance and are passed to `fetch`, `bun`, Dagger, and child commands:

@@ -14,7 +14,7 @@
 
 ```bash
 python scripts/production_readiness_cli.py check \
-  --full-backend \
+  --full-conductor \
   --require-idp-live \
   --idp-live \
   --api-url https://packaging-api.example.com \
@@ -79,7 +79,7 @@ AUTH_OPERATOR_TOKEN=<optional-static-operator-token>
 AUTH_VIEWER_TOKEN=<optional-static-viewer-token>
 AUTH_RUNNER_TOKEN=<runner-token>
 OIDC_ISSUER=https://idp.example.com/realms/packaging
-OIDC_AUDIENCE=packaging-platform
+OIDC_AUDIENCE=vela
 OIDC_JWKS_URL=https://idp.example.com/realms/packaging/protocol/openid-connect/certs
 OIDC_ROLE_CLAIM=roles
 OIDC_SUBJECT_CLAIM=sub

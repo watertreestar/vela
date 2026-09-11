@@ -91,7 +91,7 @@ class ProductionReadinessCliTest(unittest.TestCase):
             "--oidc-issuer",
             "https://idp.example.test",
             "--oidc-audience",
-            "packaging-platform",
+            "vela",
             "--oidc-jwks-url",
             "https://idp.example.test/certs",
             "--oidc-discovery-url",

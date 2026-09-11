@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a local end-to-end acceptance flow for Packaging Platform."""
+"""Run a local end-to-end acceptance flow for Vela."""
 
 from __future__ import annotations
 
@@ -286,7 +286,7 @@ def artifact_store_env(args: argparse.Namespace, for_api_container: bool) -> dic
 
 
 def build_api_binary(root: pathlib.Path, target: str) -> pathlib.Path:
-    backend_dir = root / "backend"
+    conductor_dir = root / "conductor"
     dist_dir = root / "dist"
     dist_dir.mkdir(exist_ok=True)
     if target == "linux":
@@ -295,7 +295,7 @@ def build_api_binary(root: pathlib.Path, target: str) -> pathlib.Path:
     else:
         api_binary = dist_dir / ("packaging-api-acceptance.exe" if os.name == "nt" else "packaging-api-acceptance")
         env = {}
-    build = run_command(["go", "build", "-o", str(api_binary), "./cmd/server"], backend_dir, env=env, timeout=300)
+    build = run_command(["go", "build", "-o", str(api_binary), "./cmd/server"], conductor_dir, env=env, timeout=300)
     require_success(build, "build local API binary")
     return api_binary
 
@@ -311,21 +311,21 @@ def start_api_if_needed(args: argparse.Namespace, root: pathlib.Path) -> Started
 
 
 def start_host_api(args: argparse.Namespace, root: pathlib.Path) -> StartedApi:
-    backend_dir = root / "backend"
+    conductor_dir = root / "conductor"
     api_binary = build_api_binary(root, "host")
     env = {
         "PORT": str(api_port(args.api_url)),
         "STORE_DRIVER": args.store_driver,
         "DATABASE_URL": args.database_url,
         "PRODUCTS_DIR": str(root / "products"),
-        "DATA_DIR": str(backend_dir / "data"),
+        "DATA_DIR": str(conductor_dir / "data"),
         "DRY_RUN": "true",
         "PACKAGING_API_URL": args.api_url,
     }
     env.update(artifact_store_env(args, for_api_container=False))
     process = subprocess.Popen(
         [str(api_binary)],
-        cwd=backend_dir,
+        cwd=conductor_dir,
         env={**os.environ, **env},
         text=True,
         stdout=subprocess.DEVNULL,
@@ -365,7 +365,7 @@ def start_docker_api(args: argparse.Namespace, root: pathlib.Path) -> StartedApi
         "-e",
         "PRODUCTS_DIR=/workspace/products",
         "-e",
-        "DATA_DIR=/workspace/backend/data",
+        "DATA_DIR=/workspace/conductor/data",
         "-e",
         "DRY_RUN=true",
         "-e",
@@ -819,7 +819,7 @@ def run_check(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run local Packaging Platform acceptance checks.")
+    parser = argparse.ArgumentParser(description="Run local Vela acceptance checks.")
     parser.add_argument("--api-url", default=DEFAULT_API_URL)
     parser.add_argument("--runner-api-url", default="")
     parser.add_argument("--namespace", default=f"acceptance-{utc_stamp()}")

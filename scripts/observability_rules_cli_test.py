@@ -17,10 +17,10 @@ class ObservabilityRulesCliTest(unittest.TestCase):
     def test_missing_required_alert_fails_validation(self):
         content = """
 groups:
-  - name: packaging-platform.test
+  - name: vela.test
     rules:
-      - alert: PackagingPlatformAPIDown
-        expr: up{job="packaging-platform"} == 0
+      - alert: VelaAPIDown
+        expr: up{job="vela"} == 0
 """
 
         results = observability_rules_cli.validate_rules(content)

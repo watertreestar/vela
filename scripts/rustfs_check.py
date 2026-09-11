@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check local RustFS connectivity and run Packaging Platform RustFS integration tests."""
+"""Check local RustFS connectivity and run Vela RustFS integration tests."""
 
 from __future__ import annotations
 
@@ -92,7 +92,7 @@ def run_rustfs_integration(args: argparse.Namespace, root: pathlib.Path) -> Chec
         env["RUSTFS_BUCKET"] = args.bucket
     result = run_command(
         ["go", "test", "./internal/artifact", "-run", "TestResolveArtifactSourceWithRustFSIntegration", "-v"],
-        root / "backend",
+        root / "conductor",
         timeout=args.test_timeout,
         env=env,
     )
@@ -117,7 +117,7 @@ def run_object_lock_integration(args: argparse.Namespace, root: pathlib.Path) ->
         env["RUSTFS_BUCKET"] = args.object_lock_bucket or args.bucket
     result = run_command(
         ["go", "test", "./internal/artifact", "-run", "TestAuditArchiveObjectLockWithRustFSIntegration", "-v"],
-        root / "backend",
+        root / "conductor",
         timeout=args.test_timeout,
         env=env,
     )
@@ -221,7 +221,7 @@ def check(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Packaging Platform RustFS check CLI.")
+    parser = argparse.ArgumentParser(description="Vela RustFS check CLI.")
     parser.add_argument("--container", default="packaging-rustfs")
     parser.add_argument("--endpoint", default=os.environ.get("RUSTFS_ENDPOINT", "127.0.0.1:9000"))
     parser.add_argument("--access-key", default=os.environ.get("RUSTFS_ACCESS_KEY", "rustfsadmin"))

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate and optionally dispatch Packaging Platform notifications by severity."""
+"""Validate and optionally dispatch Vela notifications by severity."""
 
 from __future__ import annotations
 
@@ -217,7 +217,7 @@ def print_json(results: list[CheckResult]) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Validate and optionally dispatch Packaging Platform notifications by severity.")
+    parser = argparse.ArgumentParser(description="Validate and optionally dispatch Vela notifications by severity.")
     subparsers = parser.add_subparsers(dest="command")
     check = subparsers.add_parser("check", help="check notification routing and optionally send webhooks")
     check.add_argument("--api-url", default=DEFAULT_API_URL)

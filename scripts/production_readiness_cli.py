@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Packaging Platform production readiness gates."""
+"""Run Vela production readiness gates."""
 
 from __future__ import annotations
 
@@ -260,8 +260,8 @@ def run_checks(args: argparse.Namespace) -> list[CheckResult]:
             )
         )
         lifecycle = [sys.executable, str(root / "scripts" / "lifecycle_cli.py"), "check"]
-        if args.full_backend:
-            lifecycle.append("--full-backend")
+        if args.full_conductor:
+            lifecycle.append("--full-conductor")
         results.append(run_gate("Lifecycle reconciliation", lifecycle, root, args.timeout))
         results.append(
             run_gate(
@@ -383,19 +383,19 @@ def print_json(report: dict[str, Any]) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Packaging Platform production readiness gate runner.")
+    parser = argparse.ArgumentParser(description="Vela production readiness gate runner.")
     subparsers = parser.add_subparsers(dest="command")
     check = subparsers.add_parser("check", help="run production readiness gates")
     check.add_argument("--timeout", type=int, default=300)
     check.add_argument("--skip-local-governance", action="store_true", help="skip local observability and lifecycle checks")
-    check.add_argument("--full-backend", action="store_true", help="make lifecycle check also run backend go test ./...")
+    check.add_argument("--full-conductor", action="store_true", help="make lifecycle check also run conductor go test ./...")
     check.add_argument("--json", action="store_true", help="print machine-readable JSON report")
     check.add_argument("--report-file", help="write the machine-readable JSON report to this path")
 
-    check.add_argument("--api-url", help="backend API URL; defaults to PACKAGING_API_URL")
+    check.add_argument("--api-url", help="conductor API URL; defaults to PACKAGING_API_URL")
     check.add_argument("--protected-path", default="/api/audit-events?limit=1")
 
-    check.add_argument("--idp-live", action="store_true", help="run live production IdP/JWKS/backend token acceptance")
+    check.add_argument("--idp-live", action="store_true", help="run live production IdP/JWKS/conductor token acceptance")
     check.add_argument("--require-idp-live", action="store_true", help="fail if --idp-live is not supplied")
     check.add_argument("--oidc-issuer")
     check.add_argument("--oidc-audience")
@@ -466,14 +466,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     check.add_argument("--artifact-retention-live", action="store_true", help="run live API artifact retention metadata/download enforcement acceptance")
     check.add_argument("--require-artifact-retention-live", action="store_true", help="fail if --artifact-retention-live is not supplied")
-    check.add_argument("--artifact-retention-token", help="backend bearer token for retention live checks; defaults to PACKAGING_API_TOKEN")
+    check.add_argument("--artifact-retention-token", help="conductor bearer token for retention live checks; defaults to PACKAGING_API_TOKEN")
     check.add_argument("--artifact-retention-max-expired", type=int, default=0)
     check.add_argument("--artifact-retention-sample-expired-downloads", type=int, default=3)
     check.add_argument("--artifact-retention-skip-download-check", action="store_true")
 
     check.add_argument("--notification-routing-live", action="store_true", help="run live notification API routing/receiver acceptance")
     check.add_argument("--require-notification-routing-live", action="store_true", help="fail if --notification-routing-live is not supplied")
-    check.add_argument("--notification-routing-token", help="backend bearer token for notification routing checks; defaults to PACKAGING_API_TOKEN")
+    check.add_argument("--notification-routing-token", help="conductor bearer token for notification routing checks; defaults to PACKAGING_API_TOKEN")
     check.add_argument("--notification-route", action="append", default=[], help="severity=webhookUrl; repeated and forwarded to notification_routing_cli.py")
     check.add_argument("--notification-require-severity", action="append", default=[], help="required severity route; defaults inside notification_routing_cli.py when omitted")
     check.add_argument("--notification-routing-limit", type=int, default=50)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate Packaging Platform Prometheus alert rule files."""
+"""Validate Vela Prometheus alert rule files."""
 
 from __future__ import annotations
 
@@ -10,16 +10,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-DEFAULT_RULES = Path("infra/prometheus/packaging-platform-rules.yml")
+DEFAULT_RULES = Path("infra/prometheus/vela-rules.yml")
 REQUIRED_ALERTS = {
-    "PackagingPlatformAPIDown",
-    "PackagingPlatformRunnerUnavailable",
-    "PackagingPlatformActiveRunnerHeartbeatStale",
-    "PackagingPlatformRunnerCacheScanTruncated",
-    "PackagingPlatformBuildQueueBacklog",
-    "PackagingPlatformFailedBuildVolume",
-    "PackagingPlatformReleaseGateBlocked",
-    "PackagingPlatformExpiredArtifactsPresent",
+    "VelaAPIDown",
+    "VelaRunnerUnavailable",
+    "VelaActiveRunnerHeartbeatStale",
+    "VelaRunnerCacheScanTruncated",
+    "VelaBuildQueueBacklog",
+    "VelaFailedBuildVolume",
+    "VelaReleaseGateBlocked",
+    "VelaExpiredArtifactsPresent",
 }
 KNOWN_METRICS = {
     "up",
@@ -123,7 +123,7 @@ def print_results(results: list[RuleCheck]) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Validate Packaging Platform Prometheus alert rules.")
+    parser = argparse.ArgumentParser(description="Validate Vela Prometheus alert rules.")
     parser.add_argument("command", choices=["check"], nargs="?", default="check")
     parser.add_argument("--rules", type=Path, default=DEFAULT_RULES)
     return parser

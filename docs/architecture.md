@@ -1,4 +1,4 @@
-# Packaging Platform Architecture
+# Vela Architecture
 
 ## Architecture
 
@@ -170,7 +170,7 @@ Components define where artifacts come from. Workloads define how artifacts run 
 | Manual upload | Implemented MVP | Upload endpoint, PostgreSQL upload records, local file storage adapter |
 | Config override without script changes | Implemented MVP | Resolver merges target/profile/customer/build overrides into build lock |
 
-Release gate enforcement is centralized through the build release check API. The same check set powers the admin dashboard, `validate-preview`, and `publish`, so the UI can show exactly why a build is blocked before the backend rejects the action. Preview validation checks artifact availability, Build Lock presence, Build Lock target/profile/version consistency, and required component locks. Release publishing adds fixed build versions, fixed component versions, exact component URIs without wildcards, artifact availability, and no recorded build error.
+Release gate enforcement is centralized through the build release check API. The same check set powers the admin dashboard, `validate-preview`, and `publish`, so the UI can show exactly why a build is blocked before the conductor rejects the action. Preview validation checks artifact availability, Build Lock presence, Build Lock target/profile/version consistency, and required component locks. Release publishing adds fixed build versions, fixed component versions, exact component URIs without wildcards, artifact availability, and no recorded build error.
 
 ## Target Capability
 

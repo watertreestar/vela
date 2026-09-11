@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Trace request/correlation IDs across Packaging Platform resources."""
+"""Trace request/correlation IDs across Vela resources."""
 
 from __future__ import annotations
 
@@ -339,7 +339,7 @@ def print_json(report: dict[str, Any]) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Trace request/correlation IDs across Packaging Platform resources.")
+    parser = argparse.ArgumentParser(description="Trace request/correlation IDs across Vela resources.")
     subparsers = parser.add_subparsers(dest="command")
     trace = subparsers.add_parser("trace", help="query audit/build/upload/notification records by request or correlation ID")
     trace.add_argument("--api-url", default=DEFAULT_API_URL)

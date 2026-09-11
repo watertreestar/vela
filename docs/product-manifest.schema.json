@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.com/packaging-platform/product-manifest.schema.json",
+  "$id": "https://example.com/vela/product-manifest.schema.json",
   "type": "object",
   "required": ["id", "name", "targets", "profiles", "versions", "components", "config"],
   "properties": {

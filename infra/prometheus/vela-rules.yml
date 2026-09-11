@@ -1,0 +1,86 @@
+groups:
+  - name: vela.availability
+    rules:
+      - alert: VelaAPIDown
+        expr: up{job="vela"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          category: availability
+        annotations:
+          summary: Vela API is not scrapeable
+          description: Prometheus cannot scrape the Vela API metrics endpoint.
+
+      - alert: VelaRunnerUnavailable
+        expr: sum(packaging_runners_total{status=~"stale|offline|unknown"}) > 0
+        for: 5m
+        labels:
+          severity: warning
+          category: runner
+        annotations:
+          summary: Packaging runner is unavailable
+          description: One or more runners are stale, offline, or unknown.
+
+      - alert: VelaActiveRunnerHeartbeatStale
+        expr: packaging_runner_running_builds > 0 and on (runner_id,status,target) packaging_runner_last_heartbeat_age_seconds > 300
+        for: 5m
+        labels:
+          severity: critical
+          category: runner
+        annotations:
+          summary: Active packaging runner heartbeat is stale
+          description: A runner has active builds but has not reported heartbeat or logs recently.
+
+      - alert: VelaRunnerCacheScanTruncated
+        expr: sum(packaging_runner_cache_scan_truncated) by (runner_id, target, stage, cache) > 0
+        for: 15m
+        labels:
+          severity: warning
+          category: runner
+        annotations:
+          summary: Packaging runner cache scan is truncated
+          description: Runner cache scan hit RUNNER_CACHE_SCAN_FILE_LIMIT; inspect packaging_runner_cache_entries, packaging_runner_cache_bytes, and packaging_runner_cache_files.
+
+  - name: vela.release-flow
+    rules:
+      - alert: VelaBuildQueueBacklog
+        expr: sum(packaging_builds_total{status="queued"}) > 10
+        for: 10m
+        labels:
+          severity: warning
+          category: build
+        annotations:
+          summary: Packaging build queue backlog is high
+          description: Queued builds have exceeded the operational threshold for more than 10 minutes.
+
+      - alert: VelaFailedBuildVolume
+        expr: sum(packaging_builds_total{status="failed"}) > 20
+        for: 15m
+        labels:
+          severity: warning
+          category: build
+        annotations:
+          summary: Failed packaging build volume is high
+          description: Failed builds are above the expected threshold and should be triaged.
+
+      - alert: VelaReleaseGateBlocked
+        expr: sum(packaging_release_gate_blockers_total{stage="release"}) > 0
+        for: 30m
+        labels:
+          severity: warning
+          category: release-gate
+        annotations:
+          summary: Release gate has been blocked for too long
+          description: At least one build has release gate blockers for more than 30 minutes.
+
+  - name: vela.artifacts
+    rules:
+      - alert: VelaExpiredArtifactsPresent
+        expr: sum(packaging_uploads_total{retention_status="expired"}) > 0
+        for: 30m
+        labels:
+          severity: warning
+          category: artifact
+        annotations:
+          summary: Expired artifacts are still present
+          description: Artifact retention cleanup has expired artifacts pending removal or review.

@@ -1,10 +1,10 @@
-# Packaging Platform 操作文档
+# Vela 操作文档
 
-本文档面向使用和验收 Packaging Platform 的产品、构建、发布和运维人员。目标是把“产品 Manifest 管理、Preview 构建、发布门禁、Linux/Windows Runner、测试验证”串成一条可执行流程，方便核对当前实现是否满足需求。
+本文档面向使用和验收 Vela 的产品、构建、发布和运维人员。目标是把“产品 Manifest 管理、Preview 构建、发布门禁、Linux/Windows Runner、测试验证”串成一条可执行流程，方便核对当前实现是否满足需求。
 
 ## 1. 系统定位
 
-Packaging Platform 是一个内部安装包构建控制台，用来集中管理产品打包配置，并把实际构建任务交给受控 Runner 执行。
+Vela 是一个内部安装包构建控制台，用来集中管理产品打包配置，并把实际构建任务交给受控 Runner 执行。
 
 当前系统覆盖的核心目标：
 
@@ -38,8 +38,8 @@ Packaging Platform 是一个内部安装包构建控制台，用来集中管理�
 主要目录：
 
 ```text
-backend/              Go API 服务
-frontend/             React + Radix 管理后台
+conductor/              Go API 服务
+studio/             React + Radix 管理后台
 products/             产品 Manifest、Profile 覆盖、客户覆盖
 runner/               Bun Runner，负责领取任务和执行打包
 infra/nomad/          Nomad Linux/Windows 节点配置
@@ -83,7 +83,7 @@ postgres://packaging:packaging@127.0.0.1:5432/packaging?sslmode=disable
 ### 4.2 启动后端
 
 ```bash
-cd backend
+cd conductor
 go run ./cmd/server
 ```
 
@@ -118,7 +118,7 @@ AUTH_RUNNER_TOKEN=<runner-token>
 
 ```bash
 OIDC_ISSUER=https://idp.example.com/realms/packaging
-OIDC_AUDIENCE=packaging-platform
+OIDC_AUDIENCE=vela
 OIDC_JWKS_URL=https://idp.example.com/realms/packaging/protocol/openid-connect/certs
 OIDC_TOKEN_URL=https://idp.example.com/realms/packaging/protocol/openid-connect/token
 OIDC_CLIENT_ID=packaging-admin
@@ -200,7 +200,7 @@ VITE_OIDC_VIEWER_ROLE=viewer
 ### 4.3 启动前端
 
 ```bash
-cd frontend
+cd studio
 npm install
 npm run dev
 ```
@@ -880,7 +880,7 @@ RUNNER_DOCKER_PRIVILEGED=false
 如果 Linux 包需要包含 `lsapctl`：
 
 ```bash
-LSAPCTL_SOURCE_DIR=/opt/packaging-platform/lsapctl
+LSAPCTL_SOURCE_DIR=/opt/vela/lsapctl
 LSAPCTL_BUILD_CMD='cd /workspace/context/lsapctl-src && GOOS=linux GOARCH=amd64 go build -o "$OUTPUT_DIR/lsapctl" .'
 ```
 
@@ -1207,7 +1207,7 @@ NO_PROXY=localhost,127.0.0.1,<api-host>,<minio-host>,<nomad-host>
 ### 16.1 后端 API 测试
 
 ```bash
-cd backend
+cd conductor
 go test ./... -count=1
 ```
 
@@ -1222,7 +1222,7 @@ go test ./... -count=1
 ### 16.2 前端单元测试
 
 ```bash
-cd frontend
+cd studio
 npm test -- --run
 ```
 
@@ -1235,7 +1235,7 @@ npm test -- --run
 ### 16.3 E2E UI 测试
 
 ```bash
-cd frontend
+cd studio
 npm run test:e2e
 ```
 
@@ -1249,7 +1249,7 @@ E2E 使用 Playwright 和 mock API 数据，覆盖：
 ### 16.4 前端构建
 
 ```bash
-cd frontend
+cd studio
 npm run build
 ```
 
@@ -1362,25 +1362,25 @@ Prometheus 告警规则：
 python scripts/observability_rules_cli.py check
 ```
 
-规则文件位于 `infra/prometheus/packaging-platform-rules.yml`，可以按 Prometheus rule_files 方式加载：
+规则文件位于 `infra/prometheus/vela-rules.yml`，可以按 Prometheus rule_files 方式加载：
 
 ```yaml
 rule_files:
-  - /etc/prometheus/rules/packaging-platform-rules.yml
+  - /etc/prometheus/rules/vela-rules.yml
 ```
 
 当前告警覆盖：
 
 | Alert | Severity | 触发条件 |
 |---|---|---|
-| `PackagingPlatformAPIDown` | critical | Prometheus 无法抓取 Packaging Platform API |
-| `PackagingPlatformRunnerUnavailable` | warning | 存在 stale、offline 或 unknown Runner |
-| `PackagingPlatformActiveRunnerHeartbeatStale` | critical | Runner 有运行中构建但 heartbeat/log 超过 5 分钟 |
-| `PackagingPlatformRunnerCacheScanTruncated` | warning | Runner cache 扫描持续触达文件数上限 |
-| `PackagingPlatformBuildQueueBacklog` | warning | queued 构建超过 10 个并持续 10 分钟 |
-| `PackagingPlatformFailedBuildVolume` | warning | failed 构建超过 20 个并持续 15 分钟 |
-| `PackagingPlatformReleaseGateBlocked` | warning | Release gate 阻塞持续 30 分钟 |
-| `PackagingPlatformExpiredArtifactsPresent` | warning | 存在过期制品持续 30 分钟 |
+| `VelaAPIDown` | critical | Prometheus 无法抓取 Vela API |
+| `VelaRunnerUnavailable` | warning | 存在 stale、offline 或 unknown Runner |
+| `VelaActiveRunnerHeartbeatStale` | critical | Runner 有运行中构建但 heartbeat/log 超过 5 分钟 |
+| `VelaRunnerCacheScanTruncated` | warning | Runner cache 扫描持续触达文件数上限 |
+| `VelaBuildQueueBacklog` | warning | queued 构建超过 10 个并持续 10 分钟 |
+| `VelaFailedBuildVolume` | warning | failed 构建超过 20 个并持续 15 分钟 |
+| `VelaReleaseGateBlocked` | warning | Release gate 阻塞持续 30 分钟 |
+| `VelaExpiredArtifactsPresent` | warning | 存在过期制品持续 30 分钟 |
 
 规则校验会检查必备 alert、基础 Prometheus rule 结构、关键指标引用和 tab 缩进。生产环境可以按团队容量调整阈值，但不要删除 release gate、runner heartbeat 和 artifact retention 这三类告警。
 
@@ -1390,7 +1390,7 @@ Alertmanager 路由示例：
 python scripts/alertmanager_config_cli.py check
 ```
 
-示例文件位于 `infra/prometheus/alertmanager-packaging-platform.yml`，可以作为 Alertmanager 配置模板。生产 Prometheus 通过 `alerting.alertmanagers` 指向 Alertmanager：
+示例文件位于 `infra/prometheus/alertmanager-vela.yml`，可以作为 Alertmanager 配置模板。生产 Prometheus 通过 `alerting.alertmanagers` 指向 Alertmanager：
 
 ```yaml
 alerting:
@@ -1409,7 +1409,7 @@ alerting:
 | `packaging-release-managers` | `category="release-gate"` | Release gate 长时间阻塞 |
 | `packaging-artifact-ops` | `category="artifact"` | 过期制品、保留策略和清理问题 |
 | `packaging-build-ops` | `category="build"` | 队列积压和失败构建堆积 |
-| `packaging-default` | 默认路由 | 未匹配的 Packaging Platform 告警 |
+| `packaging-default` | 默认路由 | 未匹配的 Vela 告警 |
 
 示例 receiver 使用 webhook placeholder：`http://alert-router.internal/packaging/...`。生产环境可以替换为真实 webhook，也可以改成 Email、Slack、PagerDuty 或企业内部通知系统。保留 `send_resolved: true`，这样恢复事件也能进入通知闭环。
 
@@ -1537,7 +1537,7 @@ python scripts/production_readiness_cli.py check
 
 ```bash
 python scripts/production_readiness_cli.py check \
-  --full-backend \
+  --full-conductor \
   --require-idp-live \
   --idp-live \
   --require-object-lock-live \
@@ -1581,7 +1581,7 @@ Nomad 生命周期回收检查：
 
 ```bash
 python scripts/lifecycle_cli.py check
-python scripts/lifecycle_cli.py check --full-backend
+python scripts/lifecycle_cli.py check --full-conductor
 python scripts/nomad_check_cli.py check \
   --production \
   --address "$NOMAD_ADDR" \

@@ -159,7 +159,7 @@ final manifest
 
 Templates should use structured data, not string replacement scattered across scripts. Recommended options:
 
-- Go `text/template` or `html/template` for backend-rendered files.
+- Go `text/template` or `html/template` for conductor-rendered files.
 - JSON/YAML patching for structured files.
 - Strict schema validation before render.
 

@@ -129,7 +129,7 @@ RUNNER_BUN_CACHE_DIR=/var/cache/packaging/bun
 RUNNER_DAGGER_CACHE_DIR=/var/cache/packaging/dagger
 ARTIFACT_ROOT=/var/cache/packaging/artifacts
 DAGGER_DOCKER_SOCKET=/var/run/docker.sock
-LSAPCTL_SOURCE_DIR=/opt/packaging-platform/lsapctl
+LSAPCTL_SOURCE_DIR=/opt/vela/lsapctl
 LSAPCTL_BUILD_CMD='cd /workspace/context/lsapctl-src && GOOS=linux GOARCH=amd64 go build -o "$OUTPUT_DIR/lsapctl" .'
 ```
 
@@ -273,7 +273,7 @@ Lifecycle reconciliation can be checked without a live Nomad cluster by running 
 
 ```bash
 python scripts/lifecycle_cli.py check
-python scripts/lifecycle_cli.py check --full-backend
+python scripts/lifecycle_cli.py check --full-conductor
 ```
 
 The check covers Nomad failed allocations, premature Nomad completion before runner success, runner heartbeat timeout, terminal-build safety, and scheduler inspection errors. Live cluster verification should still be run after Nomad topology changes.
@@ -302,7 +302,7 @@ Use the same verification flow for Linux and Windows:
 6. The build reaches `succeeded`.
 7. `GET /api/builds/{id}/release-check` reports Preview readiness.
 8. The admin console can validate Preview. Release promotion remains blocked until fixed versions and exact component URIs are present.
-9. `python scripts/lifecycle_cli.py check --full-backend` passes in CI or deployment verification.
+9. `python scripts/lifecycle_cli.py check --full-conductor` passes in CI or deployment verification.
 10. `python scripts/nomad_check_cli.py check --production --address "$NOMAD_ADDR" --require-linux-node --require-windows-node` passes against the live cluster, or records a deliberate `--allow-http` exception for an internal HTTP endpoint.
 
 If a build is stuck:

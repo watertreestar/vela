@@ -1,6 +1,6 @@
 # 一键本地验收流程
 
-本文档说明如何在本机用一条命令验证 Packaging Platform 的核心闭环：
+本文档说明如何在本机用一条命令验证 Vela 的核心闭环：
 
 ```text
 PostgreSQL -> API -> Build -> Docker Runner -> Dagger -> Artifact Upload -> Preview Validate -> Release Gate

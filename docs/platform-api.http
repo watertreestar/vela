@@ -1,4 +1,4 @@
-### Packaging Platform API Test Requests
+### Vela API Test Requests
 ### 用法：
 ### 1. 先确认后端已启动：ARTIFACT_STORE=local DRY_RUN=true go run ./cmd/server
 ### 2. 可先运行：python scripts/seed_cli.py seed

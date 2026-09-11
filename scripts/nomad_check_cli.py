@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate live Nomad cluster readiness for Packaging Platform runners."""
+"""Validate live Nomad cluster readiness for Vela runners."""
 
 from __future__ import annotations
 
@@ -145,7 +145,7 @@ def print_results(results: list[CheckResult]) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Validate live Nomad cluster readiness for Packaging Platform.")
+    parser = argparse.ArgumentParser(description="Validate live Nomad cluster readiness for Vela.")
     subparsers = parser.add_subparsers(dest="command")
     check = subparsers.add_parser("check", help="check Nomad leader and runner node classes")
     check.add_argument("--address", help="defaults to NOMAD_ADDR or http://127.0.0.1:4646")

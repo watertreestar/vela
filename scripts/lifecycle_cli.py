@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Packaging Platform lifecycle reconciliation checks."""
+"""Run Vela lifecycle reconciliation checks."""
 
 from __future__ import annotations
 
@@ -41,22 +41,22 @@ def run_command(command: list[str], cwd: Path, timeout: int = 120) -> subprocess
 
 
 def lifecycle_go_tests(root: Path) -> CheckResult:
-    result = run_command(["go", "test", "./internal/lifecycle"], root / "backend")
+    result = run_command(["go", "test", "./internal/lifecycle"], root / "conductor")
     output = "\n".join(part for part in [result.stdout, result.stderr] if part).strip()
     if result.returncode == 0:
-        return CheckResult("Lifecycle reconciliation Go tests", "ok", "backend/internal/lifecycle passed")
+        return CheckResult("Lifecycle reconciliation Go tests", "ok", "conductor/internal/lifecycle passed")
     return CheckResult("Lifecycle reconciliation Go tests", "fail", output or f"go test exited {result.returncode}")
 
 
 def run_checks(args: argparse.Namespace) -> list[CheckResult]:
     root = repo_root()
     results = [lifecycle_go_tests(root)]
-    if args.full_backend:
-        result = run_command(["go", "test", "./..."], root / "backend", timeout=180)
+    if args.full_conductor:
+        result = run_command(["go", "test", "./..."], root / "conductor", timeout=180)
         output = "\n".join(part for part in [result.stdout, result.stderr] if part).strip()
         results.append(
             CheckResult(
-                "Backend regression suite",
+                "Conductor regression suite",
                 "ok" if result.returncode == 0 else "fail",
                 "go test ./... passed" if result.returncode == 0 else output,
             )
@@ -75,10 +75,10 @@ def result_exit_code(results: list[CheckResult]) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Packaging Platform lifecycle reconciliation checks.")
+    parser = argparse.ArgumentParser(description="Vela lifecycle reconciliation checks.")
     subparsers = parser.add_subparsers(dest="command")
     check_parser = subparsers.add_parser("check", help="run lifecycle reconciliation checks")
-    check_parser.add_argument("--full-backend", action="store_true", help="also run backend go test ./...")
+    check_parser.add_argument("--full-conductor", action="store_true", help="also run conductor go test ./...")
     return parser
 
 

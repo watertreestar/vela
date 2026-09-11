@@ -109,7 +109,7 @@ GOOS=linux GOARCH=amd64 go build -o ../dist/lsapctl .
 During packaging, `LSAPCTL_BUILD_CMD` should place the binary at the package context root:
 
 ```bash
-LSAPCTL_SOURCE_DIR=/path/to/packaging-platform/lsapctl
+LSAPCTL_SOURCE_DIR=/path/to/vela/lsapctl
 DAGGER_LINUX_BASE_IMAGE=golang:1.25-alpine
 LSAPCTL_BUILD_CMD='cd /workspace/context/lsapctl-src && GOOS=linux GOARCH=amd64 go build -o "$OUTPUT_DIR/lsapctl" .'
 ```

@@ -1,11 +1,11 @@
-# Packaging Platform
+# Vela
 
 Internal packaging control plane for Linux and Windows installer builds.
 
 ## Structure
 
-- `backend/` - Go API service.
-- `frontend/` - React, Radix Themes, and Tailwind CSS web console.
+- `conductor/` - Go API service.
+- `studio/` - React, Radix Themes, and Tailwind CSS web console.
 - `products/` - Product manifests.
 - `infra/nomad/` - Nomad job templates and examples.
 - `infra/dagger/` - Dagger packaging workflow example.
@@ -82,7 +82,7 @@ Useful runner variables:
 - `WINDOWS_PACKAGER_CMD` - custom Windows setup command; receives `OUTPUT`.
 - `WINDOWS_SIGNING_CMD` - optional Windows signing command; runs after `WINDOWS_PACKAGER_CMD` and before checksum/upload, receives `OUTPUT`, `ARTIFACT`, `BUILD_ID`, `PRODUCT_ID`, `TARGET`, and `VERSION`.
 
-Backend:
+Conductor:
 
 ```bash
 docker run -d --name packaging-postgres \
@@ -91,22 +91,22 @@ docker run -d --name packaging-postgres \
   -e POSTGRES_DB=packaging \
   -p 5432:5432 postgres:16
 
-cd backend
+cd conductor
 go run ./cmd/server
 ```
 
-Frontend:
+Studio:
 
 ```bash
-cd frontend
+cd studio
 npm install
 npm run dev
 ```
 
-Frontend verification:
+Studio verification:
 
 ```bash
-cd frontend
+cd studio
 npm test -- --run
 npm run test:e2e
 npm run build
@@ -147,7 +147,7 @@ python scripts/rustfs_check.py --object-lock --object-lock-bucket packaging-audi
 python scripts/rustfs_check.py --production --skip-container-check --endpoint rustfs.example.com:9000 --access-key "$MINIO_ACCESS_KEY" --secret-key "$MINIO_SECRET_KEY" --use-ssl --object-lock --object-lock-bucket packaging-audit-lock --retention-mode COMPLIANCE --retention-days 3650 --legal-hold
 ```
 
-The RustFS check expects a local container named `packaging-rustfs` by default, endpoint `127.0.0.1:9000`, and credentials `rustfsadmin/rustfsadmin`. It connects the container to Docker `bridge` when needed and runs the backend integration test that verifies wildcard artifact resolution and `.sha256` sidecar locking.
+The RustFS check expects a local container named `packaging-rustfs` by default, endpoint `127.0.0.1:9000`, and credentials `rustfsadmin/rustfsadmin`. It connects the container to Docker `bridge` when needed and runs the conductor integration test that verifies wildcard artifact resolution and `.sha256` sidecar locking.
 Use `--production --skip-container-check --object-lock --object-lock-bucket ... --retention-mode ... --retention-days ...` for a managed production-like RustFS/MinIO-compatible bucket; production mode refuses to pass without an explicit object-lock bucket and valid retention policy.
 
 Observability checks:
@@ -164,7 +164,7 @@ python scripts/notification_routing_cli.py check --api-url "$PACKAGING_API_URL" 
 python scripts/correlation_trace_cli.py trace --api-url "$PACKAGING_API_URL" --correlation-id "$PACKAGING_CORRELATION_ID"
 python scripts/nomad_check_cli.py check --production --address "$NOMAD_ADDR" --require-linux-node --require-windows-node
 python scripts/gitlab_package_check_cli.py check --production --base-url "$GITLAB_PACKAGE_BASE_URL" --token "$GITLAB_PACKAGE_TOKEN" --path "42/engine/1.2.3/engine.tar.gz" --expected-sha256 "$GITLAB_PACKAGE_EXPECTED_SHA256"
-python scripts/oidc_check_cli.py check --issuer https://idp.example.test --audience packaging-platform --jwks-url https://idp.example.test/certs --token "$OIDC_CHECK_TOKEN" --api-url http://127.0.0.1:8080
+python scripts/oidc_check_cli.py check --issuer https://idp.example.test --audience vela --jwks-url https://idp.example.test/certs --token "$OIDC_CHECK_TOKEN" --api-url http://127.0.0.1:8080
 python scripts/oidc_check_cli.py check --production --issuer "$OIDC_ISSUER" --audience "$OIDC_AUDIENCE" --jwks-url "$OIDC_JWKS_URL" --discovery-url "$OIDC_ISSUER/.well-known/openid-configuration" --authorization-url "$OIDC_AUTHORIZATION_URL" --token-url "$OIDC_TOKEN_URL" --expected-role "$OIDC_OPERATOR_ROLE" --token "$OIDC_CHECK_TOKEN" --api-url https://packaging-api.example.com
 python scripts/oidc_check_cli.py check --api-url https://packaging-api.example.com --broker-live --broker-code "$OIDC_BROKER_CODE" --broker-code-verifier "$OIDC_BROKER_CODE_VERIFIER" --broker-redirect-uri "$OIDC_REDIRECT_URI" --broker-logout --require-session-store
 ```
@@ -173,13 +173,13 @@ python scripts/oidc_check_cli.py check --api-url https://packaging-api.example.c
 If the optional server-side session/token broker is enabled in production, run the aggregate gate with `--idp-live --broker-live --require-broker`; `--require-broker` fails unless the broker live check is actually executed through the production IdP gate.
 For CI/release evidence, use `--json` to print a machine-readable `packaging.production_readiness.report/v1` report, or `--report-file readiness.json` to keep normal confirmation lights while writing the same JSON report. The report includes generated time, aggregate status, exit code, summary counts, and per-gate details with secret-like values redacted.
 
-Prometheus alert rules are stored at `infra/prometheus/packaging-platform-rules.yml`.
-Alertmanager routing example is stored at `infra/prometheus/alertmanager-packaging-platform.yml`.
+Prometheus alert rules are stored at `infra/prometheus/vela-rules.yml`.
+Alertmanager routing example is stored at `infra/prometheus/alertmanager-vela.yml`.
 The `/metrics` endpoint also exports runner cache status, bytes, file counts, and scan truncation indicators parsed from runner cache heartbeats.
 `correlation_trace_cli.py` is a read-only incident/debugging helper. It queries audit events, builds, build logs, uploads, and notifications by requestId/correlationId, and can emit `packaging.correlation_trace.report/v1` JSON with `--json`.
 Production identity and object-lock acceptance details are documented in `docs/production-readiness.md`.
 
-The backend defaults to PostgreSQL storage and dry-run Nomad scheduling. Set `DRY_RUN=false`, `NOMAD_ADDR`, and `PACKAGING_RUNNER_IMAGE` to submit real Nomad jobs.
+The conductor defaults to PostgreSQL storage and dry-run Nomad scheduling. Set `DRY_RUN=false`, `NOMAD_ADDR`, and `PACKAGING_RUNNER_IMAGE` to submit real Nomad jobs.
 
 Nomad runner image:
 
@@ -198,11 +198,11 @@ Naming style:
 - Error codes use SCREAMING_SNAKE_CASE, for example `BUILD_STATE_CONFLICT` and `RESOURCE_NOT_FOUND`.
 - Release gate and error detail IDs use dotted kebab-case, for example `release.fixed-version` and `preview.build-lock`.
 
-Go code should not use snake_case for ordinary identifiers. Keep snake_case for logs, metrics, database-style fields, or external systems that expect it. The current public API contract uses camelCase JSON and should remain stable for frontend and client compatibility.
+Go code should not use snake_case for ordinary identifiers. Keep snake_case for logs, metrics, database-style fields, or external systems that expect it. The current public API contract uses camelCase JSON and should remain stable for studio and client compatibility.
 
 ## Environment
 
-Backend variables:
+Conductor variables:
 
 - `PORT` - API port, default `8080`.
 - `DATA_DIR` - JSON state directory, default `./data`.
@@ -264,8 +264,8 @@ Backend variables:
 - `OIDC_SUBJECT_CLAIM` - subject claim used for audit actor id, default `sub`.
 - `OIDC_ADMIN_ROLE`, `OIDC_OPERATOR_ROLE`, `OIDC_VIEWER_ROLE` - external role values mapped to platform `admin`, `operator`, and `viewer`; defaults are the same names.
 - `AUTH_SESSION_HMAC_KEY`, `AUTH_SESSION_TTL_SECONDS` - optional platform session token signing key and TTL for the server-side OIDC broker. Set a long random key in production.
-- `AUTH_SESSION_STORE_ENABLED` - optional `true`/`false`; when `true`, broker-issued platform sessions are persisted in the backend store and can be revoked through `POST /api/auth/logout`.
-- Frontend OIDC login uses `VITE_OIDC_AUTHORIZATION_URL` and `VITE_OIDC_CLIENT_ID`; optional browser-side mapping variables are `VITE_OIDC_SCOPE`, `VITE_OIDC_RESPONSE_TYPE`, `VITE_OIDC_TOKEN_URL`, `VITE_OIDC_BROKER_URL`, `VITE_OIDC_REDIRECT_URI`, `VITE_OIDC_ROLE_CLAIM`, `VITE_OIDC_ADMIN_ROLE`, `VITE_OIDC_OPERATOR_ROLE`, and `VITE_OIDC_VIEWER_ROLE`. `VITE_OIDC_RESPONSE_TYPE=code` enables browser Authorization Code + PKCE and requires either `VITE_OIDC_TOKEN_URL` for browser token exchange or `VITE_OIDC_BROKER_URL=/api/auth/oidc/token` for server-side exchange and platform session tokens; `token` keeps the simpler bearer-token callback flow for local or legacy IdP setups.
+- `AUTH_SESSION_STORE_ENABLED` - optional `true`/`false`; when `true`, broker-issued platform sessions are persisted in the conductor store and can be revoked through `POST /api/auth/logout`.
+- Studio OIDC login uses `VITE_OIDC_AUTHORIZATION_URL` and `VITE_OIDC_CLIENT_ID`; optional browser-side mapping variables are `VITE_OIDC_SCOPE`, `VITE_OIDC_RESPONSE_TYPE`, `VITE_OIDC_TOKEN_URL`, `VITE_OIDC_BROKER_URL`, `VITE_OIDC_REDIRECT_URI`, `VITE_OIDC_ROLE_CLAIM`, `VITE_OIDC_ADMIN_ROLE`, `VITE_OIDC_OPERATOR_ROLE`, and `VITE_OIDC_VIEWER_ROLE`. `VITE_OIDC_RESPONSE_TYPE=code` enables browser Authorization Code + PKCE and requires either `VITE_OIDC_TOKEN_URL` for browser token exchange or `VITE_OIDC_BROKER_URL=/api/auth/oidc/token` for server-side exchange and platform session tokens; `token` keeps the simpler bearer-token callback flow for local or legacy IdP setups.
 - `AUDIT_ARCHIVE_HMAC_KEY` - optional key used to add `hmac-sha256` signatures to `/api/audit-events/archive` responses.
 - `AUDIT_ARCHIVE_HMAC_KEY_ID` - optional non-secret key identifier included in signed audit archive responses for HMAC key rotation evidence.
 - `AUDIT_ARCHIVE_RETENTION_MODE` - optional MinIO/RustFS object-lock mode for audit archives, `GOVERNANCE` or `COMPLIANCE`.
@@ -279,7 +279,7 @@ Backend variables:
 - `NOMAD_TOKEN`, `NOMAD_VARIABLE_PATH_PREFIX`, `NOMAD_VARIABLE_ITEM_KEY` - Nomad Variables backend settings when `SECRET_BACKEND=nomad`; uses `NOMAD_ADDR`, `NOMAD_NAMESPACE`, and `NOMAD_REGION`, reads `/v1/var/<prefix>/<secret-ref>`, and defaults to item `value`.
 - `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and lowercase variants are forwarded to runner tasks.
 
-When backend auth is enabled, use the admin console "访问令牌" dialog to store either a static platform token, an OIDC access token, or a platform session token issued by the optional server-side OIDC broker. The frontend injects `Authorization` headers for API requests and protected downloads. Clearing the token calls `POST /api/auth/logout`; persisted broker sessions are revoked when `AUTH_SESSION_STORE_ENABLED=true`, while static/OIDC tokens are treated as client-side logout. Local/dev without a token still works when `AUTH_ENABLED=false`. Runner APIs should continue to use `AUTH_RUNNER_TOKEN`; OIDC roles are intended for human admin/operator/viewer identities.
+When conductor auth is enabled, use the admin console "访问令牌" dialog to store either a static platform token, an OIDC access token, or a platform session token issued by the optional server-side OIDC broker. The studio injects `Authorization` headers for API requests and protected downloads. Clearing the token calls `POST /api/auth/logout`; persisted broker sessions are revoked when `AUTH_SESSION_STORE_ENABLED=true`, while static/OIDC tokens are treated as client-side logout. Local/dev without a token still works when `AUTH_ENABLED=false`. Runner APIs should continue to use `AUTH_RUNNER_TOKEN`; OIDC roles are intended for human admin/operator/viewer identities.
 
 Secret references stay as references in Manifest and Build Lock. The API resolves them at Nomad submit time and injects `PACKAGING_SECRET_*` environment variables into the runner; the runner replaces references while rendering the packaging workspace. Approve/retry writes a `secret.resolve` audit event with referenced secret names and counts, never secret values.
 

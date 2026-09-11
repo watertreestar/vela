@@ -11,7 +11,7 @@ import lifecycle_cli
 
 
 def args(**overrides):
-    values = {"full_backend": False}
+    values = {"full_conductor": False}
     values.update(overrides)
     return argparse.Namespace(**values)
 
@@ -35,10 +35,10 @@ class LifecycleCliTest(unittest.TestCase):
         self.assertEqual(results[0].status, "fail")
         self.assertIn("boom", results[0].detail)
 
-    def test_full_backend_runs_second_regression_check(self):
+    def test_full_conductor_runs_second_regression_check(self):
         completed = subprocess.CompletedProcess(["go"], 0, "ok", "")
         with patch("lifecycle_cli.run_command", return_value=completed) as run_command:
-            results = lifecycle_cli.run_checks(args(full_backend=True))
+            results = lifecycle_cli.run_checks(args(full_conductor=True))
 
         self.assertEqual(len(results), 2)
         self.assertEqual(lifecycle_cli.result_exit_code(results), 0)

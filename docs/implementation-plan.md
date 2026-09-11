@@ -1,4 +1,4 @@
-# Packaging Platform Implementation Plan
+# Vela Implementation Plan
 
 ## Goal
 
@@ -6,7 +6,7 @@ Build an internal packaging system that manages product packaging configuration 
 
 The system uses:
 
-- Go backend as the control plane API.
+- Go conductor as the control plane API.
 - React, HeroUI, and Tailwind CSS for the web console.
 - Nomad as the execution scheduler for Linux and Windows builder nodes.
 - Dagger as the packaging workflow engine executed by runner jobs.
@@ -73,10 +73,10 @@ Deliverables:
 ## MVP Local Flow
 
 1. Start the Go API.
-2. Start the frontend.
+2. Start the studio.
 3. Create a build from the UI.
-4. Backend persists the build record.
-5. Backend submits a Nomad job or records a dry-run payload when `DRY_RUN=true`.
+4. Conductor persists the build record.
+5. Conductor submits a Nomad job or records a dry-run payload when `DRY_RUN=true`.
 
 ## Production Flow
 

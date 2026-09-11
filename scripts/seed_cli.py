@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seed flow-validation data for local Packaging Platform testing."""
+"""Seed flow-validation data for local Vela testing."""
 
 from __future__ import annotations
 
@@ -467,7 +467,7 @@ def check(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Packaging Platform seed CLI.")
+    parser = argparse.ArgumentParser(description="Vela seed CLI.")
     parser.add_argument("--api-url", default=DEFAULT_API_URL)
     parser.add_argument("--namespace", default=DEFAULT_NAMESPACE)
 

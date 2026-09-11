@@ -1,4 +1,4 @@
-# Packaging Platform Development Summary
+# Vela Development Summary
 
 本文档汇总当前已经确定的设计、需求、实现状态和欠缺项，作为后续继续深入开发的入口。
 
@@ -29,8 +29,8 @@ React admin console with local shadcn/Radix-style primitives
 
 主要组件：
 
-- `backend/`：Go API，负责产品、manifest、build、upload、approval、publish、runner task、Nomad 调度。
-- `frontend/`：React 控制台，使用本地 shadcn/Radix-style primitives 和紧凑 dashboard 风格。
+- `conductor/`：Go API，负责产品、manifest、build、upload、approval、publish、runner task、Nomad 调度。
+- `studio/`：React 控制台，使用本地 shadcn/Radix-style primitives 和紧凑 dashboard 风格。
 - `products/`：产品 manifest 和默认配置。
 - `runner/`：Bun 编写的任务执行器，负责领取任务、下载组件、渲染上下文、调用 Dagger 或宿主打包命令、上传结果。
 - `lsapctl/`：Go 编写的 Linux 包内 CLI，负责安装、启动、停止、重启、状态、卸载、环境检查。
@@ -311,7 +311,7 @@ Nomad 和宿主环境：
 
 测试和质量：
 
-- Go backend tests、Python script tests、frontend unit tests、Playwright E2E、runner entry build check 已作为当前验证门。
+- Go conductor tests、Python script tests、studio unit tests、Playwright E2E、runner entry build check 已作为当前验证门。
 - Runner 已有 fixture 路径和 acceptance CLI；仍需更多真实文件/产品矩阵。
 - Dagger pipeline 已有 fixture-based testing 和 fixture golden CLI；仍可增加更多 base image/golden archive。
 - `lsapctl` 需要 Linux 容器/VM 集成测试。

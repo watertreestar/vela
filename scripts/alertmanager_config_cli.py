@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate Packaging Platform Alertmanager routing examples."""
+"""Validate Vela Alertmanager routing examples."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-DEFAULT_CONFIG = Path("infra/prometheus/alertmanager-packaging-platform.yml")
+DEFAULT_CONFIG = Path("infra/prometheus/alertmanager-vela.yml")
 REQUIRED_RECEIVERS = {
     "packaging-default",
     "packaging-critical-oncall",
@@ -138,7 +138,7 @@ def print_results(results: list[ConfigCheck]) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Validate Packaging Platform Alertmanager routing examples.")
+    parser = argparse.ArgumentParser(description="Validate Vela Alertmanager routing examples.")
     parser.add_argument("command", choices=["check"], nargs="?", default="check")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     return parser

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate Packaging Platform OIDC/JWKS configuration."""
+"""Validate Vela OIDC/JWKS configuration."""
 
 from __future__ import annotations
 
@@ -186,7 +186,7 @@ def validate_jwks(jwks: Any) -> list[CheckResult]:
         CheckResult(
             "JWKS key ids",
             "ok" if kids else "warn",
-            ",".join(kids) if kids else "no kid values; backend can only use unambiguous key sets",
+            ",".join(kids) if kids else "no kid values; conductor can only use unambiguous key sets",
         )
     )
     return results
@@ -242,7 +242,7 @@ def validate_token_claims(
         )
     )
     if "exp" not in claims:
-        results.append(CheckResult("JWT expiry", "fail", "exp claim is required by backend"))
+        results.append(CheckResult("JWT expiry", "fail", "exp claim is required by conductor"))
     else:
         exp = claims.get("exp")
         results.append(
@@ -269,10 +269,10 @@ def protected_api_check(api_url: str, token: str, path: str = DEFAULT_PROTECTED_
     request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
-            return CheckResult("Backend OIDC acceptance", "ok", f"HTTP {response.status} from {path}")
+            return CheckResult("Conductor OIDC acceptance", "ok", f"HTTP {response.status} from {path}")
     except urllib.error.HTTPError as exc:
         status = "fail" if exc.code in {401, 403} else "warn"
-        return CheckResult("Backend OIDC acceptance", status, f"HTTP {exc.code} from {path}")
+        return CheckResult("Conductor OIDC acceptance", status, f"HTTP {exc.code} from {path}")
 
 
 def protected_api_rejection_check(api_url: str, token: str, path: str = DEFAULT_PROTECTED_PATH) -> CheckResult:
@@ -404,7 +404,7 @@ def validate_production_inputs(
             args.expected_role or "--expected-role or the expected external role value is required in --production mode",
         ),
         CheckResult(
-            "Production backend live API",
+            "Production conductor live API",
             "ok" if args.api_url else "fail",
             args.api_url or "--api-url is required in --production mode",
         ),
@@ -440,7 +440,7 @@ def validate(args: argparse.Namespace) -> list[CheckResult]:
                 "OIDC authorization URL": authorization_url,
                 "OIDC token URL": token_url,
                 "OIDC discovery URL": discovery_url,
-                "Backend API URL": args.api_url or "",
+                "Conductor API URL": args.api_url or "",
             },
         )
     )
@@ -454,7 +454,7 @@ def validate(args: argparse.Namespace) -> list[CheckResult]:
         if args.api_url:
             results.append(protected_api_check(args.api_url, token, args.protected_path))
         elif args.production:
-            results.append(CheckResult("Backend live acceptance configured", "fail", "--api-url is required in --production mode"))
+            results.append(CheckResult("Conductor live acceptance configured", "fail", "--api-url is required in --production mode"))
     else:
         status = "fail" if args.production else "warn"
         results.append(CheckResult("JWT token provided", status, "set OIDC_CHECK_TOKEN or --token to validate token claims"))
@@ -476,9 +476,9 @@ def print_results(results: list[CheckResult]) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Validate Packaging Platform OIDC/JWKS configuration.")
+    parser = argparse.ArgumentParser(description="Validate Vela OIDC/JWKS configuration.")
     subparsers = parser.add_subparsers(dest="command")
-    check = subparsers.add_parser("check", help="check OIDC configuration and optional backend token acceptance")
+    check = subparsers.add_parser("check", help="check OIDC configuration and optional conductor token acceptance")
     check.add_argument("--issuer", help="OIDC issuer; defaults to OIDC_ISSUER")
     check.add_argument("--audience", help="OIDC audience; defaults to OIDC_AUDIENCE")
     check.add_argument("--jwks-url", help="OIDC JWKS URL; defaults to OIDC_JWKS_URL")
@@ -489,10 +489,10 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--subject-claim", help="subject claim name; defaults to OIDC_SUBJECT_CLAIM or sub")
     check.add_argument("--expected-role", default="", help="external role value expected in the token")
     check.add_argument("--token", help="JWT access token; defaults to OIDC_CHECK_TOKEN")
-    check.add_argument("--api-url", help="backend API base URL for live acceptance, for example http://127.0.0.1:8080")
-    check.add_argument("--protected-path", default=DEFAULT_PROTECTED_PATH, help="protected backend path used for live acceptance")
+    check.add_argument("--api-url", help="conductor API base URL for live acceptance, for example http://127.0.0.1:8080")
+    check.add_argument("--protected-path", default=DEFAULT_PROTECTED_PATH, help="protected conductor path used for live acceptance")
     check.add_argument("--require-https", action="store_true", help="fail non-HTTPS OIDC/API URLs")
-    check.add_argument("--production", action="store_true", help="strict production readiness: HTTPS, discovery, token, and backend live acceptance are required")
+    check.add_argument("--production", action="store_true", help="strict production readiness: HTTPS, discovery, token, and conductor live acceptance are required")
     check.add_argument("--broker-live", action="store_true", help="also live-test the optional server-side OIDC code+PKCE broker")
     check.add_argument("--broker-url", help="broker endpoint; defaults to API_URL/api/auth/oidc/token")
     check.add_argument("--broker-code", help="one-time authorization code for broker live acceptance")

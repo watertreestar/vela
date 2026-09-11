@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Monitor Packaging Platform API, artifacts, runners, and release gates."""
+"""Monitor Vela API, artifacts, runners, and release gates."""
 
 from __future__ import annotations
 
@@ -363,7 +363,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Packaging Platform monitoring CLI.")
+    parser = argparse.ArgumentParser(description="Vela monitoring CLI.")
     subparsers = parser.add_subparsers(dest="command")
 
     check_parser = subparsers.add_parser("check", help="run one monitoring pass")
