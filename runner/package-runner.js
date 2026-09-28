@@ -91,11 +91,16 @@ export async function request(pathname, options = {}) {
   return payload;
 }
 
-export async function upload(filePath) {
+export async function upload(filePath, buildID = "", kind = "") {
+  const authRequired = process.env.RUNNER_AUTH_REQUIRED === "true";
+  if (authRequired && (!buildID || !["final", "checksum"].includes(kind))) {
+    throw new Error("auth-required runner output must be a build-scoped final or checksum artifact");
+  }
   const form = new FormData();
   const data = await readFile(filePath);
   form.append("file", new Blob([data]), path.basename(filePath));
-  const response = await fetch(`${API_URL}/api/uploads`, {
+  const endpoint = buildID && kind ? `/api/runner/tasks/${buildID}/artifacts/${kind}` : "/api/uploads";
+  const response = await fetch(`${API_URL}${endpoint}`, {
     method: "POST",
     body: form,
     headers: runnerHeaders(),
@@ -670,8 +675,8 @@ async function runPackaging(build) {
   await log(runtimeBuild, `package created: ${output}`);
   await reportCacheSnapshot(runtimeBuild, workspace, "after");
 
-  const uploaded = await upload(output);
-  const checksum = await upload(checksumFile);
+  const uploaded = await upload(output, runtimeBuild.id, "final");
+  const checksum = await upload(checksumFile, runtimeBuild.id, "checksum");
   await log(runtimeBuild, `uploaded checksum: ${checksum.uri}`);
   await log(runtimeBuild, `uploaded artifact: ${uploaded.uri}`);
   return uploaded;

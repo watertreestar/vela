@@ -11,8 +11,8 @@
 |---|---|---|---|---|---|
 | runner-integrity-01 | done | 刘洋（开发）/马强（独立验收） | `C:\Users\Administrator\gearlic\vela-phase7` | 无 | PR-1：Runner bearer 与 Nomad secrets template；验收通过 commit `73a0e13` |
 | runner-integrity-02 | done | 何杰（开发）/吴刚（独立验收） | `C:\Users\Administrator\gearlic\vela-phase7` | runner-integrity-01 的接口基线 `73a0e13` | PR-2：dispatch/capability/build binding；验收通过 commit `e74dc3e` |
-| runner-integrity-03 | ready | 待派发 | `C:\Users\Administrator\gearlic\vela-phase7` | runner-integrity-02 的接口基线 `e74dc3e` | PR-3：可信 output upload/complete |
-| runner-integrity-04 | pending | 待派发 | `C:\Users\Administrator\gearlic\vela-phase7` | runner-integrity-03 | PR-4：auth E2E/readiness/docs |
+| runner-integrity-03 | done | 丁磊（开发）/主集成（修复）/郭涛（独立验收） | `C:\Users\Administrator\gearlic\vela-phase7` | runner-integrity-02 的接口基线 `e74dc3e` | PR-3：可信 output upload/complete；验收通过，待提交 |
+| runner-integrity-04 | ready | 待派发 | `C:\Users\Administrator\gearlic\vela-phase7` | runner-integrity-03 提交后的接口基线 | PR-4：auth E2E/readiness/docs |
 | runner-integrity-review | pending | 独立验收 | `C:\Users\Administrator\gearlic\vela-phase7` | 各 PR 开发完成 | 每个 PR 的独立验收及最终集成验证 |
 
 ## 调度记录
@@ -21,6 +21,7 @@
 2. 2026-09-28：已固定 capability、Nomad task-owned Variable、attempt、可信 output 与 legacy migration 约定；可以开始 PR-1。
 3. 2026-09-28：PR-1 开发完成并由独立验收通过，提交 `73a0e13`。验证：`go test ./...`、`bun test`、`bun run check`、`git diff --check` 均通过。真实 Nomad Variable ACL/template 与 Windows allocation ACL 属于 PR-4 外部 live gate，尚未声称通过。
 4. 2026-09-28：PR-2 首轮独立验收发现 auth-disabled Runner 回归；开发修复后复验通过。提交 `e74dc3e`。验证：`go test ./...`、`bun test`（7 pass）、`bun run check`、`git diff --check`。auth-enabled runner 已要求 exact Build capability；auth-disabled 仅保留显式 legacy local path。
+5. 2026-09-28：PR-3 经两轮未完成开发后由主集成收敛，独立验收通过。增加 capability-bound final/checksum/readback、legacy-unverified 语义、output list RBAC 和 publish immutability；验证：Go 全量、race focused API/store/artifact、Runner tests/check、Python scripts、diff check。提交待创建。
 
 ## 交付规则
 

@@ -49,6 +49,7 @@ type artifactStore interface {
 	artifactResolver
 	SaveUpload(file multipart.File, header *multipart.FileHeader) (domain.UploadRecord, error)
 	ServeUpload(w http.ResponseWriter, r *http.Request, id string) error
+	DeleteUpload(id string) error
 	AuditArchiveURI(digest string) (string, error)
 	AuditArchiveStoragePolicy(now time.Time) domain.AuditArchiveStoragePolicy
 	SaveAuditArchive(digest string, payload []byte, policy domain.AuditArchiveStoragePolicy) (string, error)
@@ -145,12 +146,14 @@ func (s Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/runner/tasks/claim", s.withAuth(s.claimRunnerTask, roleRunner, roleAdmin)) // auth-disabled compatibility only
 	mux.HandleFunc("POST /api/runner/tasks/{id}/claim", s.withAuth(s.claimRunnerTask, roleRunner, roleAdmin))
 	mux.HandleFunc("POST /api/runner/tasks/{id}/complete", s.withAuth(s.completeRunnerTask, roleRunner, roleAdmin))
+	mux.HandleFunc("POST /api/runner/tasks/{id}/artifacts/final", s.withAuth(s.uploadRunnerFinal, roleRunner, roleAdmin))
+	mux.HandleFunc("POST /api/runner/tasks/{id}/artifacts/checksum", s.withAuth(s.uploadRunnerChecksum, roleRunner, roleAdmin))
 	mux.HandleFunc("POST /api/runner/tasks/{id}/heartbeat", s.withAuth(s.runnerHeartbeat, roleRunner, roleAdmin))
 	mux.HandleFunc("GET /api/runner/tasks/{id}/inputs/{uploadId}/download", s.withAuth(s.downloadRunnerInput, roleRunner, roleAdmin))
 	mux.HandleFunc("POST /api/runner/heartbeat", s.withAuth(s.runnerHeartbeat, roleRunner, roleAdmin)) // auth-disabled compatibility only
 	mux.HandleFunc("GET /api/runners", s.listRunners)
 	mux.HandleFunc("POST /api/uploads", s.withAuth(s.uploadArtifact, roleOperator, roleAdmin))
-	mux.HandleFunc("GET /api/uploads", s.listUploads)
+	mux.HandleFunc("GET /api/uploads", s.withAuth(s.listUploads, roleViewer, roleOperator, roleAdmin))
 	mux.HandleFunc("GET /api/uploads/{id}/download", s.downloadUpload)
 	mux.HandleFunc("GET /api/audit-events", s.withAuth(s.listAuditEvents, roleViewer, roleOperator, roleAdmin))
 	mux.HandleFunc("GET /api/audit-events/archive", s.withAuth(s.exportAuditArchive, roleViewer, roleOperator, roleAdmin))
@@ -396,7 +399,7 @@ func (s Server) downloadBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var linkedUpload domain.UploadRecord
-	if uploadID := uploadIDFromDownloadURL(build.DownloadURL); uploadID != "" {
+	if uploadID := build.ArtifactUploadID; uploadID != "" {
 		linkedUpload, err = s.store.ReadUpload(uploadID)
 		if err != nil {
 			writeError(w, http.StatusNotFound, err)
@@ -756,10 +759,17 @@ func (s Server) validatePreviewBuild(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s Server) publishBuild(w http.ResponseWriter, r *http.Request) {
-	var request domain.RunnerCompleteRequest
 	if r.Body != nil && r.ContentLength != 0 {
+		var request struct {
+			ArtifactURI string `json:"artifactUri"`
+			DownloadURL string `json:"downloadUrl"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			writeAPIError(w, http.StatusBadRequest, "VALIDATION_INVALID_JSON", "", nil)
+			return
+		}
+		if strings.TrimSpace(request.ArtifactURI) != "" || strings.TrimSpace(request.DownloadURL) != "" {
+			writeAPIError(w, http.StatusBadRequest, "VALIDATION_INVALID_REQUEST", "published artifact is immutable", nil)
 			return
 		}
 	}
@@ -772,12 +782,6 @@ func (s Server) publishBuild(w http.ResponseWriter, r *http.Request) {
 		check := buildReleaseCheck(*build)
 		if !check.ReleaseReady {
 			return releaseGateError("BUILD_RELEASE_GATE_BLOCKED", "", check, "")
-		}
-		if request.ArtifactURI != "" {
-			build.ArtifactURI = request.ArtifactURI
-		}
-		if request.DownloadURL != "" {
-			build.DownloadURL = request.DownloadURL
 		}
 		build.Status = domain.BuildPublished
 		build.ReleaseChannel = "release"
@@ -1146,6 +1150,174 @@ func (s Server) claimRunnerTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, withReleaseCheckSummary(updated))
 }
 
+func (s Server) uploadRunnerFinal(w http.ResponseWriter, r *http.Request) {
+	s.uploadRunnerOutput(w, r, "final")
+}
+
+func (s Server) uploadRunnerChecksum(w http.ResponseWriter, r *http.Request) {
+	s.uploadRunnerOutput(w, r, "checksum")
+}
+
+func (s Server) uploadRunnerOutput(w http.ResponseWriter, r *http.Request, kind string) {
+	id := r.PathValue("id")
+	claims, err := s.authorizeExecution(r, id, domain.BuildRunning)
+	if err != nil {
+		writeErrorText(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if err := r.ParseMultipartForm(512 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	defer file.Close()
+	if kind == "checksum" && header.Size > 4096 {
+		writeErrorText(w, http.StatusBadRequest, "checksum exceeds 4 KiB")
+		return
+	}
+	if s.artifacts == nil {
+		writeErrorText(w, http.StatusInternalServerError, "artifact store is not configured")
+		return
+	}
+	build, err := s.store.ReadBuild(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	if build.Status != domain.BuildRunning || build.Attempt != claims.Attempt {
+		writeErrorText(w, http.StatusConflict, "execution no longer accepts output")
+		return
+	}
+	if (kind == "final" && build.ArtifactUploadID != "") || (kind == "checksum" && build.ChecksumUploadID != "") {
+		writeErrorText(w, http.StatusConflict, kind+" artifact already uploaded")
+		return
+	}
+	var final domain.UploadRecord
+	if kind == "checksum" {
+		if build.ArtifactUploadID == "" {
+			writeErrorText(w, http.StatusConflict, "final artifact must be uploaded first")
+			return
+		}
+		final, err = s.store.ReadUpload(build.ArtifactUploadID)
+		if err != nil {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+	}
+	record, err := s.artifacts.SaveUpload(file, header)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	cleanup := func(cause error, recordSaved bool) {
+		if recordSaved {
+			if deleteErr := s.store.DeleteUploadRecord(record.ID); deleteErr != nil {
+				s.recordAudit(r, domain.AuditEvent{Action: "runner.output.orphaned", ResourceType: "upload", ResourceID: record.ID, BuildID: id, UploadID: record.ID, Status: "failure", Summary: "runner output rejected but binding record cleanup failed", Metadata: map[string]string{"kind": kind, "cause": cause.Error(), "cleanupError": deleteErr.Error()}})
+				return
+			}
+		}
+		if deleteErr := s.artifacts.DeleteUpload(record.ID); deleteErr != nil {
+			s.recordAudit(r, domain.AuditEvent{Action: "runner.output.orphaned", ResourceType: "upload", ResourceID: record.ID, BuildID: id, UploadID: record.ID, Status: "failure", Summary: "runner output rejected and object cleanup failed", Metadata: map[string]string{"kind": kind, "cause": cause.Error(), "cleanupError": deleteErr.Error()}})
+			return
+		}
+		s.recordAudit(r, domain.AuditEvent{Action: "runner.output.rejected", ResourceType: "upload", ResourceID: record.ID, BuildID: id, UploadID: record.ID, Status: "failure", Summary: "runner output rejected and object removed", Metadata: map[string]string{"kind": kind, "cause": cause.Error()}})
+	}
+	record.BuildID, record.Attempt, record.RunnerID, record.Kind = id, claims.Attempt, claims.RunnerID, kind
+	if kind == "checksum" {
+		content, readErr := s.readArtifactUpload(record.ID)
+		if readErr != nil || !validChecksum(content, final) {
+			cause := errors.New("checksum must exactly match final artifact sha256 and filename")
+			cleanup(cause, false)
+			writeErrorText(w, http.StatusBadRequest, cause.Error())
+			return
+		}
+		record.ParentUploadID = final.ID
+	}
+	if err := s.store.SaveUploadRecord(record); err != nil {
+		cleanup(err, false)
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	_, err = s.store.UpdateBuild(id, func(build *domain.Build) error {
+		if build.Status != domain.BuildRunning || build.Attempt != claims.Attempt {
+			return buildStateConflict("execution no longer accepts output")
+		}
+		if kind == "final" {
+			if build.ArtifactUploadID != "" {
+				return buildStateConflict("final artifact already uploaded")
+			}
+			build.ArtifactUploadID = record.ID
+		} else {
+			if build.ChecksumUploadID != "" {
+				return buildStateConflict("checksum already uploaded")
+			}
+			build.ChecksumUploadID = record.ID
+		}
+		build.UpdatedAt = time.Now().UTC()
+		return nil
+	})
+	if err != nil {
+		cleanup(err, true)
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	s.recordAudit(r, domain.AuditEvent{Action: "runner.output.bind", ResourceType: "upload", ResourceID: record.ID, BuildID: id, UploadID: record.ID, Status: "success", Summary: "runner output bound to build attempt", Metadata: map[string]string{"kind": kind, "attempt": strconv.Itoa(claims.Attempt)}})
+	writeJSON(w, http.StatusCreated, record)
+}
+
+func validChecksum(content []byte, final domain.UploadRecord) bool {
+	line := strings.TrimSuffix(string(content), "\n")
+	return line == final.SHA256+"  "+final.FileName
+}
+
+func (s Server) readArtifactUpload(id string) ([]byte, error) {
+	if reader, ok := s.artifacts.(interface{ ReadUpload(string) ([]byte, error) }); ok {
+		return reader.ReadUpload(id)
+	}
+	return nil, errors.New("artifact store does not support readback verification")
+}
+
+func (s Server) verifyRunnerOutputs(buildID string) error {
+	build, err := s.store.ReadBuild(buildID)
+	if err != nil {
+		return err
+	}
+	if build.ArtifactUploadID == "" || build.ChecksumUploadID == "" {
+		return errors.New("successful completion requires final artifact and checksum")
+	}
+	final, err := s.store.ReadUpload(build.ArtifactUploadID)
+	if err != nil {
+		return err
+	}
+	checksum, err := s.store.ReadUpload(build.ChecksumUploadID)
+	if err != nil {
+		return err
+	}
+	if final.BuildID != build.ID || final.Attempt != build.Attempt || final.RunnerID != build.RunnerID || final.Kind != "final" || checksum.BuildID != build.ID || checksum.Attempt != build.Attempt || checksum.RunnerID != build.RunnerID || checksum.Kind != "checksum" || checksum.ParentUploadID != final.ID {
+		return errors.New("output ownership does not match current build attempt")
+	}
+	payload, err := s.readArtifactUpload(final.ID)
+	if err != nil {
+		return errors.New("cannot read final artifact from artifact store")
+	}
+	digest := sha256.Sum256(payload)
+	if int64(len(payload)) != final.Size || !strings.EqualFold(hex.EncodeToString(digest[:]), final.SHA256) {
+		return errors.New("final artifact readback integrity mismatch")
+	}
+	checksumPayload, err := s.readArtifactUpload(checksum.ID)
+	if err != nil {
+		return errors.New("cannot read checksum from artifact store")
+	}
+	if !validChecksum(checksumPayload, final) {
+		return errors.New("checksum readback does not match final artifact")
+	}
+	return nil
+}
+
 func (s Server) completeRunnerTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if s.auth.Enabled {
@@ -1163,22 +1335,52 @@ func (s Server) completeRunnerTask(w http.ResponseWriter, r *http.Request) {
 	if request.Status == domain.BuildFailed {
 		status = domain.BuildFailed
 	}
+	var verifiedAt time.Time
+	var verifiedFinal domain.UploadRecord
+	if status == domain.BuildSucceeded && s.auth.Enabled {
+		if err := s.verifyRunnerOutputs(id); err != nil {
+			writeErrorText(w, http.StatusConflict, err.Error())
+			return
+		}
+		build, err := s.store.ReadBuild(id)
+		if err != nil {
+			writeError(w, http.StatusNotFound, err)
+			return
+		}
+		verifiedFinal, err = s.store.ReadUpload(build.ArtifactUploadID)
+		if err != nil {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+		verifiedAt = time.Now().UTC()
+	}
 
-	updated, err := s.store.UpdateBuild(r.PathValue("id"), func(build *domain.Build) error {
+	updated, err := s.store.UpdateBuild(id, func(build *domain.Build) error {
 		if build.Status != domain.BuildRunning {
 			return buildStateConflict("only running builds can be completed")
 		}
 		build.Status = status
-		if !s.auth.Enabled { // Transitional local-only acceptance; PR-3 replaces this with server-side output binding.
-			build.ArtifactURI = request.ArtifactURI
-			build.DownloadURL = request.DownloadURL
-		}
 		build.Error = request.Error
 		build.UpdatedAt = time.Now().UTC()
 		if status == domain.BuildSucceeded {
-			build.Logs = append(build.Logs, logEntryForRequest(r, "runner", "build completed successfully"))
+			if s.auth.Enabled {
+				// verifyRunnerOutputs and the final record were read before this store
+				// update, avoiding nested JSONStore locking in the mutation callback.
+				build.ArtifactURI = verifiedFinal.URI
+				build.DownloadURL = verifiedFinal.DownloadURL
+				build.ArtifactSHA256 = verifiedFinal.SHA256
+				build.ArtifactSize = verifiedFinal.Size
+				build.ArtifactVerifiedAt = &verifiedAt
+				build.ArtifactVerificationStatus = "verified"
+				build.Logs = append(build.Logs, logEntryForRequest(r, build.RunnerID, "build completed successfully"))
+			} else {
+				// Legacy development compatibility only; release gates remain verified-binding only.
+				build.ArtifactURI, build.DownloadURL = request.ArtifactURI, request.DownloadURL
+				build.ArtifactVerificationStatus = "legacy-unverified"
+				build.Logs = append(build.Logs, logEntryForRequest(r, "runner", "build completed successfully"))
+			}
 		} else {
-			build.Logs = append(build.Logs, logEntryForRequest(r, "runner", "build failed: "+request.Error))
+			build.Logs = append(build.Logs, logEntryForRequest(r, firstNonEmpty(build.RunnerID, "runner"), "build failed: "+request.Error))
 		}
 		return nil
 	})
@@ -2864,7 +3066,7 @@ func buildReleaseCheck(build domain.Build) domain.ReleaseCheckResult {
 	checks := []domain.ReleaseCheckItem{
 		releaseCheckItem("preview.succeeded", "preview", "Preview 构建已成功", previewStatusReady(build), "only succeeded preview builds can be validated"),
 		releaseCheckItem("preview.channel", "preview", "构建通道为 Preview", build.ReleaseChannel == "preview" || build.Status == domain.BuildPublished, "preview validation requires preview channel"),
-		releaseCheckItem("preview.artifact", "preview", "Preview 制品可下载", build.ArtifactURI != "" || build.DownloadURL != "", "preview artifact is not available"),
+		releaseCheckItem("preview.artifact", "preview", "Preview 制品已验证", build.ArtifactUploadID != "" && build.ChecksumUploadID != "" && build.ArtifactVerifiedAt != nil, "preview requires a verified runner artifact binding"),
 		releaseCheckItem("preview.build-lock", "preview", "Build Lock 已生成", build.BuildLock.BuildID != "", "Build Lock is not available"),
 		releaseCheckItem("preview.lock-identity", "preview", "Build Lock 与构建参数一致", buildLockMatchesBuild(build), "Build Lock does not match build target, profile, or version"),
 		releaseCheckItem("preview.required-components", "preview", "必需组件已锁定 URI", requiredComponentsLocked(components), "preview requires locked required component URIs"),
@@ -2872,7 +3074,7 @@ func buildReleaseCheck(build domain.Build) domain.ReleaseCheckResult {
 		releaseCheckItem("release.fixed-version", "release", "构建版本固定", build.Version != "" && build.Version != "latest", "release requires a fixed build version"),
 		releaseCheckItem("release.exact-component-uris", "release", "组件 URI 精确", componentURIsExact(components), "release requires exact component URIs without wildcards"),
 		releaseCheckItem("release.fixed-component-versions", "release", "组件版本固定", componentVersionsFixed(components), "release requires fixed component versions"),
-		releaseCheckItem("release.artifact", "release", "Release 制品可下载", build.ArtifactURI != "" || build.DownloadURL != "", "release artifact is not available"),
+		releaseCheckItem("release.artifact", "release", "Release 制品已验证", build.ArtifactUploadID != "" && build.ChecksumUploadID != "" && build.ArtifactVerifiedAt != nil, "release requires a verified runner artifact binding"),
 		releaseCheckItem("release.no-build-error", "release", "构建无错误记录", strings.TrimSpace(build.Error) == "", "release requires a build without errors"),
 	}
 	previewReady := true
@@ -2921,10 +3123,11 @@ func (s Server) reproducibilityReport(build domain.Build, generatedAt time.Time)
 		})
 	}
 	output := domain.ReproducibilityArtifact{
-		URI:         build.ArtifactURI,
-		DownloadURL: build.DownloadURL,
+		URI:                build.ArtifactURI,
+		DownloadURL:        build.DownloadURL,
+		VerificationStatus: verificationStatus(build),
 	}
-	if uploadID := buildOutputUploadID(build); uploadID != "" {
+	if uploadID := build.ArtifactUploadID; uploadID != "" {
 		if record, err := s.store.ReadUpload(uploadID); err == nil {
 			now := generatedAt
 			record = normalizeUploadRecord(record, now)
@@ -2967,32 +3170,21 @@ func (s Server) reproducibilityReport(build domain.Build, generatedAt time.Time)
 	}
 }
 
-func buildOutputUploadID(build domain.Build) string {
-	if id := uploadIDFromDownloadURL(build.DownloadURL); id != "" {
-		return id
+func verificationStatus(build domain.Build) string {
+	if build.ArtifactUploadID != "" && build.ChecksumUploadID != "" && build.ArtifactVerifiedAt != nil {
+		return "verified"
 	}
-	if strings.HasPrefix(build.ArtifactURI, "local-upload://") {
-		rest := strings.TrimPrefix(build.ArtifactURI, "local-upload://")
-		return strings.Split(rest, "/")[0]
+	if build.ArtifactURI != "" || build.DownloadURL != "" {
+		return "legacy-unverified"
 	}
-	return ""
+	return "missing"
 }
 
-func uploadIDFromDownloadURL(downloadURL string) string {
-	if downloadURL == "" {
-		return ""
-	}
-	const marker = "/api/uploads/"
-	index := strings.Index(downloadURL, marker)
-	if index < 0 {
-		return ""
-	}
-	rest := downloadURL[index+len(marker):]
-	parts := strings.Split(rest, "/")
-	if len(parts) == 0 || parts[0] == "" {
-		return ""
-	}
-	return parts[0]
+// buildOutputUploadID is retained for compatibility with callers that need the
+// authoritative runner-output relation. URI and download URL values are never
+// interpreted as ownership evidence because legacy values are client controlled.
+func buildOutputUploadID(build domain.Build) string {
+	return build.ArtifactUploadID
 }
 
 func withReleaseCheckSummaries(builds []domain.Build) []domain.Build {
@@ -3003,6 +3195,7 @@ func withReleaseCheckSummaries(builds []domain.Build) []domain.Build {
 }
 
 func withReleaseCheckSummary(build domain.Build) domain.Build {
+	build.ArtifactVerificationStatus = verificationStatus(build)
 	summary := releaseCheckSummary(buildReleaseCheck(build))
 	build.ReleaseCheckSummary = &summary
 	return build

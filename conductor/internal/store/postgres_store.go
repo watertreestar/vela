@@ -85,6 +85,11 @@ create index if not exists builds_created_at_idx on builds(created_at desc);
 
 create table if not exists uploads (
   id text primary key,
+  build_id text,
+  attempt integer,
+  kind text,
+  parent_upload_id text,
+  runner_id text,
   file_name text not null,
   uri text not null,
   download_url text not null,
@@ -93,6 +98,13 @@ create table if not exists uploads (
   payload jsonb not null,
   created_at timestamptz not null default now()
 );
+
+alter table uploads add column if not exists build_id text;
+alter table uploads add column if not exists attempt integer;
+alter table uploads add column if not exists kind text;
+alter table uploads add column if not exists parent_upload_id text;
+alter table uploads add column if not exists runner_id text;
+create unique index if not exists uploads_output_kind_per_attempt_idx on uploads(build_id, attempt, kind) where kind in ('final', 'checksum');
 
 create table if not exists manifest_revisions (
   id text not null,
@@ -502,23 +514,57 @@ func (s *PostgresStore) CancelBuild(id string) (domain.Build, error) {
 	})
 }
 
+func nullIfEmpty(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func uploadAttempt(record domain.UploadRecord) any {
+	if record.Kind == "" {
+		return nil
+	}
+	return record.Attempt
+}
+
 func (s *PostgresStore) SaveUploadRecord(record domain.UploadRecord) error {
 	payload, err := json.Marshal(record)
 	if err != nil {
 		return err
 	}
 	_, err = s.db.Exec(`
-insert into uploads (id, file_name, uri, download_url, sha256, size_bytes, payload, created_at)
-values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+insert into uploads (id, build_id, attempt, kind, parent_upload_id, runner_id, file_name, uri, download_url, sha256, size_bytes, payload, created_at)
+values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13)
 on conflict (id) do update set
+  build_id = excluded.build_id,
+  attempt = excluded.attempt,
+  kind = excluded.kind,
+  parent_upload_id = excluded.parent_upload_id,
+  runner_id = excluded.runner_id,
   file_name = excluded.file_name,
   uri = excluded.uri,
   download_url = excluded.download_url,
   sha256 = excluded.sha256,
   size_bytes = excluded.size_bytes,
   payload = excluded.payload
-`, record.ID, record.FileName, record.URI, record.DownloadURL, record.SHA256, record.Size, string(payload), record.CreatedAt)
+`, record.ID, nullIfEmpty(record.BuildID), uploadAttempt(record), nullIfEmpty(record.Kind), nullIfEmpty(record.ParentUploadID), nullIfEmpty(record.RunnerID), record.FileName, record.URI, record.DownloadURL, record.SHA256, record.Size, string(payload), record.CreatedAt)
 	return err
+}
+
+func (s *PostgresStore) DeleteUploadRecord(id string) error {
+	result, err := s.db.Exec(`delete from uploads where id = $1`, id)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return apperr.NotFound("upload", id)
+	}
+	return nil
 }
 
 func (s *PostgresStore) ListUploads() ([]domain.UploadRecord, error) {

@@ -350,13 +350,35 @@ func (s *JSONStore) SaveUploadRecord(record domain.UploadRecord) error {
 		if records[index].ID == record.ID {
 			records[index] = record
 			replaced = true
-			break
+			continue
+		}
+		if record.BuildID != "" && (record.Kind == "final" || record.Kind == "checksum") &&
+			records[index].BuildID == record.BuildID && records[index].Attempt == record.Attempt && records[index].Kind == record.Kind {
+			return apperr.Conflict("UPLOAD_OUTPUT_DUPLICATE", "output kind already exists for build attempt")
 		}
 	}
 	if !replaced {
 		records = append(records, record)
 	}
 	return s.writeUploadsLocked(records)
+}
+
+func (s *JSONStore) DeleteUploadRecord(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	records, err := s.readUploadsLocked()
+	if err != nil {
+		return err
+	}
+	for index := range records {
+		if records[index].ID != id {
+			continue
+		}
+		records = append(records[:index], records[index+1:]...)
+		return s.writeUploadsLocked(records)
+	}
+	return apperr.NotFound("upload", id)
 }
 
 func (s *JSONStore) ListUploads() ([]domain.UploadRecord, error) {

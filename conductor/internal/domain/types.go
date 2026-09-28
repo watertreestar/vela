@@ -227,15 +227,16 @@ type ReproducibilitySourceArtifact struct {
 }
 
 type ReproducibilityArtifact struct {
-	URI             string     `json:"uri"`
-	DownloadURL     string     `json:"downloadUrl"`
-	UploadID        string     `json:"uploadId,omitempty"`
-	SHA256          string     `json:"sha256,omitempty"`
-	Size            int64      `json:"size,omitempty"`
-	ContentType     string     `json:"contentType,omitempty"`
-	DownloadPolicy  string     `json:"downloadPolicy,omitempty"`
-	RetentionStatus string     `json:"retentionStatus,omitempty"`
-	CreatedAt       *time.Time `json:"createdAt,omitempty"`
+	URI                string     `json:"uri"`
+	DownloadURL        string     `json:"downloadUrl"`
+	UploadID           string     `json:"uploadId,omitempty"`
+	SHA256             string     `json:"sha256,omitempty"`
+	Size               int64      `json:"size,omitempty"`
+	ContentType        string     `json:"contentType,omitempty"`
+	DownloadPolicy     string     `json:"downloadPolicy,omitempty"`
+	RetentionStatus    string     `json:"retentionStatus,omitempty"`
+	VerificationStatus string     `json:"verificationStatus"`
+	CreatedAt          *time.Time `json:"createdAt,omitempty"`
 }
 
 type ReproducibilityRunner struct {
@@ -375,37 +376,43 @@ type APIErrorResponse struct {
 }
 
 type Build struct {
-	ID                  string               `json:"id"`
-	ProductID           string               `json:"productId"`
-	Target              string               `json:"target"`
-	Profile             string               `json:"profile"`
-	Customer            string               `json:"customer"`
-	Version             string               `json:"version"`
-	ReleaseChannel      string               `json:"releaseChannel"`
-	Status              string               `json:"status"`
-	Attempt             int                  `json:"attempt"`
-	RunnerID            string               `json:"runnerId"`
-	NomadJobID          string               `json:"nomadJobId"`
-	ExecutionJTI        string               `json:"executionJti,omitempty"`
-	ExecutionExpiresAt  *time.Time           `json:"executionExpiresAt,omitempty"`
-	LastHeartbeatAt     *time.Time           `json:"lastHeartbeatAt,omitempty"`
-	ArtifactURI         string               `json:"artifactUri"`
-	DownloadURL         string               `json:"downloadUrl"`
-	Error               string               `json:"error"`
-	Variables           map[string]any       `json:"variables"`
-	FinalConfig         map[string]any       `json:"finalConfig"`
-	Components          []ResolvedComponent  `json:"components"`
-	Workloads           []ResolvedWorkload   `json:"workloads"`
-	BuildLock           BuildLock            `json:"buildLock"`
-	CreatedAt           time.Time            `json:"createdAt"`
-	UpdatedAt           time.Time            `json:"updatedAt"`
-	SchedulerLog        string               `json:"schedulerLog"`
-	Logs                []BuildLog           `json:"logs"`
-	ApprovedAt          *time.Time           `json:"approvedAt,omitempty"`
-	ValidatedAt         *time.Time           `json:"validatedAt,omitempty"`
-	PublishedAt         *time.Time           `json:"publishedAt,omitempty"`
-	CanceledAt          *time.Time           `json:"canceledAt,omitempty"`
-	ReleaseCheckSummary *ReleaseCheckSummary `json:"releaseCheckSummary,omitempty"`
+	ID                         string               `json:"id"`
+	ProductID                  string               `json:"productId"`
+	Target                     string               `json:"target"`
+	Profile                    string               `json:"profile"`
+	Customer                   string               `json:"customer"`
+	Version                    string               `json:"version"`
+	ReleaseChannel             string               `json:"releaseChannel"`
+	Status                     string               `json:"status"`
+	Attempt                    int                  `json:"attempt"`
+	RunnerID                   string               `json:"runnerId"`
+	NomadJobID                 string               `json:"nomadJobId"`
+	ExecutionJTI               string               `json:"executionJti,omitempty"`
+	ExecutionExpiresAt         *time.Time           `json:"executionExpiresAt,omitempty"`
+	LastHeartbeatAt            *time.Time           `json:"lastHeartbeatAt,omitempty"`
+	ArtifactURI                string               `json:"artifactUri"`
+	DownloadURL                string               `json:"downloadUrl"`
+	ArtifactUploadID           string               `json:"artifactUploadId,omitempty"`
+	ArtifactSHA256             string               `json:"artifactSha256,omitempty"`
+	ArtifactSize               int64                `json:"artifactSize,omitempty"`
+	ChecksumUploadID           string               `json:"checksumUploadId,omitempty"`
+	ArtifactVerifiedAt         *time.Time           `json:"artifactVerifiedAt,omitempty"`
+	ArtifactVerificationStatus string               `json:"artifactVerificationStatus,omitempty"`
+	Error                      string               `json:"error"`
+	Variables                  map[string]any       `json:"variables"`
+	FinalConfig                map[string]any       `json:"finalConfig"`
+	Components                 []ResolvedComponent  `json:"components"`
+	Workloads                  []ResolvedWorkload   `json:"workloads"`
+	BuildLock                  BuildLock            `json:"buildLock"`
+	CreatedAt                  time.Time            `json:"createdAt"`
+	UpdatedAt                  time.Time            `json:"updatedAt"`
+	SchedulerLog               string               `json:"schedulerLog"`
+	Logs                       []BuildLog           `json:"logs"`
+	ApprovedAt                 *time.Time           `json:"approvedAt,omitempty"`
+	ValidatedAt                *time.Time           `json:"validatedAt,omitempty"`
+	PublishedAt                *time.Time           `json:"publishedAt,omitempty"`
+	CanceledAt                 *time.Time           `json:"canceledAt,omitempty"`
+	ReleaseCheckSummary        *ReleaseCheckSummary `json:"releaseCheckSummary,omitempty"`
 }
 
 type BuildLog struct {
@@ -455,6 +462,11 @@ type BuildLogRequest struct {
 
 type UploadRecord struct {
 	ID              string            `json:"id"`
+	BuildID         string            `json:"buildId,omitempty"`
+	Attempt         int               `json:"attempt,omitempty"`
+	RunnerID        string            `json:"runnerId,omitempty"`
+	Kind            string            `json:"kind,omitempty"`
+	ParentUploadID  string            `json:"parentUploadId,omitempty"`
 	FileName        string            `json:"fileName"`
 	URI             string            `json:"uri"`
 	DownloadURL     string            `json:"downloadUrl"`
