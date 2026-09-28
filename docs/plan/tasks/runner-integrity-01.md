@@ -2,7 +2,7 @@
 id: runner-integrity-01
 package: conductor, runner, infra
 module: runner-auth-nomad-secrets
-status: ready
+status: done
 depends-on: []
 ---
 
@@ -47,3 +47,11 @@ cd ../runner && bun test && bun run check
 ```
 
 并运行开发者选择的相关全量回归。返回实际命令/结果、修改文件、消融检查和尚未完成项。
+
+## 实际结果
+
+- 开发实现：`73a0e13`。
+- 独立验收：pass。
+- 已通过：`cd conductor && go test ./...`、`cd runner && bun test`、`cd runner && bun run check`、`git diff --check`。
+- 消融结论：不能移除 task-owned Variable/template/workload identity，否则 bearer 会回落到 Env 或需要过宽 ACL；不能只给 Runner 加 bearer header，否则 auth-enabled Job 仍无法安全取得凭据。通用 `/api/uploads` 权限未变。
+- 外部 live 未完成：真实 Nomad Variable/workload-identity/template ACL 与 Windows allocation secrets ACL，交给 PR-4 的 require/live gate。
