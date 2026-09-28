@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"mime/multipart"
 	"net/http"
@@ -25,12 +26,14 @@ import (
 )
 
 type Server struct {
-	store      store.Store
-	scheduler  nomad.Scheduler
-	artifacts  artifactStore
-	auth       AuthConfig
-	auditKey   string
-	auditKeyID string
+	store                  store.Store
+	scheduler              nomad.Scheduler
+	artifacts              artifactStore
+	auth                   AuthConfig
+	auditKey               string
+	auditKeyID             string
+	executionHMACKey       string
+	executionCapabilityTTL time.Duration
 }
 
 type resolveDependencies struct {
@@ -54,9 +57,11 @@ type artifactStore interface {
 }
 
 type ServerOptions struct {
-	Auth                  AuthConfig
-	AuditArchiveHMACKey   string
-	AuditArchiveHMACKeyID string
+	Auth                   AuthConfig
+	AuditArchiveHMACKey    string
+	AuditArchiveHMACKeyID  string
+	RunnerExecutionHMACKey string
+	RunnerCapabilityTTL    time.Duration
 }
 
 func NewServer(store store.Store, scheduler nomad.Scheduler, artifacts artifactStore) Server {
@@ -64,17 +69,23 @@ func NewServer(store store.Store, scheduler nomad.Scheduler, artifacts artifactS
 }
 
 func NewServerWithAuth(store store.Store, scheduler nomad.Scheduler, artifacts artifactStore, auth AuthConfig) Server {
-	return Server{store: store, scheduler: scheduler, artifacts: artifacts, auth: auth}
+	return NewServerWithOptions(store, scheduler, artifacts, ServerOptions{
+		Auth:                   auth,
+		RunnerExecutionHMACKey: "test-runner-execution-key",
+		RunnerCapabilityTTL:    15 * time.Minute,
+	})
 }
 
 func NewServerWithOptions(store store.Store, scheduler nomad.Scheduler, artifacts artifactStore, options ServerOptions) Server {
 	return Server{
-		store:      store,
-		scheduler:  scheduler,
-		artifacts:  artifacts,
-		auth:       options.Auth,
-		auditKey:   options.AuditArchiveHMACKey,
-		auditKeyID: options.AuditArchiveHMACKeyID,
+		store:                  store,
+		scheduler:              scheduler,
+		artifacts:              artifacts,
+		auth:                   options.Auth,
+		auditKey:               options.AuditArchiveHMACKey,
+		auditKeyID:             options.AuditArchiveHMACKeyID,
+		executionHMACKey:       options.RunnerExecutionHMACKey,
+		executionCapabilityTTL: options.RunnerCapabilityTTL,
 	}
 }
 
@@ -131,9 +142,12 @@ func (s Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/builds/{id}/logs", s.getBuildLogs)
 	mux.HandleFunc("GET /api/builds/{id}/logs/stream", s.streamBuildLogs)
 	mux.HandleFunc("POST /api/builds/{id}/logs", s.withAuth(s.appendBuildLog, roleRunner, roleAdmin))
-	mux.HandleFunc("POST /api/runner/tasks/claim", s.withAuth(s.claimRunnerTask, roleRunner, roleAdmin))
+	mux.HandleFunc("POST /api/runner/tasks/claim", s.withAuth(s.claimRunnerTask, roleRunner, roleAdmin)) // auth-disabled compatibility only
+	mux.HandleFunc("POST /api/runner/tasks/{id}/claim", s.withAuth(s.claimRunnerTask, roleRunner, roleAdmin))
 	mux.HandleFunc("POST /api/runner/tasks/{id}/complete", s.withAuth(s.completeRunnerTask, roleRunner, roleAdmin))
-	mux.HandleFunc("POST /api/runner/heartbeat", s.withAuth(s.runnerHeartbeat, roleRunner, roleAdmin))
+	mux.HandleFunc("POST /api/runner/tasks/{id}/heartbeat", s.withAuth(s.runnerHeartbeat, roleRunner, roleAdmin))
+	mux.HandleFunc("GET /api/runner/tasks/{id}/inputs/{uploadId}/download", s.withAuth(s.downloadRunnerInput, roleRunner, roleAdmin))
+	mux.HandleFunc("POST /api/runner/heartbeat", s.withAuth(s.runnerHeartbeat, roleRunner, roleAdmin)) // auth-disabled compatibility only
 	mux.HandleFunc("GET /api/runners", s.listRunners)
 	mux.HandleFunc("POST /api/uploads", s.withAuth(s.uploadArtifact, roleOperator, roleAdmin))
 	mux.HandleFunc("GET /api/uploads", s.listUploads)
@@ -625,17 +639,15 @@ func (s Server) approveBuild(w http.ResponseWriter, r *http.Request) {
 	}
 
 	secretRefs := secret.SecretRefs(current)
-	jobID, schedulerLog, err := s.scheduler.Submit(current, product)
+	prepared, capability, err := s.prepareDispatch(id, current.Status)
+	if err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	jobID, schedulerLog, err := s.scheduler.Submit(prepared, product, capability)
 	if err != nil {
 		s.recordSecretResolutionAudit(r, current, secretRefs, "approve", "failed")
-		failedBuild, _ := s.store.UpdateBuild(id, func(build *domain.Build) error {
-			build.Status = domain.BuildFailed
-			build.Error = err.Error()
-			build.SchedulerLog = schedulerLog
-			build.UpdatedAt = time.Now().UTC()
-			build.Logs = append(build.Logs, logEntryForRequest(r, "system", "approval failed: "+err.Error()))
-			return nil
-		})
+		failedBuild, _ := s.failDispatch(id, prepared, schedulerLog, err, "approval failed")
 		if failedBuild.ID != "" {
 			s.recordBuildNotification("build.scheduler_failed", "critical", "构建调度失败",
 				buildNotificationMessage(failedBuild, "审批通过后提交 Runner 调度失败，需要检查调度器或 Runner 配置。"),
@@ -650,6 +662,9 @@ func (s Server) approveBuild(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().UTC()
 	updated, err := s.store.UpdateBuild(id, func(build *domain.Build) error {
+		if build.Status != domain.BuildDispatching || build.Attempt != prepared.Attempt || build.ExecutionJTI != prepared.ExecutionJTI {
+			return buildStateConflict("dispatch was superseded")
+		}
 		build.Status = domain.BuildQueued
 		build.NomadJobID = jobID
 		build.SchedulerLog = schedulerLog
@@ -811,9 +826,15 @@ func (s Server) retryBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	secretRefs := secret.SecretRefs(current)
-	jobID, schedulerLog, err := s.scheduler.Submit(current, product)
+	prepared, capability, err := s.prepareDispatch(id, current.Status)
+	if err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	jobID, schedulerLog, err := s.scheduler.Submit(prepared, product, capability)
 	if err != nil {
 		s.recordSecretResolutionAudit(r, current, secretRefs, "retry", "failed")
+		_, _ = s.failDispatch(id, prepared, schedulerLog, err, "retry submission failed")
 		writeAPIErrorWithCause(w, http.StatusBadGateway, "SCHEDULER_SUBMIT_FAILED", "", []domain.APIErrorDetail{
 			{Message: "scheduler failed to submit build"},
 		}, err)
@@ -821,9 +842,11 @@ func (s Server) retryBuild(w http.ResponseWriter, r *http.Request) {
 	}
 	s.recordSecretResolutionAudit(r, current, secretRefs, "retry", "success")
 	updated, err := s.store.UpdateBuild(id, func(build *domain.Build) error {
+		if build.Status != domain.BuildDispatching || build.Attempt != prepared.Attempt || build.ExecutionJTI != prepared.ExecutionJTI {
+			return buildStateConflict("dispatch was superseded")
+		}
 		build.Status = domain.BuildQueued
 		build.Error = ""
-		build.RunnerID = ""
 		build.NomadJobID = jobID
 		build.SchedulerLog = schedulerLog
 		build.UpdatedAt = time.Now().UTC()
@@ -863,14 +886,17 @@ func (s Server) cancelBuild(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	updated, err := s.store.UpdateBuild(r.PathValue("id"), func(build *domain.Build) error {
 		switch build.Status {
-		case domain.BuildQueued, domain.BuildRunning, domain.BuildPendingApproval:
+		case domain.BuildDispatching, domain.BuildQueued, domain.BuildRunning, domain.BuildPendingApproval:
 			build.Status = domain.BuildCanceled
 			build.CanceledAt = &now
+			build.ExecutionJTI = ""
+			build.ExecutionExpiresAt = nil
+			build.LastHeartbeatAt = nil
 			build.UpdatedAt = now
 			build.Logs = appendBuildLogForRequest(build.Logs, r, "system", "build canceled")
 			return nil
 		default:
-			return buildStateConflict("only pending, queued, or running builds can be canceled")
+			return buildStateConflict("only pending, dispatching, queued, or running builds can be canceled")
 		}
 	})
 	if err != nil {
@@ -899,6 +925,16 @@ func (s Server) getBuildLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s Server) appendBuildLog(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	claims := domain.ExecutionClaims{}
+	if s.auth.Enabled {
+		var err error
+		claims, err = s.authorizeExecution(r, id, domain.BuildRunning)
+		if err != nil {
+			writeErrorText(w, http.StatusForbidden, err.Error())
+			return
+		}
+	}
 	var request domain.BuildLogRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -906,6 +942,9 @@ func (s Server) appendBuildLog(w http.ResponseWriter, r *http.Request) {
 	}
 	if request.Source == "" {
 		request.Source = "runner"
+	}
+	if s.auth.Enabled {
+		request.Source = claims.RunnerID
 	}
 	updated, err := s.store.UpdateBuild(r.PathValue("id"), func(build *domain.Build) error {
 		build.Logs = appendBuildLogForRequest(build.Logs, r, request.Source, request.Message)
@@ -976,30 +1015,145 @@ func (s Server) streamBuildLogs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s Server) prepareDispatch(id, expectedState string) (domain.Build, string, error) {
+	if s.auth.Enabled && strings.TrimSpace(s.executionHMACKey) == "" {
+		return domain.Build{}, "", errors.New("RUNNER_EXECUTION_HMAC_KEY is required when AUTH_ENABLED=true")
+	}
+	var prepared domain.Build
+	now := time.Now().UTC()
+	ttl := s.executionCapabilityTTL
+	if ttl <= 0 {
+		ttl = 15 * time.Minute
+	}
+	jti, err := newExecutionJTI()
+	if err != nil {
+		return domain.Build{}, "", err
+	}
+	prepared, err = s.store.UpdateBuild(id, func(build *domain.Build) error {
+		if build.Status != expectedState {
+			return buildStateConflict("build is no longer dispatchable")
+		}
+		build.Attempt++
+		build.Status = domain.BuildDispatching
+		build.RunnerID = fmt.Sprintf("nomad-%s-a%d", build.ID, build.Attempt)
+		build.NomadJobID = ""
+		build.ExecutionJTI = jti
+		expiry := now.Add(ttl)
+		build.ExecutionExpiresAt = &expiry
+		build.LastHeartbeatAt = nil
+		build.UpdatedAt = now
+		build.Logs = append(build.Logs, domain.BuildLog{Time: now, Source: "system", Message: "dispatch prepared"})
+		return nil
+	})
+	if err != nil {
+		return domain.Build{}, "", err
+	}
+	if !s.auth.Enabled {
+		return prepared, "", nil
+	}
+	capability, err := issueExecutionCapability(s.executionHMACKey, domain.ExecutionClaims{BuildID: prepared.ID, Attempt: prepared.Attempt, Target: prepared.Target, RunnerID: prepared.RunnerID, JTI: prepared.ExecutionJTI, IssuedAt: now, ExpiresAt: *prepared.ExecutionExpiresAt})
+	return prepared, capability, err
+}
+
+func (s Server) failDispatch(id string, prepared domain.Build, schedulerLog string, submitErr error, message string) (domain.Build, error) {
+	return s.store.UpdateBuild(id, func(build *domain.Build) error {
+		if build.Status != domain.BuildDispatching || build.Attempt != prepared.Attempt || build.ExecutionJTI != prepared.ExecutionJTI {
+			return buildStateConflict("dispatch was superseded")
+		}
+		build.Status = domain.BuildFailed
+		build.Error = submitErr.Error()
+		build.SchedulerLog = schedulerLog
+		build.NomadJobID = ""
+		build.ExecutionJTI = ""
+		build.ExecutionExpiresAt = nil
+		build.LastHeartbeatAt = nil
+		build.UpdatedAt = time.Now().UTC()
+		build.Logs = append(build.Logs, domain.BuildLog{Time: build.UpdatedAt, Source: "system", Message: message + ": " + submitErr.Error()})
+		return nil
+	})
+}
+
+func (s Server) authorizeExecution(r *http.Request, id, requiredState string) (domain.ExecutionClaims, error) {
+	if !s.auth.Enabled {
+		return domain.ExecutionClaims{}, nil
+	}
+	claims, err := verifyExecutionCapability(s.executionHMACKey, r.Header.Get("X-Runner-Execution"), time.Now().UTC())
+	if err != nil {
+		return domain.ExecutionClaims{}, err
+	}
+	if claims.BuildID != id {
+		return domain.ExecutionClaims{}, errors.New("execution capability build mismatch")
+	}
+	build, err := s.store.ReadBuild(id)
+	if err != nil {
+		return domain.ExecutionClaims{}, err
+	}
+	if build.Status != requiredState || build.Attempt != claims.Attempt || build.Target != claims.Target || build.RunnerID != claims.RunnerID || build.ExecutionJTI != claims.JTI || build.ExecutionExpiresAt == nil || build.ExecutionExpiresAt.Unix() != claims.ExpiresAt.Unix() {
+		return domain.ExecutionClaims{}, errors.New("execution capability is fenced")
+	}
+	return claims, nil
+}
+
 func (s Server) claimRunnerTask(w http.ResponseWriter, r *http.Request) {
 	var request domain.RunnerClaimRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if request.RunnerID == "" {
-		writeErrorText(w, http.StatusBadRequest, "runnerId is required")
+	id := r.PathValue("id")
+	if id == "" { // The target-wide endpoint remains only for auth-disabled local acceptance.
+		if request.RunnerID == "" {
+			writeErrorText(w, http.StatusBadRequest, "runnerId is required")
+			return
+		}
+		if s.auth.Enabled {
+			writeErrorText(w, http.StatusNotFound, "build-scoped claim is required")
+			return
+		}
+		requestID, correlationID := requestIDs(r)
+		build, ok, err := s.store.ClaimBuild(request.Target, request.RunnerID, requestID, correlationID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if !ok {
+			writeJSON(w, http.StatusNoContent, nil)
+			return
+		}
+		writeJSON(w, http.StatusOK, withReleaseCheckSummary(build))
 		return
 	}
-	requestID, correlationID := requestIDs(r)
-	build, ok, err := s.store.ClaimBuild(request.Target, request.RunnerID, requestID, correlationID)
+	claims, err := s.authorizeExecution(r, id, domain.BuildQueued)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		writeErrorText(w, http.StatusForbidden, err.Error())
 		return
 	}
-	if !ok {
-		writeJSON(w, http.StatusNoContent, nil)
+	updated, err := s.store.UpdateBuild(id, func(build *domain.Build) error {
+		if build.RunnerID != claims.RunnerID || build.Status != domain.BuildQueued {
+			return buildStateConflict("execution no longer claimable")
+		}
+		now := time.Now().UTC()
+		build.Status = domain.BuildRunning
+		build.LastHeartbeatAt = &now
+		build.UpdatedAt = now
+		build.Logs = append(build.Logs, logEntryForRequest(r, claims.RunnerID, "claimed by runner"))
+		return nil
+	})
+	if err != nil {
+		writeError(w, http.StatusConflict, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, withReleaseCheckSummary(build))
+	writeJSON(w, http.StatusOK, withReleaseCheckSummary(updated))
 }
 
 func (s Server) completeRunnerTask(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if s.auth.Enabled {
+		if _, err := s.authorizeExecution(r, id, domain.BuildRunning); err != nil {
+			writeErrorText(w, http.StatusForbidden, err.Error())
+			return
+		}
+	}
 	var request domain.RunnerCompleteRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -1015,8 +1169,10 @@ func (s Server) completeRunnerTask(w http.ResponseWriter, r *http.Request) {
 			return buildStateConflict("only running builds can be completed")
 		}
 		build.Status = status
-		build.ArtifactURI = request.ArtifactURI
-		build.DownloadURL = request.DownloadURL
+		if !s.auth.Enabled { // Transitional local-only acceptance; PR-3 replaces this with server-side output binding.
+			build.ArtifactURI = request.ArtifactURI
+			build.DownloadURL = request.DownloadURL
+		}
 		build.Error = request.Error
 		build.UpdatedAt = time.Now().UTC()
 		if status == domain.BuildSucceeded {
@@ -1043,30 +1199,85 @@ func (s Server) completeRunnerTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, withReleaseCheckSummary(updated))
 }
 
+func (s Server) downloadRunnerInput(w http.ResponseWriter, r *http.Request) {
+	id, uploadID := r.PathValue("id"), r.PathValue("uploadId")
+	if s.auth.Enabled {
+		if _, err := s.authorizeExecution(r, id, domain.BuildRunning); err != nil {
+			writeErrorText(w, http.StatusForbidden, err.Error())
+			return
+		}
+	}
+	build, err := s.store.ReadBuild(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	var locked *domain.ResolvedComponent
+	for index := range build.BuildLock.Components {
+		component := &build.BuildLock.Components[index]
+		if component.Source.UploadID == uploadID && component.URI == "local-upload://"+uploadID && strings.TrimSpace(component.SHA256) != "" {
+			locked = component
+			break
+		}
+	}
+	if locked == nil {
+		writeErrorText(w, http.StatusForbidden, "upload is not locked for this build")
+		return
+	}
+	upload, err := s.store.ReadUpload(uploadID)
+	if err != nil || upload.URI != locked.URI || !strings.EqualFold(upload.SHA256, locked.SHA256) {
+		writeErrorText(w, http.StatusForbidden, "locked upload integrity mismatch")
+		return
+	}
+	if s.artifacts == nil {
+		writeErrorText(w, http.StatusNotFound, "artifact store unavailable")
+		return
+	}
+	if err := s.artifacts.ServeUpload(w, r, uploadID); err != nil {
+		writeError(w, http.StatusNotFound, err)
+	}
+}
+
 func (s Server) runnerHeartbeat(w http.ResponseWriter, r *http.Request) {
 	var request domain.RunnerHeartbeatRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if request.RunnerID == "" {
-		writeErrorText(w, http.StatusBadRequest, "runnerId is required")
+	id := r.PathValue("id")
+	if id == "" {
+		if s.auth.Enabled {
+			writeErrorText(w, http.StatusNotFound, "build-scoped heartbeat is required")
+			return
+		}
+		id = request.BuildID
+	}
+	if id == "" {
+		writeErrorText(w, http.StatusBadRequest, "build id is required")
 		return
+	}
+	claims := domain.ExecutionClaims{}
+	if s.auth.Enabled {
+		var err error
+		claims, err = s.authorizeExecution(r, id, domain.BuildRunning)
+		if err != nil {
+			writeErrorText(w, http.StatusForbidden, err.Error())
+			return
+		}
 	}
 	message := "heartbeat"
 	if request.Message != "" {
-		message = "heartbeat: " + request.Message
+		message += ": " + request.Message
 	}
-	if request.BuildID != "" {
-		_, err := s.store.UpdateBuild(request.BuildID, func(build *domain.Build) error {
-			build.UpdatedAt = time.Now().UTC()
-			build.Logs = appendBuildLogForRequest(build.Logs, r, request.RunnerID, message)
-			return nil
-		})
-		if err != nil {
-			writeError(w, http.StatusNotFound, err)
-			return
-		}
+	_, err := s.store.UpdateBuild(id, func(build *domain.Build) error {
+		now := time.Now().UTC()
+		build.LastHeartbeatAt = &now
+		build.Logs = appendBuildLogForRequest(build.Logs, r, firstNonEmpty(claims.RunnerID, request.RunnerID), message)
+		return nil
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

@@ -2,7 +2,7 @@
 id: runner-integrity-02
 package: conductor, runner
 module: dispatch-capability-build-binding
-status: pending
+status: completed
 depends-on: [runner-integrity-01]
 ---
 
@@ -26,9 +26,16 @@ depends-on: [runner-integrity-01]
 5. Runner 读取 exact Build ID/execution file，验证 claim response；Runner 下载 API-hosted locked upload 时带 capability，并对 resolved components 验 sha256。
 6. 负例和并发/重试测试覆盖跨 Build、错误 target、错误 runner、错误/过期 token、cancel/timeout/old retry capability。
 
+## Actual result
+
+- Auth-disabled Runner compatibility remains on the legacy target-wide claim and legacy heartbeat paths, without `BUILD_ID`, bearer, or execution capability.
+- Auth-required Runner operation requires `BUILD_ID` and an execution capability, then uses build-scoped claim and heartbeat paths.
+- The server rejects the legacy target-wide claim whenever API authentication is enabled, including requests without runner authorization.
+
 ## Verification
 
 ```bash
 cd conductor && go test ./...
 cd ../runner && bun test && bun run check
+git diff --check
 ```

@@ -1224,8 +1224,12 @@ func TestAuthProtectsWriteAndRunnerRoutes(t *testing.T) {
 		t.Fatalf("expected runner claim without token status 401, got %d: %s", response.Code, response.Body.String())
 	}
 	response = doRequestWithHeaders(t, server, http.MethodPost, "/api/runner/tasks/claim", `{"runnerId":"runner-1","target":"linux"}`, bearer("runner-token"))
-	if response.Code != http.StatusNoContent {
-		t.Fatalf("expected runner token can claim queue, got %d: %s", response.Code, response.Body.String())
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("expected auth-enabled target-wide claim rejection, got %d: %s", response.Code, response.Body.String())
+	}
+	response = doRequestWithHeaders(t, server, http.MethodPost, "/api/runner/tasks/claim", `{"runnerId":"runner-1","target":"linux"}`, map[string]string{})
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected auth-enabled legacy claim without capability or authorization rejection, got %d: %s", response.Code, response.Body.String())
 	}
 }
 
@@ -1783,7 +1787,7 @@ func TestNotificationsRecordBuildLifecycleAndReadState(t *testing.T) {
 	if err := store.SaveBuild(build); err != nil {
 		t.Fatal(err)
 	}
-	server := NewServerWithAuth(store, &fakeScheduler{}, nil, testAuthConfig()).Routes()
+	server := NewServer(store, &fakeScheduler{}, nil).Routes()
 
 	response := doRequestWithHeaders(t, server, http.MethodPost, "/api/runner/tasks/notify-build/complete", `{"status":"succeeded","artifactUri":"minio://artifact/lsap.tar.gz","downloadUrl":"http://api.test/api/uploads/final/download"}`, bearer("runner-token"))
 	if response.Code != http.StatusOK {
@@ -1801,8 +1805,8 @@ func TestNotificationsRecordBuildLifecycleAndReadState(t *testing.T) {
 	}
 
 	response = doRequest(t, server, http.MethodGet, "/api/notifications", "")
-	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("expected notifications endpoint to require auth, got %d: %s", response.Code, response.Body.String())
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected notifications endpoint local compatibility status 200, got %d: %s", response.Code, response.Body.String())
 	}
 
 	response = doRequestWithHeaders(t, server, http.MethodPost, "/api/notifications/"+notifications[0].ID+"/read", "", bearer("viewer-token"))

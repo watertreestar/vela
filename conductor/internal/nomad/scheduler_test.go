@@ -15,6 +15,10 @@ func TestNewSchedulerRejectsMissingRunnerTokenForAuthEnabledRealScheduling(t *te
 	if err == nil || !strings.Contains(err.Error(), "AUTH_RUNNER_TOKEN") {
 		t.Fatalf("expected missing runner token validation error, got %v", err)
 	}
+	_, err = NewScheduler(config.Config{AuthEnabled: true, DryRun: false, AuthRunnerToken: "runner"})
+	if err == nil || !strings.Contains(err.Error(), "RUNNER_EXECUTION_HMAC_KEY") {
+		t.Fatalf("expected missing execution key validation error, got %v", err)
+	}
 }
 
 func TestNomadJobRunsPackagingRunner(t *testing.T) {
@@ -238,10 +242,11 @@ func TestNomadJobInjectsResolvedSecretEnvironment(t *testing.T) {
 
 func TestAuthEnabledJobRendersRunnerBearerFromNomadSecrets(t *testing.T) {
 	scheduler := NomadScheduler{cfg: config.Config{
-		AuthEnabled:         true,
-		AuthRunnerToken:     "must-not-appear-in-job",
-		RunnerAuthTokenFile: "vela-runner-auth",
-		APIBaseURL:          "http://packaging-api:8080",
+		AuthEnabled:            true,
+		AuthRunnerToken:        "must-not-appear-in-job",
+		RunnerAuthTokenFile:    "vela-runner-auth",
+		RunnerExecutionHMACKey: "execution-key",
+		APIBaseURL:             "http://packaging-api:8080",
 	}}
 	job, err := scheduler.buildJobWithSecrets(domain.Build{ID: "build-auth", ProductID: "lsap", Target: "linux"}, domain.Product{})
 	if err != nil {
@@ -254,10 +259,10 @@ func TestAuthEnabledJobRendersRunnerBearerFromNomadSecrets(t *testing.T) {
 	if _, found := task.Env["AUTH_RUNNER_TOKEN"]; found {
 		t.Fatalf("runner bearer must not be put in task environment: %#v", task.Env)
 	}
-	if len(task.Templates) != 1 || *task.Templates[0].DestPath != "secrets/vela-runner-auth" || *task.Templates[0].Envvars {
-		t.Fatalf("runner secret template incorrect: %#v", task.Templates)
+	if len(task.Templates) != 2 || *task.Templates[0].DestPath != "secrets/vela-runner-auth" || *task.Templates[1].DestPath != "secrets/vela-runner-execution" || *task.Templates[0].Envvars || *task.Templates[1].Envvars {
+		t.Fatalf("runner secret templates incorrect: %#v", task.Templates)
 	}
-	if *task.Templates[0].Perms != "0400" || !strings.Contains(*task.Templates[0].EmbeddedTmpl, runnerVariablePath(*job.ID)) {
+	if *task.Templates[0].Perms != "0400" || *task.Templates[1].Perms != "0400" || !strings.Contains(*task.Templates[0].EmbeddedTmpl, runnerVariablePath(*job.ID)) || !strings.Contains(*task.Templates[1].EmbeddedTmpl, "execution_capability") {
 		t.Fatalf("runner secret template permissions/path incorrect: %#v", task.Templates[0])
 	}
 	if len(task.Identities) != 1 || !task.Identities[0].File || task.Identities[0].Env {

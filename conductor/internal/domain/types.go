@@ -386,6 +386,9 @@ type Build struct {
 	Attempt             int                  `json:"attempt"`
 	RunnerID            string               `json:"runnerId"`
 	NomadJobID          string               `json:"nomadJobId"`
+	ExecutionJTI        string               `json:"executionJti,omitempty"`
+	ExecutionExpiresAt  *time.Time           `json:"executionExpiresAt,omitempty"`
+	LastHeartbeatAt     *time.Time           `json:"lastHeartbeatAt,omitempty"`
 	ArtifactURI         string               `json:"artifactUri"`
 	DownloadURL         string               `json:"downloadUrl"`
 	Error               string               `json:"error"`
@@ -417,6 +420,18 @@ type BuildLog struct {
 type RunnerClaimRequest struct {
 	RunnerID string `json:"runnerId"`
 	Target   string `json:"target"`
+}
+
+type ExecutionClaims struct {
+	Type      string
+	Audience  string
+	BuildID   string
+	Attempt   int
+	Target    string
+	RunnerID  string
+	JTI       string
+	IssuedAt  time.Time
+	ExpiresAt time.Time
 }
 
 type RunnerCompleteRequest struct {
@@ -473,6 +488,7 @@ type RunnerStatus struct {
 
 const (
 	BuildPendingApproval  = "pending_approval"
+	BuildDispatching      = "dispatching"
 	BuildQueued           = "queued"
 	BuildRunning          = "running"
 	BuildSucceeded        = "succeeded"

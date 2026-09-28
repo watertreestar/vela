@@ -26,7 +26,7 @@ type fakeScheduler struct {
 	stopErr   error
 }
 
-func (s *fakeScheduler) Submit(build domain.Build, _ domain.Product) (string, string, error) {
+func (s *fakeScheduler) Submit(build domain.Build, _ domain.Product, _ string) (string, string, error) {
 	s.submitted = append(s.submitted, build.ID)
 	if s.submitErr != nil {
 		return "", "scheduler failed", s.submitErr
@@ -400,13 +400,13 @@ func TestAPIRunnerAndUploadErrorBranches(t *testing.T) {
 	assertStatus(t, response, http.StatusBadRequest)
 
 	response = doRequest(t, server, http.MethodPost, "/api/runner/heartbeat", `{"buildId":"runner-fails"}`)
-	assertStatus(t, response, http.StatusBadRequest)
+	assertStatus(t, response, http.StatusOK)
 
 	response = doRequest(t, server, http.MethodPost, "/api/runner/heartbeat", `{"runnerId":"runner-1","buildId":"missing"}`)
 	assertStatus(t, response, http.StatusNotFound)
 
 	response = doRequest(t, server, http.MethodPost, "/api/runner/heartbeat", `{"runnerId":"runner-1"}`)
-	assertStatus(t, response, http.StatusOK)
+	assertStatus(t, response, http.StatusBadRequest)
 
 	response = doRequest(t, server, http.MethodPost, "/api/runner/tasks/runner-fails/complete", `{`)
 	assertStatus(t, response, http.StatusBadRequest)
