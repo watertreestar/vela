@@ -2,7 +2,8 @@ param(
   [string]$RunnerDir = "C:\packaging-runner",
   [string]$ApiUrl = "http://127.0.0.1:8080",
   [string]$MinioPublicUrl = "",
-  [string]$WindowsPackagerCmd = ""
+  [string]$WindowsPackagerCmd = "",
+  [string]$RunnerTokenFile = "vela-runner-auth"
 )
 
 $ErrorActionPreference = "Stop"
@@ -17,6 +18,9 @@ RUNNER_ID=windows-$env:COMPUTERNAME
 TARGET=windows
 MINIO_PUBLIC_URL=$MinioPublicUrl
 WINDOWS_PACKAGER_CMD=$WindowsPackagerCmd
+PACKAGING_API_TOKEN_FILE=$RunnerTokenFile
+# AUTH_RUNNER_TOKEN is deliberately never written to runner.env. Nomad writes it
+# to NOMAD_SECRETS_DIR\\$RunnerTokenFile for dispatched allocations.
 "@ | Set-Content -Encoding ASCII -Path "$RunnerDir\runner.env"
 
 @"

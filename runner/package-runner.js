@@ -9,14 +9,51 @@ const API_URL = process.env.PACKAGING_API_URL || "http://localhost:8080";
 const RUNNER_ID = process.env.RUNNER_ID || `runner-${process.pid}`;
 const TARGET = process.env.TARGET || "";
 const RUNNER_DIR = path.dirname(fileURLToPath(import.meta.url));
+let runnerBearer;
 
-async function request(pathname, options = {}) {
+export function resolveRunnerTokenPath(secretsDir, tokenFile) {
+  const name = String(tokenFile || "").trim();
+  if (!name || path.isAbsolute(name) || name === "." || name === ".." || name.includes("/") || name.includes("\\")) {
+    throw new Error("PACKAGING_API_TOKEN_FILE must be a safe relative file name");
+  }
+  return path.resolve(secretsDir, name);
+}
+
+export async function loadRunnerBearer({
+  secretsDir = process.env.NOMAD_SECRETS_DIR || "",
+  tokenFile = process.env.PACKAGING_API_TOKEN_FILE || "vela-runner-auth",
+  required = process.env.RUNNER_AUTH_REQUIRED === "true",
+} = {}) {
+  if (!secretsDir) {
+    if (required) throw new Error("runner bearer is required but NOMAD_SECRETS_DIR is unavailable");
+    return "";
+  }
+  const tokenPath = resolveRunnerTokenPath(secretsDir, tokenFile);
+  try {
+    const token = (await readFile(tokenPath, "utf8")).trim();
+    if (!token) throw new Error("runner bearer file is empty");
+    return token;
+  } catch (err) {
+    if (required) throw new Error(`runner bearer is unavailable: ${err.message}`);
+    return "";
+  }
+}
+
+export function setRunnerBearerForTest(value) {
+  runnerBearer = value || "";
+}
+
+function runnerHeaders(headers = {}) {
+  return runnerBearer ? { ...headers, Authorization: `Bearer ${runnerBearer}` } : headers;
+}
+
+export async function request(pathname, options = {}) {
   const response = await fetch(`${API_URL}${pathname}`, {
-    headers: {
+    ...options,
+    headers: runnerHeaders({
       "Content-Type": "application/json",
       ...options.headers,
-    },
-    ...options,
+    }),
   });
   if (response.status === 204) return null;
   const payload = await response.json().catch(() => null);
@@ -26,13 +63,14 @@ async function request(pathname, options = {}) {
   return payload;
 }
 
-async function upload(filePath) {
+export async function upload(filePath) {
   const form = new FormData();
   const data = await readFile(filePath);
   form.append("file", new Blob([data]), path.basename(filePath));
   const response = await fetch(`${API_URL}/api/uploads`, {
     method: "POST",
     body: form,
+    headers: runnerHeaders(),
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
@@ -317,7 +355,7 @@ function minioDownloadURL(uri) {
 }
 
 function downloadHeaders(url) {
-  const headers = {};
+  const headers = url.startsWith(API_URL.replace(/\/$/, "")) ? runnerHeaders({}) : {};
   const gitlabBaseURL = process.env.GITLAB_PACKAGE_BASE_URL || "";
   const gitlabToken = process.env.GITLAB_PACKAGE_TOKEN || "";
   if (gitlabBaseURL && gitlabToken && url.startsWith(gitlabBaseURL.replace(/\/$/, ""))) {
@@ -326,7 +364,7 @@ function downloadHeaders(url) {
   return headers;
 }
 
-async function downloadToFile(url, target) {
+export async function downloadToFile(url, target) {
   const response = await fetch(url, { headers: downloadHeaders(url) });
   if (!response.ok) {
     throw new Error(`download failed ${response.status}: ${url}`);
@@ -590,7 +628,8 @@ function shellArg(value) {
   return `"${String(value).replaceAll('"', '\\"')}"`;
 }
 
-async function main() {
+export async function main() {
+  runnerBearer = await loadRunnerBearer();
   const build = await request("/api/runner/tasks/claim", {
     method: "POST",
     body: JSON.stringify({ runnerId: RUNNER_ID, target: TARGET }),
@@ -635,7 +674,9 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(err.message);
-  process.exit(1);
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((err) => {
+    console.error(err.message);
+    process.exit(1);
+  });
+}

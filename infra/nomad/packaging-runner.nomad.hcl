@@ -35,6 +35,20 @@ job "packaging-${PRODUCT_ID}-${BUILD_ID}" {
         ]
       }
 
+      identity {
+        name = "runner-variable"
+        file = true
+        env  = false
+      }
+
+      template {
+        data        = "{{ with nomadVar \"nomad/jobs/packaging-${PRODUCT_ID}-${BUILD_ID}/builder/package/runner\" }}{{ .runner_bearer }}{{ end }}"
+        destination = "secrets/vela-runner-auth"
+        env         = false
+        perms       = "0400"
+        change_mode = "noop"
+      }
+
       env {
         BUILD_ID     = "${BUILD_ID}"
         PACKAGING_API_URL = "${PACKAGING_API_URL}"
@@ -45,6 +59,8 @@ job "packaging-${PRODUCT_ID}-${BUILD_ID}" {
         CUSTOMER     = "${CUSTOMER}"
         VERSION      = "${VERSION}"
         MINIO_BUCKET = "${MINIO_BUCKET}"
+        PACKAGING_API_TOKEN_FILE = "vela-runner-auth"
+        RUNNER_AUTH_REQUIRED = "true"
       }
 
       resources {

@@ -61,6 +61,10 @@ type Config struct {
 	AuthOperatorToken         string
 	AuthViewerToken           string
 	AuthRunnerToken           string
+	RunnerAuthTokenFile       string
+	RunnerAuthRequired        bool
+	RunnerCapabilityTTL       time.Duration
+	RunnerExecutionHMACKey    string
 	OIDCIssuer                string
 	OIDCAudience              string
 	OIDCJWKSURL               string
@@ -151,6 +155,10 @@ func Load() Config {
 		AuthOperatorToken:         os.Getenv("AUTH_OPERATOR_TOKEN"),
 		AuthViewerToken:           os.Getenv("AUTH_VIEWER_TOKEN"),
 		AuthRunnerToken:           os.Getenv("AUTH_RUNNER_TOKEN"),
+		RunnerAuthTokenFile:       env("PACKAGING_API_TOKEN_FILE", "vela-runner-auth"),
+		RunnerAuthRequired:        env("RUNNER_AUTH_REQUIRED", "false") == "true",
+		RunnerCapabilityTTL:       envDuration("RUNNER_CAPABILITY_TTL_SECONDS", 900),
+		RunnerExecutionHMACKey:    os.Getenv("RUNNER_EXECUTION_HMAC_KEY"),
 		OIDCIssuer:                os.Getenv("OIDC_ISSUER"),
 		OIDCAudience:              os.Getenv("OIDC_AUDIENCE"),
 		OIDCJWKSURL:               os.Getenv("OIDC_JWKS_URL"),

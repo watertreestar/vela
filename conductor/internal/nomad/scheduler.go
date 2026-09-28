@@ -41,6 +41,12 @@ func NewScheduler(cfg config.Config) (Scheduler, error) {
 	if cfg.DryRun {
 		return DryRunScheduler{cfg: cfg}, nil
 	}
+	if cfg.AuthEnabled && strings.TrimSpace(cfg.AuthRunnerToken) == "" {
+		return nil, fmt.Errorf("AUTH_RUNNER_TOKEN is required when AUTH_ENABLED=true and DRY_RUN=false")
+	}
+	if cfg.AuthEnabled && !safeTokenFileName(cfg.RunnerAuthTokenFile) {
+		return nil, fmt.Errorf("PACKAGING_API_TOKEN_FILE must be a safe relative file name")
+	}
 
 	nomadConfig := nomadapi.DefaultConfig()
 	nomadConfig.Address = cfg.NomadAddr
@@ -59,8 +65,22 @@ func (s NomadScheduler) Submit(build domain.Build, product domain.Product) (stri
 	if err != nil {
 		return "", "", err
 	}
+	variablePath := ""
+	if s.cfg.AuthEnabled {
+		variablePath = runnerVariablePath(*job.ID)
+		_, _, err = s.client.Variables().Create(&nomadapi.Variable{
+			Path:  variablePath,
+			Items: nomadapi.VariableItems{"runner_bearer": s.cfg.AuthRunnerToken},
+		}, nil)
+		if err != nil {
+			return "", "", fmt.Errorf("create runner credential variable: %w", err)
+		}
+	}
 	_, _, err = s.client.Jobs().Register(job, nil)
 	if err != nil {
+		if variablePath != "" {
+			_, _ = s.client.Variables().Delete(variablePath, nil)
+		}
 		return "", "", err
 	}
 	return *job.ID, fmt.Sprintf("submitted Nomad job %s", *job.ID), nil
@@ -157,6 +177,10 @@ func (s NomadScheduler) buildJobWithSecrets(build domain.Build, product domain.P
 	addEnv(env, "WINDOWS_PACKAGER_CMD", s.cfg.WindowsPackagerCmd)
 	addEnv(env, "WINDOWS_SIGNING_CMD", s.cfg.WindowsSigningCmd)
 	addEnv(env, "SECRET_ENV_PREFIX", s.cfg.SecretEnvPrefix)
+	if s.cfg.AuthEnabled {
+		env["PACKAGING_API_TOKEN_FILE"] = s.cfg.RunnerAuthTokenFile
+		env["RUNNER_AUTH_REQUIRED"] = "true"
+	}
 	for key, value := range build.Variables {
 		env["VAR_"+strings.ToUpper(key)] = fmt.Sprint(value)
 	}
@@ -193,6 +217,8 @@ func (s NomadScheduler) buildJobWithSecrets(build domain.Build, product domain.P
 				Resources:   taskResources(s.cfg),
 				LogConfig:   logConfig(s.cfg),
 				KillTimeout: durationPtr(s.cfg.RunnerKillTimeout),
+				Templates:   runnerAuthTemplates(s.cfg, jobID, build.Target),
+				Identities:  runnerWorkloadIdentities(s.cfg),
 			}},
 		}},
 	}, nil
@@ -238,6 +264,11 @@ func (s NomadScheduler) Inspect(jobID string) (JobStatus, error) {
 
 func (s NomadScheduler) Stop(jobID string) error {
 	_, _, err := s.client.Jobs().Deregister(jobID, false, nil)
+	if s.cfg.AuthEnabled {
+		if _, deleteErr := s.client.Variables().Delete(runnerVariablePath(jobID), nil); deleteErr != nil && err == nil {
+			err = fmt.Errorf("delete runner credential variable: %w", deleteErr)
+		}
+	}
 	return err
 }
 
@@ -269,6 +300,40 @@ func (s DryRunScheduler) Stop(jobID string) error {
 
 func jobID(build domain.Build) string {
 	return fmt.Sprintf("pkg-%s-%s", build.ProductID, build.ID)
+}
+
+func runnerVariablePath(jobID string) string {
+	return fmt.Sprintf("nomad/jobs/%s/builder/package/runner", jobID)
+}
+
+func safeTokenFileName(name string) bool {
+	name = strings.TrimSpace(name)
+	return name != "" && !strings.ContainsAny(name, `/\\`) && name != "." && name != ".."
+}
+
+func runnerAuthTemplates(cfg config.Config, jobID, target string) []*nomadapi.Template {
+	if !cfg.AuthEnabled {
+		return nil
+	}
+	perms := "0400"
+	template := &nomadapi.Template{
+		DestPath:      ptr(fmt.Sprintf("secrets/%s", cfg.RunnerAuthTokenFile)),
+		EmbeddedTmpl:  ptr(fmt.Sprintf(`{{ with nomadVar %q }}{{ .runner_bearer }}{{ end }}`, runnerVariablePath(jobID))),
+		Envvars:       ptr(false),
+		ChangeMode:    ptr("noop"),
+		ErrMissingKey: ptr(true),
+	}
+	if target != "windows" {
+		template.Perms = &perms
+	}
+	return []*nomadapi.Template{template}
+}
+
+func runnerWorkloadIdentities(cfg config.Config) []*nomadapi.WorkloadIdentity {
+	if !cfg.AuthEnabled {
+		return nil
+	}
+	return []*nomadapi.WorkloadIdentity{{Name: "runner-variable", File: true, Env: false}}
 }
 
 func ptr[T any](value T) *T {

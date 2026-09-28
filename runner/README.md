@@ -237,6 +237,10 @@ Core:
 - `GITLAB_PACKAGE_BASE_URL` - optional GitLab base URL; runner only attaches GitLab auth headers to downloads under this URL.
 - `GITLAB_PACKAGE_TOKEN` - optional token sent as `PRIVATE-TOKEN` for GitLab Generic Package Registry component downloads.
 - `HEARTBEAT_INTERVAL_MS` - runner heartbeat interval, default `30000`.
+- `PACKAGING_API_TOKEN_FILE` - safe relative file name in `$NOMAD_SECRETS_DIR` containing the Runner bearer; default `vela-runner-auth`. The bearer is never an environment variable.
+- `RUNNER_AUTH_REQUIRED` - set to `true` by auth-enabled Nomad jobs. The runner fails before any API call if the secret file is absent or empty. Omit it for the auth-disabled local mode.
+
+Auth-enabled Nomad allocations receive the bearer through a task-owned Nomad Variable, workload identity, and a `template` rendered under the allocation secrets directory. Linux uses template mode `0400`; Windows relies on Nomad's allocation secrets-directory ACL. Do not add `AUTH_RUNNER_TOKEN` to `runner.env`, host environment variables, logs, or workspace files.
 - `LSAPCTL_BUILD_CMD` - optional `lsapctl` compile command. Linux runs it inside the Dagger container; Windows runs it on the Windows runner host before `WINDOWS_PACKAGER_CMD`.
 - `LSAPCTL_SOURCE_DIR` - optional local source directory copied into the build context as `lsapctl-src`.
 

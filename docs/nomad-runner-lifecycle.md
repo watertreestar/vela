@@ -18,6 +18,10 @@ STORE_DRIVER=postgres
 DRY_RUN=false
 NOMAD_ADDR=http://127.0.0.1:4646
 PACKAGING_API_URL=http://<api-host>:8080
+# Required for auth-enabled real scheduling; keep only in the API/Conductor environment.
+AUTH_ENABLED=true
+AUTH_RUNNER_TOKEN=<runner-static-bearer>
+PACKAGING_API_TOKEN_FILE=vela-runner-auth
 ARTIFACT_STORE=minio
 MINIO_ENDPOINT=<minio-host>:9000
 MINIO_ACCESS_KEY=<access-key>
@@ -25,6 +29,8 @@ MINIO_SECRET_KEY=<secret-key>
 MINIO_BUCKET=packaging-artifacts
 MINIO_PUBLIC_URL=http://<minio-host>:9000
 ```
+
+With `AUTH_ENABLED=true` and `DRY_RUN=false`, Conductor rejects startup without `AUTH_RUNNER_TOKEN`. For each dispatch it stores the bearer in the job's task-owned Nomad Variable path, and the task workload identity renders it through a non-`env` template into `$NOMAD_SECRETS_DIR/vela-runner-auth`. Linux template mode is `0400`; Windows uses the allocation secrets-directory ACL and makes no POSIX-mode claim. The bearer must never be added to `runner.env`, task environment, Build/Audit records, workspace, or logs.
 
 Proxy variables are inherited by the API process and forwarded into Nomad runner tasks:
 
@@ -201,7 +207,7 @@ value     = "windows"
 Windows installation checklist:
 
 1. Install Nomad, Bun, and the selected Windows installer toolchain.
-2. Run `infra\windows\prepare-runner.ps1` to copy runner files and generate `runner.env`.
+2. Run `infra\windows\prepare-runner.ps1` to copy runner files and generate `runner.env`; it deliberately does not write `AUTH_RUNNER_TOKEN`. Auth-enabled dispatched tasks receive the token only via Nomad's allocation secrets directory.
 3. Configure persistent cache directories such as `C:\packaging-cache\bun` and `C:\packaging-cache\artifacts`.
 4. Set proxy and cache variables at Machine scope when required.
 5. Start the Nomad client as Administrator with `infra\windows\start-nomad-client.ps1`.

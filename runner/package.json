@@ -2,6 +2,7 @@
   "type": "module",
   "scripts": {
     "check": "bun build package-runner.js --target=bun --outfile=/tmp/package-runner-check.js && bun build dagger/linux-package.mjs --target=bun --outfile=/tmp/linux-package-check.js",
+    "test": "bun test",
     "start": "bun package-runner.js"
   },
   "dependencies": {

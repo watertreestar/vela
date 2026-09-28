@@ -179,7 +179,7 @@ The `/metrics` endpoint also exports runner cache status, bytes, file counts, an
 `correlation_trace_cli.py` is a read-only incident/debugging helper. It queries audit events, builds, build logs, uploads, and notifications by requestId/correlationId, and can emit `packaging.correlation_trace.report/v1` JSON with `--json`.
 Production identity and object-lock acceptance details are documented in `docs/production-readiness.md`.
 
-The conductor defaults to PostgreSQL storage and dry-run Nomad scheduling. Set `DRY_RUN=false`, `NOMAD_ADDR`, and `PACKAGING_RUNNER_IMAGE` to submit real Nomad jobs.
+The conductor defaults to PostgreSQL storage and dry-run Nomad scheduling. Set `DRY_RUN=false`, `NOMAD_ADDR`, and `PACKAGING_RUNNER_IMAGE` to submit real Nomad jobs. When `AUTH_ENABLED=true`, real scheduling also requires `AUTH_RUNNER_TOKEN`; Conductor stores it only in a task-owned Nomad Variable and the allocation template renders it under `$NOMAD_SECRETS_DIR`, never in task environment variables or logs.
 
 Nomad runner image:
 
@@ -257,7 +257,9 @@ Conductor variables:
 - `AUTH_ADMIN_TOKEN` - admin token; can publish releases and perform all protected operations.
 - `AUTH_OPERATOR_TOKEN` - operator token; can create/approve/reject/validate/retry/cancel builds, update manifests/overlays, upload artifacts, and download restricted artifacts.
 - `AUTH_VIEWER_TOKEN` - viewer token; can download `platform` artifacts when auth is enabled.
-- `AUTH_RUNNER_TOKEN` - runner token; required for runner claim/complete/heartbeat/log APIs when auth is enabled.
+- `AUTH_RUNNER_TOKEN` - runner token; required for runner claim/complete/heartbeat/log APIs when auth is enabled and `DRY_RUN=false`. It stays in the Conductor environment and is rendered only into dispatched allocation secrets files.
+- `PACKAGING_API_TOKEN_FILE` - safe relative allocation-secrets file name for the runner bearer, default `vela-runner-auth`.
+- `RUNNER_CAPABILITY_TTL_SECONDS`, `RUNNER_EXECUTION_HMAC_KEY` - reserved independent capability configuration; the HMAC key stays Conductor-only.
 - `OIDC_ISSUER`, `OIDC_AUDIENCE`, `OIDC_JWKS_URL` - optional OIDC/JWKS bearer JWT verification for human users when `AUTH_ENABLED=true`; RS256 tokens must pass issuer, audience, expiry, and signature checks.
 - `OIDC_TOKEN_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` - optional server-side OIDC Authorization Code + PKCE token broker settings. `OIDC_CLIENT_SECRET` is only required for confidential clients.
 - `OIDC_ROLE_CLAIM` - role claim name, default `roles`.
