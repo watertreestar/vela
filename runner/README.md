@@ -1,6 +1,6 @@
 # Runner
 
-The runner is intentionally thin. It pulls approved build tasks from the Packaging API and reports logs/results back.
+The runner is intentionally thin. It executes only its Nomad-dispatched Build attempt and reports logs/results back. Auth-enabled runner tasks receive their bearer and `X-Runner-Execution` capability solely as files in `NOMAD_SECRETS_DIR`; neither may appear in `runner.env`, `Task.Env`, image layers, logs, reports, or command lines.
 
 Responsibilities:
 
@@ -182,7 +182,7 @@ python scripts\windows_runner_check_cli.py check `
   --signing-command "signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 %OUTPUT%"
 ```
 
-The check fails if production packaging would fall back to the fixture packager/signing command, if `WINDOWS_PACKAGER_CMD` is missing, if signing is required but missing, or if the expected Inno/WiX/SignTool executables are not visible from the runner host. Use `--no-require-signing` only for an explicitly unsigned Preview environment; Release candidate hosts should keep signing required.
+The check fails if production packaging would fall back to the fixture packager/signing command, if `WINDOWS_PACKAGER_CMD` is missing, if signing is required but missing, or if the expected Inno/WiX/SignTool executables are not visible from the runner host. Use `--no-require-signing` only for an explicitly unsigned Preview environment; Release candidate hosts should keep signing required. The full Windows live gate must run inside the actual raw_exec allocation with `--live`, allocation/build/job evidence, both secret-file basenames, and `--runner-env-file`; provide the human operator credential only as `PACKAGING_OPERATOR_TOKEN` in the controlled verification environment (never argv or `runner.env`). It rejects bearer/capability/HMAC entries in `runner.env`. A non-Windows invocation is diagnostic only, never a Windows live success.
 
 For local or CI acceptance without a Windows packager host, the Docker runner image includes a deterministic fixture packager:
 
@@ -212,6 +212,19 @@ The fixture writes a `.tar.gz` artifact containing marker `PACKAGING_PLATFORM_LI
 ```bash
 DAGGER_LINUX_INSTALL_TOOLS='apk add --no-cache python3 tar gzip coreutils bash'
 ```
+
+Auth-enabled protocol fixture validation is separate from Nomad deployment validation and never accepts runner credentials:
+
+```bash
+python scripts/runner_e2e_cli.py check --fixture --json
+# actual dispatched Linux/Windows allocation; credentials are environment-only
+PACKAGING_OPERATOR_TOKEN=... NOMAD_TOKEN=... \
+python scripts/runner_e2e_cli.py check --live \
+  --api-url https://api.example --nomad-url https://nomad.example:4646 \
+  --build-id <build-id> --nomad-job-id <job-id> --json
+```
+
+The fixture proves the Build/attempt/target and final checksum report shape; only `--live` proves a deployed Nomad allocation. Revoking/canceling/completing an attempt invalidates its capability; rotate the Conductor-held runner bearer/HMAC key through secure secret management and dispatch fresh attempts.
 
 Fixture golden checks can be run without starting the API or Docker runner:
 

@@ -389,6 +389,7 @@ type Build struct {
 	NomadJobID                 string               `json:"nomadJobId"`
 	ExecutionJTI               string               `json:"executionJti,omitempty"`
 	ExecutionExpiresAt         *time.Time           `json:"executionExpiresAt,omitempty"`
+	DispatchStartedAt          *time.Time           `json:"dispatchStartedAt,omitempty"`
 	LastHeartbeatAt            *time.Time           `json:"lastHeartbeatAt,omitempty"`
 	ArtifactURI                string               `json:"artifactUri"`
 	DownloadURL                string               `json:"downloadUrl"`
@@ -453,6 +454,34 @@ type RunnerHeartbeatRequest struct {
 	BuildID  string `json:"buildId"`
 	Target   string `json:"target"`
 	Message  string `json:"message"`
+}
+
+// RunnerE2EEvidence is a deliberately narrow, protected projection used by
+// production readiness gates. Credentials, execution JTI/expiry, logs, and
+// artifact URLs are intentionally excluded.
+type RunnerE2EEvidence struct {
+	BuildID              string     `json:"buildId"`
+	Status               string     `json:"status"`
+	AuthEnabled          bool       `json:"authEnabled"`
+	Attempt              int        `json:"attempt"`
+	Target               string     `json:"target"`
+	RunnerID             string     `json:"runnerId"`
+	NomadJobID           string     `json:"nomadJobId"`
+	DispatchStartedAt    *time.Time `json:"dispatchStartedAt,omitempty"`
+	ArtifactUploadID     string     `json:"artifactUploadId,omitempty"`
+	ChecksumUploadID     string     `json:"checksumUploadId,omitempty"`
+	ArtifactSHA256       string     `json:"artifactSha256,omitempty"`
+	ArtifactVerifiedAt   *time.Time `json:"artifactVerifiedAt,omitempty"`
+	VerificationStatus   string     `json:"verificationStatus,omitempty"`
+	FinalBuildID         string     `json:"finalBuildId,omitempty"`
+	FinalAttempt         int        `json:"finalAttempt,omitempty"`
+	FinalRunnerID        string     `json:"finalRunnerId,omitempty"`
+	FinalKind            string     `json:"finalKind,omitempty"`
+	ChecksumBuildID      string     `json:"checksumBuildId,omitempty"`
+	ChecksumAttempt      int        `json:"checksumAttempt,omitempty"`
+	ChecksumRunnerID     string     `json:"checksumRunnerId,omitempty"`
+	ChecksumKind         string     `json:"checksumKind,omitempty"`
+	ChecksumParentUpload string     `json:"checksumParentUploadId,omitempty"`
 }
 
 type BuildLogRequest struct {

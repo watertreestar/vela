@@ -915,6 +915,44 @@ func TestReproducibilityReportIncludesLockGateAndArtifactEvidence(t *testing.T) 
 	}
 }
 
+func TestRunnerE2EEvidenceRequiresOperatorAndProjectsBoundOutputs(t *testing.T) {
+	store, _ := newTestServerStore(t)
+	server := NewServerWithAuth(store, nil, nil, testAuthConfig()).Routes()
+	now := time.Now().UTC()
+	build := domain.Build{
+		ID: "runner-e2e-build", ProductID: "lsap", Target: "windows", Status: domain.BuildSucceeded,
+		Attempt: 3, RunnerID: "nomad-runner-e2e-build-a3", NomadJobID: "pkg-lsap-runner-e2e-build-a3",
+		ArtifactUploadID: "runner-e2e-final", ChecksumUploadID: "runner-e2e-checksum", ArtifactSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ArtifactVerifiedAt: &now,
+		DispatchStartedAt:  &now,
+	}
+	if err := store.SaveUploadRecord(domain.UploadRecord{ID: "runner-e2e-final", BuildID: build.ID, Attempt: build.Attempt, RunnerID: build.RunnerID, Kind: "final"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveUploadRecord(domain.UploadRecord{ID: "runner-e2e-checksum", BuildID: build.ID, Attempt: build.Attempt, RunnerID: build.RunnerID, Kind: "checksum", ParentUploadID: "runner-e2e-final"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveBuild(build); err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/builds/runner-e2e-build/runner-e2e-evidence"
+	for _, token := range []string{"", "viewer-token", "runner-token"} {
+		response := doRequestWithHeaders(t, server, http.MethodGet, path, "", bearer(token))
+		if response.Code != http.StatusUnauthorized && response.Code != http.StatusForbidden {
+			t.Fatalf("expected non-operator token %q to be rejected, got %d: %s", token, response.Code, response.Body.String())
+		}
+	}
+	response := doRequestWithHeaders(t, server, http.MethodGet, path, "", bearer("operator-token"))
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected operator evidence access, got %d: %s", response.Code, response.Body.String())
+	}
+	var evidence domain.RunnerE2EEvidence
+	decodeJSON(t, response, &evidence)
+	if evidence.BuildID != build.ID || evidence.NomadJobID != build.NomadJobID || evidence.FinalBuildID != build.ID || evidence.ChecksumParentUpload != build.ArtifactUploadID {
+		t.Fatalf("unexpected runner E2E evidence: %#v", evidence)
+	}
+}
+
 func TestReleaseEvidenceArchivePersistsDigestSignatureAndAudit(t *testing.T) {
 	store, _ := newTestServerStore(t)
 	dataDir := t.TempDir()

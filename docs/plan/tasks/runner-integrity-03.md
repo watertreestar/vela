@@ -41,4 +41,4 @@ cd ../runner && bun test && bun run check
 - common `POST /api/uploads` 仍为 operator/admin；`GET /api/uploads` 在 auth 模式要求 viewer+。legacy Build 保留下载且 report 返回 `legacy-unverified`，但 Preview/Release verification 被阻断。
 - 已通过：`go test ./...`、`go test -race ./internal/api ./internal/store ./internal/artifact`、`bun test`、`bun run check`、`python -m unittest discover -s scripts -p '*_test.py'`、`git diff --check`。
 - 消融结论：不能删除 final/checksum 分离与 readback，否则 Runner 能通过自报 URL/metadata 伪造成功；不能复用 common uploads 权限，否则 runner 会获得跨 Build 写入能力；不能自动把 legacy URL 转为 binding，否则历史数据会被伪造性信任。
-- 外部剩余项：真实 MinIO/Postgres/Nomad/Windows live 运行留给 PR-4，不影响本地代码验收。
+- 外部剩余项：真实 RustFS/Postgres/Nomad/Windows live 运行留给 PR-4，不影响本地代码验收。

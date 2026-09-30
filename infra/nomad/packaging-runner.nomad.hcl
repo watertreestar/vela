@@ -42,11 +42,21 @@ job "packaging-${PRODUCT_ID}-${BUILD_ID}" {
       }
 
       template {
-        data        = "{{ with nomadVar \"nomad/jobs/packaging-${PRODUCT_ID}-${BUILD_ID}/builder/package/runner\" }}{{ .runner_bearer }}{{ end }}"
-        destination = "secrets/vela-runner-auth"
-        env         = false
-        perms       = "0400"
-        change_mode = "noop"
+        data            = "{{ with nomadVar \"nomad/jobs/packaging-${PRODUCT_ID}-${BUILD_ID}/builder/package/runner\" }}{{ .runner_bearer }}{{ end }}"
+        destination     = "secrets/vela-runner-auth"
+        env             = false
+        perms           = "0400"
+        change_mode     = "noop"
+        err_missing_key = true
+      }
+
+      template {
+        data            = "{{ with nomadVar \"nomad/jobs/packaging-${PRODUCT_ID}-${BUILD_ID}/builder/package/runner\" }}{{ .execution_capability }}{{ end }}"
+        destination     = "secrets/vela-runner-execution"
+        env             = false
+        perms           = "0400"
+        change_mode     = "noop"
+        err_missing_key = true
       }
 
       env {
@@ -60,6 +70,7 @@ job "packaging-${PRODUCT_ID}-${BUILD_ID}" {
         VERSION      = "${VERSION}"
         MINIO_BUCKET = "${MINIO_BUCKET}"
         PACKAGING_API_TOKEN_FILE = "vela-runner-auth"
+        RUNNER_EXECUTION_FILE = "vela-runner-execution"
         RUNNER_AUTH_REQUIRED = "true"
       }
 

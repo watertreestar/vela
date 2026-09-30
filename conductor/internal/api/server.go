@@ -132,6 +132,7 @@ func (s Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/builds/{id}/lock", s.getBuildLock)
 	mux.HandleFunc("GET /api/builds/{id}/release-check", s.getBuildReleaseCheck)
 	mux.HandleFunc("GET /api/builds/{id}/reproducibility-report", s.getBuildReproducibilityReport)
+	mux.HandleFunc("GET /api/builds/{id}/runner-e2e-evidence", s.withAuth(s.getRunnerE2EEvidence, roleOperator, roleAdmin))
 	mux.HandleFunc("GET /api/builds/{id}/release-evidence/archive", s.withAuth(s.exportBuildReleaseEvidenceArchive, roleViewer, roleOperator, roleAdmin))
 	mux.HandleFunc("GET /api/builds/{id}/download", s.downloadBuild)
 	mux.HandleFunc("POST /api/builds/{id}/approve", s.withAuth(s.approveBuild, roleOperator, roleAdmin))
@@ -564,6 +565,33 @@ func (s Server) getBuildReproducibilityReport(w http.ResponseWriter, r *http.Req
 		return
 	}
 	writeJSON(w, http.StatusOK, s.reproducibilityReport(build, time.Now().UTC()))
+}
+
+// getRunnerE2EEvidence exposes the minimum, non-secret control-plane evidence
+// required by the auth-enabled Runner live gate. It deliberately does not expose
+// execution credentials, scheduler logs, or raw runner logs.
+func (s Server) getRunnerE2EEvidence(w http.ResponseWriter, r *http.Request) {
+	build, err := s.store.ReadBuild(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	final, checksum := domain.UploadRecord{}, domain.UploadRecord{}
+	if build.ArtifactUploadID != "" {
+		final, err = s.store.ReadUpload(build.ArtifactUploadID)
+		if err != nil {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+	}
+	if build.ChecksumUploadID != "" {
+		checksum, err = s.store.ReadUpload(build.ChecksumUploadID)
+		if err != nil {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, runnerE2EEvidence(build, final, checksum, s.auth.Enabled))
 }
 
 func (s Server) exportBuildReleaseEvidenceArchive(w http.ResponseWriter, r *http.Request) {
@@ -1041,6 +1069,7 @@ func (s Server) prepareDispatch(id, expectedState string) (domain.Build, string,
 		build.Status = domain.BuildDispatching
 		build.RunnerID = fmt.Sprintf("nomad-%s-a%d", build.ID, build.Attempt)
 		build.NomadJobID = ""
+		build.DispatchStartedAt = &now
 		build.ExecutionJTI = jti
 		expiry := now.Add(ttl)
 		build.ExecutionExpiresAt = &expiry
@@ -1068,6 +1097,7 @@ func (s Server) failDispatch(id string, prepared domain.Build, schedulerLog stri
 		build.Error = submitErr.Error()
 		build.SchedulerLog = schedulerLog
 		build.NomadJobID = ""
+		build.DispatchStartedAt = nil
 		build.ExecutionJTI = ""
 		build.ExecutionExpiresAt = nil
 		build.LastHeartbeatAt = nil
@@ -3178,6 +3208,33 @@ func verificationStatus(build domain.Build) string {
 		return "legacy-unverified"
 	}
 	return "missing"
+}
+
+func runnerE2EEvidence(build domain.Build, final domain.UploadRecord, checksum domain.UploadRecord, authEnabled bool) domain.RunnerE2EEvidence {
+	return domain.RunnerE2EEvidence{
+		BuildID:              build.ID,
+		Status:               build.Status,
+		AuthEnabled:          authEnabled,
+		Attempt:              build.Attempt,
+		Target:               build.Target,
+		RunnerID:             build.RunnerID,
+		NomadJobID:           build.NomadJobID,
+		DispatchStartedAt:    build.DispatchStartedAt,
+		ArtifactUploadID:     build.ArtifactUploadID,
+		ChecksumUploadID:     build.ChecksumUploadID,
+		ArtifactSHA256:       build.ArtifactSHA256,
+		ArtifactVerifiedAt:   build.ArtifactVerifiedAt,
+		VerificationStatus:   verificationStatus(build),
+		FinalBuildID:         final.BuildID,
+		FinalAttempt:         final.Attempt,
+		FinalRunnerID:        final.RunnerID,
+		FinalKind:            final.Kind,
+		ChecksumBuildID:      checksum.BuildID,
+		ChecksumAttempt:      checksum.Attempt,
+		ChecksumRunnerID:     checksum.RunnerID,
+		ChecksumKind:         checksum.Kind,
+		ChecksumParentUpload: checksum.ParentUploadID,
+	}
 }
 
 // buildOutputUploadID is retained for compatibility with callers that need the

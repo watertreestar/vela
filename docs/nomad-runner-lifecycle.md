@@ -1,5 +1,12 @@
 # Nomad Runner Lifecycle
 
+## Auth-enabled E2E evidence
+
+For each actual dispatch, Conductor persists dispatch identity/JTI/expiry, writes the task-owned secure Nomad Variable, then submits the Job. Linux templates render bearer and execution capability into `$NOMAD_SECRETS_DIR` at `0400`; Windows `raw_exec` uses allocation secrets-directory ACLs, not POSIX permissions. Never serialize either into `Task.Env`, `runner.env`, allocation logs, Build/audit records, reports, or artifacts.
+
+`python scripts/runner_e2e_cli.py check --fixture --json` is automatic protocol evidence, not deployment proof. After a real allocation completes, run `PACKAGING_OPERATOR_TOKEN=... NOMAD_TOKEN=... python scripts/runner_e2e_cli.py check --live --api-url ... --nomad-url ... --build-id ... --nomad-job-id ...`; credentials are intentionally not accepted in argv. The gate cross-checks protected Conductor evidence with the real Nomad batch Job and completed allocations. Cancellation, timeout, failure, completion, or retry invalidates the old capability; legacy artifacts remain unverified and cannot satisfy Preview/Release verification.
+
+
 ## Control Plane
 
 The Packaging API runs as the control plane.
@@ -8,7 +15,7 @@ Required services:
 
 - PostgreSQL
 - Nomad server
-- MinIO when `ARTIFACT_STORE=minio`
+- RustFS when `ARTIFACT_STORE=minio`（该配置名保留为既有 S3 适配器兼容层）
 - Packaging API
 
 API variables for real Nomad scheduling:
@@ -23,11 +30,12 @@ AUTH_ENABLED=true
 AUTH_RUNNER_TOKEN=<runner-static-bearer>
 PACKAGING_API_TOKEN_FILE=vela-runner-auth
 ARTIFACT_STORE=minio
-MINIO_ENDPOINT=<minio-host>:9000
-MINIO_ACCESS_KEY=<access-key>
-MINIO_SECRET_KEY=<secret-key>
+# RustFS is the local/live test service. MINIO_* remains the existing S3 adapter namespace.
+MINIO_ENDPOINT=<rustfs-host>:9000
+MINIO_ACCESS_KEY=<rustfs-access-key>
+MINIO_SECRET_KEY=<rustfs-secret-key>
 MINIO_BUCKET=packaging-artifacts
-MINIO_PUBLIC_URL=http://<minio-host>:9000
+MINIO_PUBLIC_URL=http://<rustfs-host>:9000
 ```
 
 With `AUTH_ENABLED=true` and `DRY_RUN=false`, Conductor rejects startup without `AUTH_RUNNER_TOKEN`. For each dispatch it stores the bearer in the job's task-owned Nomad Variable path, and the task workload identity renders it through a non-`env` template into `$NOMAD_SECRETS_DIR/vela-runner-auth`. Linux template mode is `0400`; Windows uses the allocation secrets-directory ACL and makes no POSIX-mode claim. The bearer must never be added to `runner.env`, task environment, Build/Audit records, workspace, or logs.
@@ -213,6 +221,7 @@ Windows installation checklist:
 5. Start the Nomad client as Administrator with `infra\windows\start-nomad-client.ps1`.
 6. Create and approve one preview Windows build.
 7. Verify raw_exec starts the runner, the runner claims the task, and the generated `setup.exe` is uploaded.
+8. From the allocation's controlled verification task, run the Windows live gate with the allocation ID, build/job IDs, a low-privilege `NOMAD_TOKEN`, a human `PACKAGING_OPERATOR_TOKEN`, and the task SID supplied as `NOMAD_TASK_SID`. The gate must confirm that only the declared task identity plus permitted host administrators can access the bearer/capability files; do not place either token in `runner.env`.
 
 Production Windows builds should configure a real packager command. Without `WINDOWS_PACKAGER_CMD`, the runner produces a placeholder setup file only for local control-plane tests. If production releases require signed installers, configure `WINDOWS_SIGNING_CMD`; the runner executes it after the setup file is generated and before checksum/upload.
 

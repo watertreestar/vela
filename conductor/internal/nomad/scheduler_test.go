@@ -51,6 +51,9 @@ func TestNomadJobRunsPackagingRunner(t *testing.T) {
 	if task.Env["TARGET"] != "linux" {
 		t.Fatalf("target env missing: %#v", task.Env)
 	}
+	if job.Meta["packaging.build_id"] != "build-1" || job.Meta["packaging.attempt"] != "0" || job.Meta["packaging.runner_id"] != "" {
+		t.Fatalf("dispatch metadata missing or incorrect: %#v", job.Meta)
+	}
 }
 
 func TestNomadJobPassesGitLabPackageResolverEnvironment(t *testing.T) {

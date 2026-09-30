@@ -1,4 +1,5 @@
 import pathlib
+import os
 import subprocess
 import sys
 import tempfile
@@ -24,7 +25,7 @@ class ProductionReadinessCliTest(unittest.TestCase):
     def test_default_local_governance_passes_and_live_gates_warn(self):
         commands = []
 
-        def fake_run(command, cwd, timeout=240):
+        def fake_run(command, cwd, timeout=240, env=None):
             commands.append(command)
             return ok_result(command)
 
@@ -37,6 +38,7 @@ class ProductionReadinessCliTest(unittest.TestCase):
         self.assertTrue(any(result.name == "Production IdP live acceptance" and result.status == "warn" for result in results))
         self.assertTrue(any(result.name == "Object-lock bucket live acceptance" and result.status == "warn" for result in results))
         self.assertTrue(any(result.name == "GitLab package live acceptance" and result.status == "warn" for result in results))
+        self.assertTrue(any(result.name == "Auth-enabled runner E2E live acceptance" and result.status == "warn" for result in results))
         self.assertTrue(any(result.name == "Windows runner production readiness" and result.status == "warn" for result in results))
         self.assertTrue(any(result.name == "Nomad cluster live acceptance" and result.status == "warn" for result in results))
         self.assertTrue(any(result.name == "Artifact retention live acceptance" and result.status == "warn" for result in results))
@@ -49,6 +51,7 @@ class ProductionReadinessCliTest(unittest.TestCase):
                     "--require-idp-live",
                     "--require-object-lock-live",
                     "--require-gitlab-live",
+                    "--require-runner-e2e-live",
                     "--require-windows-live",
                     "--require-nomad-live",
                     "--require-artifact-retention-live",
@@ -60,6 +63,7 @@ class ProductionReadinessCliTest(unittest.TestCase):
         self.assertTrue(any(result.name == "Production IdP live acceptance" and result.status == "fail" for result in results))
         self.assertTrue(any(result.name == "Object-lock bucket live acceptance" and result.status == "fail" for result in results))
         self.assertTrue(any(result.name == "GitLab package live acceptance" and result.status == "fail" for result in results))
+        self.assertTrue(any(result.name == "Auth-enabled runner E2E live acceptance" and result.status == "fail" for result in results))
         self.assertTrue(any(result.name == "Windows runner production readiness" and result.status == "fail" for result in results))
         self.assertTrue(any(result.name == "Nomad cluster live acceptance" and result.status == "fail" for result in results))
         self.assertTrue(any(result.name == "Artifact retention live acceptance" and result.status == "fail" for result in results))
@@ -76,7 +80,7 @@ class ProductionReadinessCliTest(unittest.TestCase):
     def test_live_gates_delegate_to_specialized_check_scripts(self):
         commands = []
 
-        def fake_run(command, cwd, timeout=240):
+        def fake_run(command, cwd, timeout=240, env=None):
             commands.append(command)
             return ok_result(command)
 
@@ -138,7 +142,6 @@ class ProductionReadinessCliTest(unittest.TestCase):
             r"iscc C:\setup.iss",
             "--windows-signing-command",
             r"signtool sign %OUTPUT%",
-            "--allow-non-windows",
             "--nomad-live",
             "--nomad-address",
             "https://nomad.example.test:4646",
@@ -169,7 +172,7 @@ class ProductionReadinessCliTest(unittest.TestCase):
         self.assertTrue(any("oidc_check_cli.py" in " ".join(command) and "--broker-live" in command for command in commands))
         self.assertTrue(any("rustfs_check.py" in " ".join(command) and "--object-lock" in command for command in commands))
         self.assertTrue(any("gitlab_package_check_cli.py" in " ".join(command) and "--require-token" in command for command in commands))
-        self.assertTrue(any("windows_runner_check_cli.py" in " ".join(command) and "--allow-non-windows" in command for command in commands))
+        self.assertTrue(any("windows_runner_check_cli.py" in " ".join(command) and "--live" in command for command in commands))
         self.assertTrue(any("nomad_check_cli.py" in " ".join(command) and "--require-linux-node" in command and "--require-windows-node" in command for command in commands))
         self.assertTrue(any("artifact_retention_cli.py" in " ".join(command) and "--max-expired-artifacts" in command for command in commands))
         self.assertTrue(any("notification_routing_cli.py" in " ".join(command) and "--send" in command for command in commands))
@@ -198,8 +201,8 @@ class ProductionReadinessCliTest(unittest.TestCase):
         self.assertEqual(payload["schema"], "packaging.production_readiness.report/v1")
         self.assertEqual(payload["status"], "warn")
         self.assertEqual(payload["exitCode"], 0)
-        self.assertEqual(payload["summary"], {"total": 7, "ok": 0, "warn": 7, "fail": 0})
-        self.assertEqual([gate["status"] for gate in payload["gates"]], ["warn", "warn", "warn", "warn", "warn", "warn", "warn"])
+        self.assertEqual(payload["summary"], {"total": 8, "ok": 0, "warn": 8, "fail": 0})
+        self.assertEqual([gate["status"] for gate in payload["gates"]], ["warn", "warn", "warn", "warn", "warn", "warn", "warn", "warn"])
         self.assertNotIn("Confirmation lights", stdout.getvalue())
 
     def test_report_file_writes_json_and_keeps_confirmation_lights(self):
@@ -230,12 +233,31 @@ class ProductionReadinessCliTest(unittest.TestCase):
             self.assertEqual(payload["summary"]["fail"], 1)
             self.assertTrue(any(gate["name"] == "Production IdP live acceptance" and gate["status"] == "fail" for gate in payload["gates"]))
 
+    def test_runner_e2e_command_keeps_tokens_out_of_argv_and_child_env_strips_runner_secrets(self):
+        args = parse_args(
+            "--runner-e2e-live",
+            "--api-url", "https://api.example.test",
+            "--runner-e2e-operator-token", "human-token-sentinel",
+            "--runner-e2e-build-id", "build-1",
+            "--runner-e2e-nomad-job-id", "job-1",
+            "--nomad-address", "https://nomad.example.test",
+            "--nomad-token", "nomad-token-sentinel",
+        )
+        command = production_readiness_cli.runner_e2e_command(args, pathlib.Path("."))
+        self.assertNotIn("human-token-sentinel", command)
+        self.assertNotIn("nomad-token-sentinel", command)
+        with patch.dict(os.environ, {"AUTH_RUNNER_TOKEN": "runner-secret-sentinel"}, clear=False):
+            env = production_readiness_cli.runner_e2e_env(args)
+        self.assertEqual(env["PACKAGING_OPERATOR_TOKEN"], "human-token-sentinel")
+        self.assertEqual(env["NOMAD_TOKEN"], "nomad-token-sentinel")
+        self.assertNotIn("AUTH_RUNNER_TOKEN", env)
+
     def test_report_masks_secret_like_details(self):
         results = [
             production_readiness_cli.CheckResult(
                 "Production IdP live acceptance",
                 "fail",
-                "token=secret-jwt client_secret=top-secret password=hunter2 api_key=abc123 Authorization: Bearer bearer-token --token flag-token",
+                "token=secret-jwt client_secret=top-secret password=hunter2 api_key=abc123 Authorization: Bearer bearer-token X-Runner-Execution=capability-token --token flag-token",
             )
         ]
 
@@ -247,6 +269,7 @@ class ProductionReadinessCliTest(unittest.TestCase):
         self.assertNotIn("hunter2", text)
         self.assertNotIn("abc123", text)
         self.assertNotIn("bearer-token", text)
+        self.assertNotIn("capability-token", text)
         self.assertNotIn("flag-token", text)
         self.assertIn("<redacted>", text)
 

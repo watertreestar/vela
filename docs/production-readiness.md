@@ -7,8 +7,10 @@
 - 后端生产身份入口统一保持为 `Authorization: Bearer <token>`，业务 API 不直接处理 IdP client secret。
 - 企业 IdP token 由后端 OIDC/JWKS 校验；可选 broker 只负责把 Authorization Code + PKCE 兑换成短期平台 session token。
 - 启用 `AUTH_SESSION_STORE_ENABLED=true` 后，平台 session 每次请求都会检查后端 store 中的 session 状态，logout 必须能撤销 session。
-- 对象锁验收必须对真实 RustFS/MinIO-compatible bucket 写入审计归档对象，并读回 retention mode、retain-until 和 legal hold 证据。
+- 对象锁验收必须对真实 RustFS bucket 写入审计归档对象，并读回 retention mode、retain-until 和 legal hold 证据。
 - 生产验收脚本的 `[OK]` 只能代表该命令当时访问的 IdP、后端和 bucket 通过 live check；不能替代证书、密钥轮换、账号生命周期和网络边界评审。
+
+Runner auth E2E is a separate external live gate: its fixture validates protocol shape but is not a Nomad deployment success. Require a real dispatch with `--runner-e2e-live --require-runner-e2e-live --runner-e2e-build-id <id> --runner-e2e-nomad-job-id <job> --nomad-address <url>`. The aggregate passes the human operator/admin bearer and low-privilege Nomad read token only through child-process environment variables, never argv; it cross-checks protected Conductor evidence with the real Nomad job and allocations. The aggregate report redacts headers, JWT/capabilities, tokens, and query secrets.
 
 聚合门禁入口：
 
@@ -29,8 +31,8 @@ python scripts/production_readiness_cli.py check \
   --require-object-lock-live \
   --object-lock-live \
   --rustfs-endpoint rustfs.example.com:9000 \
-  --rustfs-access-key "$MINIO_ACCESS_KEY" \
-  --rustfs-secret-key "$MINIO_SECRET_KEY" \
+  --rustfs-access-key "$RUSTFS_ACCESS_KEY" \
+  --rustfs-secret-key "$RUSTFS_SECRET_KEY" \
   --rustfs-object-lock-bucket packaging-audit-lock \
   --rustfs-retention-mode COMPLIANCE \
   --rustfs-retention-days 3650 \
@@ -54,7 +56,7 @@ python scripts/production_readiness_cli.py check \
   --report-file artifacts/production-readiness.json
 ```
 
-该命令会先执行本地治理检查：Prometheus 规则、Alertmanager 路由示例、生命周期回收测试和 runner fixture golden artifact 检查；再按参数调用专项 live gate。`--require-idp-live`、`--require-object-lock-live`、`--require-gitlab-live`、`--require-windows-live`、`--require-nomad-live`、`--require-artifact-retention-live`、`--require-notification-routing-live` 用于发布前自动化：如果没有同时传入对应的 `--idp-live`、`--object-lock-live`、`--gitlab-live`、`--windows-live`、`--nomad-live`、`--artifact-retention-live`、`--notification-routing-live`，聚合门禁会失败，避免把跳过 live 验收误判为通过。
+该命令会先执行本地治理检查：Prometheus 规则、Alertmanager 路由示例、生命周期回收测试和 runner fixture golden artifact 检查；再按参数调用专项 live gate。`--require-idp-live`、`--require-object-lock-live`、`--require-gitlab-live`、`--require-runner-e2e-live`、`--require-windows-live`、`--require-nomad-live`、`--require-artifact-retention-live`、`--require-notification-routing-live` 用于发布前自动化：如果没有同时传入对应的 live 参数，聚合门禁会失败，避免把跳过 live 验收误判为通过。Windows live gate 必须在真实 `raw_exec` allocation 内运行，并要求 current allocation ID 与 Nomad allocation/Job metadata（build、attempt、Runner）一致、非空 bearer/capability 文件、基于声明 task SID 的受限有效 ACL、runner.env 脱敏检查以及受保护的 operator/admin evidence 读取；Linux/fixture 不会被标为 Windows 通过。
 
 发布流水线需要留存机器可读证据时，使用 `--json` 直接输出 JSON，或使用 `--report-file <path>` 在保留确认灯输出的同时写入 JSON 文件。报表 schema 为 `packaging.production_readiness.report/v1`，包含 `generatedAt`、`status`、`exitCode`、`summary` 和 `gates`；`token`、`secret`、`password`、`api_key` 等 key/value 形式的敏感细节会在报表中脱敏。
 
@@ -172,7 +174,7 @@ python scripts/oidc_check_cli.py check \
 
 ## 3. 对象锁 Bucket Live 验收
 
-对象锁用于审计归档 WORM 留存。只有 `ARTIFACT_STORE=minio` 时才会向 RustFS/MinIO-compatible bucket 写入 retention/legal hold 证据。
+对象锁用于审计归档 WORM 留存。当前 `ARTIFACT_STORE=minio` 是既有 S3 适配器名称；本项目测试环境实际使用 RustFS bucket 写入 retention/legal hold 证据。
 
 生产后端配置示例：
 

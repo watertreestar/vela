@@ -8,6 +8,8 @@ PostgreSQL -> API -> Build -> Docker Runner -> Dagger -> Artifact Upload -> Prev
 
 该流程用于确认当前代码、数据库、runner、Dagger 和本地文件制品存储能否一起工作。
 
+`acceptance_cli.py --auth-enabled` 会故意拒绝本地 Docker fixture 和进程环境中的 runner bearer/capability/HMAC；本地 fixture 只能验证控制面，不是 auth-enabled Nomad 生产验收。真实部署请在 dispatch 后使用 `runner_e2e_cli.py check --live`。
+
 ## 1. 前置条件
 
 需要先确认以下依赖可用：
@@ -81,7 +83,7 @@ Confirmation lights:
   [OK] Runner queue isolation: no queued target build
 ```
 
-## 4. 检查 RustFS / MinIO-Compatible 存储
+## 4. 检查 RustFS 存储（不使用 MinIO）
 
 如果本机已经启动 RustFS 容器，可以验证制品仓库解析能力：
 
@@ -105,15 +107,15 @@ python scripts/rustfs_check.py \
   --object-lock-bucket packaging-audit-lock
 ```
 
-如果目标是托管 RustFS/MinIO-compatible 服务而不是本地 Docker 容器：
+如果目标是托管 RustFS 服务而不是本地 Docker 容器：
 
 ```bash
 python scripts/rustfs_check.py \
   --production \
   --skip-container-check \
   --endpoint rustfs.example.com:9000 \
-  --access-key "$MINIO_ACCESS_KEY" \
-  --secret-key "$MINIO_SECRET_KEY" \
+  --access-key "$RUSTFS_ACCESS_KEY" \
+  --secret-key "$RUSTFS_SECRET_KEY" \
   --use-ssl \
   --object-lock \
   --object-lock-bucket packaging-audit-lock \

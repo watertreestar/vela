@@ -28,6 +28,10 @@ SECRET_DETAIL_PATTERNS = (
         lambda match: f"{match.group(1)}<redacted>",
     ),
     (
+        re.compile(r"(?i)(x-runner-execution\s*[:=]\s*)[^,\s|]+"),
+        lambda match: f"{match.group(1)}<redacted>",
+    ),
+    (
         re.compile(r"(?i)(--[a-z0-9-]*(?:token|secret|password|key|code)[a-z0-9-]*)\s+(\"[^\"]+\"|'[^']+'|[^,\s|]+)"),
         lambda match: f"{match.group(1)} <redacted>",
     ),
@@ -61,7 +65,12 @@ def append_arg(command: list[str], flag: str, value: str) -> None:
         command.extend([flag, value])
 
 
-def run_command(command: list[str], cwd: Path, timeout: int = 240) -> subprocess.CompletedProcess[str]:
+def run_command(
+    command: list[str],
+    cwd: Path,
+    timeout: int = 240,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
         cwd=cwd,
@@ -69,6 +78,7 @@ def run_command(command: list[str], cwd: Path, timeout: int = 240) -> subprocess
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=timeout,
+        env=env,
     )
 
 
@@ -79,8 +89,17 @@ def command_summary(result: subprocess.CompletedProcess[str]) -> str:
     return (output[-1200:] if output else f"exited {result.returncode}").replace("\n", " | ")
 
 
-def run_gate(name: str, command: list[str], root: Path, timeout: int) -> CheckResult:
-    result = run_command(command, root, timeout=timeout)
+def run_gate(
+    name: str,
+    command: list[str],
+    root: Path,
+    timeout: int,
+    env: dict[str, str] | None = None,
+) -> CheckResult:
+    if env is None:
+        result = run_command(command, root, timeout=timeout)
+    else:
+        result = run_command(command, root, timeout=timeout, env=env)
     return CheckResult(name, "ok" if result.returncode == 0 else "fail", command_summary(result))
 
 
@@ -121,6 +140,8 @@ def rustfs_command(args: argparse.Namespace, root: Path) -> list[str]:
         "--skip-container-check",
     ]
     append_arg(command, "--endpoint", env_or(args.rustfs_endpoint, "RUSTFS_ENDPOINT"))
+    append_arg(command, "--integration-endpoint", env_or(args.rustfs_integration_endpoint, "RUSTFS_INTEGRATION_ENDPOINT"))
+    append_arg(command, "--remote-docker-host", args.rustfs_remote_docker_host)
     append_arg(command, "--access-key", env_or(args.rustfs_access_key, "RUSTFS_ACCESS_KEY"))
     append_arg(command, "--secret-key", env_or(args.rustfs_secret_key, "RUSTFS_SECRET_KEY"))
     append_arg(command, "--bucket", env_or(args.rustfs_bucket, "RUSTFS_BUCKET"))
@@ -137,8 +158,30 @@ def rustfs_command(args: argparse.Namespace, root: Path) -> list[str]:
     return command
 
 
+def runner_e2e_command(args: argparse.Namespace, root: Path) -> list[str]:
+    command = [sys.executable, str(root / "scripts" / "runner_e2e_cli.py"), "check", "--live"]
+    append_arg(command, "--api-url", env_or(args.api_url, "PACKAGING_API_URL"))
+    append_arg(command, "--build-id", args.runner_e2e_build_id)
+    append_arg(command, "--nomad-job-id", args.runner_e2e_nomad_job_id)
+    append_arg(command, "--nomad-url", env_or(args.nomad_address, "NOMAD_ADDR", "http://127.0.0.1:4646"))
+    return command
+
+
+def runner_e2e_env(args: argparse.Namespace) -> dict[str, str]:
+    env = dict(os.environ)
+    for key in ("AUTH_RUNNER_TOKEN", "RUNNER_EXECUTION_HMAC_KEY", "X_RUNNER_EXECUTION", "RUNNER_EXECUTION_CAPABILITY"):
+        env.pop(key, None)
+    operator_token = env_or(args.runner_e2e_operator_token, "PACKAGING_OPERATOR_TOKEN")
+    if operator_token:
+        env["PACKAGING_OPERATOR_TOKEN"] = operator_token
+    nomad_token = env_or(args.nomad_token, "NOMAD_TOKEN")
+    if nomad_token:
+        env["NOMAD_TOKEN"] = nomad_token
+    return env
+
+
 def windows_command(args: argparse.Namespace, root: Path) -> list[str]:
-    command = [sys.executable, str(root / "scripts" / "windows_runner_check_cli.py"), "check"]
+    command = [sys.executable, str(root / "scripts" / "windows_runner_check_cli.py"), "check", "--live"]
     append_arg(command, "--api-url", env_or(args.api_url, "PACKAGING_API_URL"))
     append_arg(command, "--packager-command", env_or(args.windows_packager_command, "WINDOWS_PACKAGER_CMD"))
     append_arg(command, "--signing-command", env_or(args.windows_signing_command, "WINDOWS_SIGNING_CMD"))
@@ -146,14 +189,35 @@ def windows_command(args: argparse.Namespace, root: Path) -> list[str]:
     append_arg(command, "--node-class", env_or(args.windows_node_class, "NOMAD_WINDOWS_NODE_CLASS", "windows-packager"))
     append_arg(command, "--bun-cache-dir", env_or(args.windows_bun_cache_dir, "BUN_INSTALL_CACHE_DIR"))
     append_arg(command, "--artifact-root", env_or(args.windows_artifact_root, "ARTIFACT_ROOT"))
+    append_arg(command, "--secrets-dir", env_or(args.windows_secrets_dir, "NOMAD_SECRETS_DIR"))
+    append_arg(command, "--token-filename", env_or(args.windows_token_filename, "PACKAGING_API_TOKEN_FILE", "vela-runner-auth"))
+    append_arg(command, "--execution-filename", env_or(args.windows_execution_filename, "RUNNER_EXECUTION_FILE", "vela-runner-execution"))
+    append_arg(command, "--runner-env-file", args.windows_runner_env_file)
+    append_arg(command, "--allocation-id", args.windows_allocation_id or os.environ.get("NOMAD_ALLOC_ID", ""))
+    append_arg(command, "--build-id", args.windows_build_id)
+    append_arg(command, "--nomad-job-id", args.windows_nomad_job_id)
+    append_arg(command, "--task-sid", args.windows_task_sid)
     append_arg(command, "--packager-kind", args.windows_packager_kind)
     if args.require_windows_signing:
         command.append("--require-signing")
     else:
         command.append("--no-require-signing")
-    if args.allow_non_windows:
-        command.append("--allow-non-windows")
     return command
+
+
+def windows_env(args: argparse.Namespace) -> dict[str, str]:
+    env = dict(os.environ)
+    for key in ("AUTH_RUNNER_TOKEN", "RUNNER_EXECUTION_HMAC_KEY", "X_RUNNER_EXECUTION", "RUNNER_EXECUTION_CAPABILITY"):
+        env.pop(key, None)
+    operator_token = env_or(args.windows_operator_token, "PACKAGING_OPERATOR_TOKEN")
+    if operator_token:
+        env["PACKAGING_OPERATOR_TOKEN"] = operator_token
+    nomad_token = env_or(args.nomad_token, "NOMAD_TOKEN")
+    if nomad_token:
+        env["NOMAD_TOKEN"] = nomad_token
+    if args.nomad_address:
+        env["NOMAD_ADDR"] = args.nomad_address
+    return env
 
 
 def nomad_command(args: argparse.Namespace, root: Path) -> list[str]:
@@ -290,8 +354,13 @@ def run_checks(args: argparse.Namespace) -> list[CheckResult]:
     else:
         results.append(skipped_gate("GitLab package live acceptance", args.require_gitlab_live, "--gitlab-live"))
 
+    if args.runner_e2e_live:
+        results.append(run_gate("Auth-enabled runner E2E live acceptance", runner_e2e_command(args, root), root, args.timeout, runner_e2e_env(args)))
+    else:
+        results.append(skipped_gate("Auth-enabled runner E2E live acceptance", args.require_runner_e2e_live, "--runner-e2e-live"))
+
     if args.windows_live:
-        results.append(run_gate("Windows runner production readiness", windows_command(args, root), root, args.timeout))
+        results.append(run_gate("Windows runner production readiness", windows_command(args, root), root, args.timeout, windows_env(args)))
     else:
         results.append(skipped_gate("Windows runner production readiness", args.require_windows_live, "--windows-live"))
 
@@ -419,6 +488,8 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--object-lock-live", action="store_true", help="run live production RustFS/MinIO object-lock acceptance")
     check.add_argument("--require-object-lock-live", action="store_true", help="fail if --object-lock-live is not supplied")
     check.add_argument("--rustfs-endpoint")
+    check.add_argument("--rustfs-integration-endpoint", help="RustFS endpoint reachable from the Go integration host; defaults to RUSTFS_INTEGRATION_ENDPOINT")
+    check.add_argument("--rustfs-remote-docker-host", help="SSH host for a remote Docker daemon's Go integration test")
     check.add_argument("--rustfs-access-key")
     check.add_argument("--rustfs-secret-key")
     check.add_argument("--rustfs-bucket")
@@ -441,6 +512,12 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--gitlab-expected-sha256")
     check.add_argument("--gitlab-require-token", action="store_true")
 
+    check.add_argument("--runner-e2e-live", action="store_true", help="run auth-enabled runner E2E against an actual Nomad deployment")
+    check.add_argument("--require-runner-e2e-live", action="store_true", help="fail if --runner-e2e-live is not supplied")
+    check.add_argument("--runner-e2e-operator-token", help="human operator/admin bearer; passed to the child only through PACKAGING_OPERATOR_TOKEN")
+    check.add_argument("--runner-e2e-build-id", default="")
+    check.add_argument("--runner-e2e-nomad-job-id", default="")
+
     check.add_argument("--windows-live", action="store_true", help="run Windows runner production host readiness")
     check.add_argument("--require-windows-live", action="store_true", help="fail if --windows-live is not supplied")
     check.add_argument("--windows-packager-command")
@@ -449,9 +526,17 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--windows-node-class")
     check.add_argument("--windows-bun-cache-dir")
     check.add_argument("--windows-artifact-root")
+    check.add_argument("--windows-secrets-dir")
+    check.add_argument("--windows-token-filename")
+    check.add_argument("--windows-execution-filename")
+    check.add_argument("--windows-runner-env-file")
+    check.add_argument("--windows-allocation-id", help="defaults to NOMAD_ALLOC_ID when invoked inside the Windows allocation")
+    check.add_argument("--windows-build-id")
+    check.add_argument("--windows-nomad-job-id")
+    check.add_argument("--windows-task-sid", help="Windows allocation task SID; normally sourced from protected deployment metadata")
+    check.add_argument("--windows-operator-token", help="human operator/admin bearer; passed to the child only through PACKAGING_OPERATOR_TOKEN")
     check.add_argument("--windows-packager-kind", choices=["auto", "inno", "wix", "custom"], default="auto")
     check.add_argument("--require-windows-signing", action=argparse.BooleanOptionalAction, default=True)
-    check.add_argument("--allow-non-windows", action="store_true")
 
     check.add_argument("--nomad-live", action="store_true", help="run live Nomad cluster leader/node readiness")
     check.add_argument("--require-nomad-live", action="store_true", help="fail if --nomad-live is not supplied")

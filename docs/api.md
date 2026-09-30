@@ -15,7 +15,7 @@ Supported token types:
 - Static platform tokens: `AUTH_ADMIN_TOKEN`, `AUTH_OPERATOR_TOKEN`, `AUTH_VIEWER_TOKEN`, and `AUTH_RUNNER_TOKEN`.
 - OIDC/JWKS bearer JWT for human users when `OIDC_ISSUER`, `OIDC_AUDIENCE`, and `OIDC_JWKS_URL` are configured.
 
-OIDC tokens currently require RS256 and must pass JWKS signature verification, issuer check, audience check, `exp`, and optional `nbf`. The role claim defaults to `roles`; external role values are mapped through `OIDC_ADMIN_ROLE`, `OIDC_OPERATOR_ROLE`, and `OIDC_VIEWER_ROLE`. The audit actor id is `oidc:<subject>`, where subject defaults to the `sub` claim. Runner APIs should use `AUTH_RUNNER_TOKEN`.
+OIDC tokens currently require RS256 and must pass JWKS signature verification, issuer check, audience check, `exp`, and optional `nbf`. The role claim defaults to `roles`; external role values are mapped through `OIDC_ADMIN_ROLE`, `OIDC_OPERATOR_ROLE`, and `OIDC_VIEWER_ROLE`. The audit actor id is `oidc:<subject>`, where subject defaults to the `sub` claim. Runner APIs use `AUTH_RUNNER_TOKEN` plus the per-dispatch `X-Runner-Execution` capability. Both are Nomad-secrets files only. `runner_e2e_cli.py` accepts its human operator/admin bearer only through `PACKAGING_OPERATOR_TOKEN` and its Nomad read token only through `NOMAD_TOKEN`; its reports redact headers, JWT/capabilities, tokens, and query secrets.
 
 The admin studio can obtain that bearer token either from an implicit/bearer callback or through Authorization Code + PKCE when `VITE_OIDC_RESPONSE_TYPE=code` and `VITE_OIDC_TOKEN_URL` are configured. The API boundary remains `Authorization: Bearer <token>`. By default that token is the IdP token; with the optional broker below it becomes a short-lived platform session token.
 
@@ -246,6 +246,15 @@ data: {"time":"...","source":"runner-1","message":"downloaded components","seque
 
 Without query parameters the endpoint emits the current log snapshot and closes. With `?follow=true`, it keeps the connection open and polls for new log records.
 
+## Runner E2E Evidence
+
+```http
+GET /api/builds/{id}/runner-e2e-evidence
+Authorization: Bearer <operator-or-admin-token>
+```
+
+This operator/admin-only endpoint is a narrow, non-secret projection for production Runner live gates. It returns the build ID, auth-enabled status, attempt, target, Runner ID, Nomad job ID, dispatch timestamp, verified final/checksum upload relations, final SHA-256, and verification timestamp. It deliberately excludes runner credentials, execution JTI/expiry, logs, scheduler logs, and artifact URLs. The live gate cross-checks these fields against immutable Nomad Job metadata and the real `builder/package` allocation state.
+
 ## Error Handling
 
 API errors use the structured contract described in [error-handling.md](error-handling.md). New clients should read `error.code`, `error.message`, `error.severity`, and `error.details`; `errors` remains as a compatibility list for validation details.
@@ -280,7 +289,7 @@ Exports the reproducibility report as a signed release evidence archive. When au
 - `signatureAlgorithm`, `signatureKeyId`, and `signature`: present when `AUDIT_ARCHIVE_HMAC_KEY` is configured; the same key settings are used for audit archives and release evidence archives.
 - `archiveUri`, `archiveStoredAt`, `archiveRetentionMode`, `archiveRetainUntil`, and `archiveLegalHold`: storage and object-lock evidence when an artifact store is configured.
 
-The archive is persisted under `release-evidence/sha256/<digest>.json`. Local storage returns `local-release-evidence://sha256/<digest>.json`; MinIO-compatible storage returns `minio://<bucket>/release-evidence/sha256/<digest>.json`. Exporting an archive writes a `release.evidence.archive.export` audit event.
+The archive is persisted under `release-evidence/sha256/<digest>.json`. Local storage returns `local-release-evidence://sha256/<digest>.json`; RustFS-backed S3 storage returns `minio://<bucket>/release-evidence/sha256/<digest>.json` for compatibility with the existing URI scheme. Exporting an archive writes a `release.evidence.archive.export` audit event.
 
 ## Audit Events
 
@@ -334,11 +343,11 @@ Each event includes `actorId`, `actorRole`, `resourceType`, `resourceId`, `reque
 - `digest`: SHA-256 of the canonical archive payload.
 - `signatureAlgorithm` and `signature`: present when `AUDIT_ARCHIVE_HMAC_KEY` is configured; signature is `hmac-sha256` over the same canonical payload.
 - `signatureKeyId`: optional non-secret HMAC key identifier from `AUDIT_ARCHIVE_HMAC_KEY_ID`, used to prove which rotated signing key was active.
-- `archiveRetentionMode`, `archiveRetainUntil`, and `archiveLegalHold`: present when the MinIO/RustFS artifact store applies object-lock retention or legal hold to the archived object.
+- `archiveRetentionMode`, `archiveRetainUntil`, and `archiveLegalHold`: present when the RustFS artifact store applies object-lock retention or legal hold to the archived object.
 
 Exporting an archive records a separate `audit.archive.export` event. The export event is not included in the archive being generated because it is written after the archive payload is computed.
 
-When artifact storage is configured, archive payloads are persisted under `audit-archives/sha256/<digest>.json`. Local storage returns `local-audit-archive://sha256/<digest>.json`; MinIO-compatible storage returns `minio://<bucket>/audit-archives/sha256/<digest>.json`. MinIO/RustFS WORM retention requires a bucket created with object lock enabled; otherwise S3-compatible storage will reject object-lock headers.
+When artifact storage is configured, archive payloads are persisted under `audit-archives/sha256/<digest>.json`. Local storage returns `local-audit-archive://sha256/<digest>.json`; RustFS-backed S3 storage returns `minio://<bucket>/audit-archives/sha256/<digest>.json` for compatibility. RustFS WORM retention requires a bucket created with object lock enabled; otherwise the S3 API rejects object-lock headers.
 
 ## Notifications
 

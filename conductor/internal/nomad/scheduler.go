@@ -3,6 +3,7 @@ package nomad
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -153,6 +154,9 @@ func (s NomadScheduler) buildJobWithSecrets(build domain.Build, product domain.P
 		"BUILD_ID":          build.ID,
 		"PACKAGING_API_URL": s.cfg.APIBaseURL,
 		"RUNNER_ID":         fmt.Sprintf("nomad-%s-a%d", build.ID, build.Attempt),
+		"NOMAD_JOB_ID":      jobID,
+		"NOMAD_TASK_GROUP":  groupName,
+		"NOMAD_TASK_NAME":   taskName,
 		"PRODUCT_ID":        build.ProductID,
 		"PRODUCT_NAME":      product.Name,
 		"TARGET":            build.Target,
@@ -204,9 +208,14 @@ func (s NomadScheduler) buildJobWithSecrets(build domain.Build, product domain.P
 	}
 
 	return &nomadapi.Job{
-		ID:          &jobID,
-		Name:        &jobID,
-		Type:        ptr("batch"),
+		ID:   &jobID,
+		Name: &jobID,
+		Type: ptr("batch"),
+		Meta: map[string]string{
+			"packaging.build_id":  build.ID,
+			"packaging.attempt":   strconv.Itoa(build.Attempt),
+			"packaging.runner_id": build.RunnerID,
+		},
 		Datacenters: []string{"dc1"},
 		TaskGroups: []*nomadapi.TaskGroup{{
 			Name:             &groupName,
