@@ -18,7 +18,7 @@ type fakeScheduler struct {
 	err      error
 }
 
-func (s fakeScheduler) Submit(domain.Build, domain.Product) (string, string, error) {
+func (s fakeScheduler) Submit(domain.Build, domain.Product, string) (string, string, error) {
 	return "", "", nil
 }
 
@@ -39,6 +39,8 @@ func (s fakeScheduler) Stop(string) error {
 func TestReconcileMarksNomadFailedAllocationFailed(t *testing.T) {
 	st := newLifecycleStore(t)
 	build := lifecycleBuild("nomad-failed", domain.BuildRunning, "job-failed")
+	heartbeat := time.Now().UTC()
+	build.LastHeartbeatAt = &heartbeat
 	saveLifecycleBuild(t, st, build)
 
 	monitor := NewMonitor(st, fakeScheduler{statuses: map[string]nomad.JobStatus{
@@ -82,7 +84,9 @@ func TestReconcileMarksHeartbeatTimeoutFailed(t *testing.T) {
 	st := newLifecycleStore(t)
 	build := lifecycleBuild("heartbeat-timeout", domain.BuildRunning, "job-running")
 	build.RunnerID = "runner-timeout-01"
-	build.UpdatedAt = time.Now().UTC().Add(-10 * time.Minute)
+	build.UpdatedAt = time.Now().UTC()
+	lastHeartbeat := time.Now().UTC().Add(-10 * time.Minute)
+	build.LastHeartbeatAt = &lastHeartbeat
 	saveLifecycleBuild(t, st, build)
 
 	monitor := NewMonitor(st, fakeScheduler{statuses: map[string]nomad.JobStatus{
@@ -118,6 +122,8 @@ func TestReconcileMarksHeartbeatTimeoutFailed(t *testing.T) {
 func TestReconcileLeavesHealthyAndTerminalBuildsUnchanged(t *testing.T) {
 	st := newLifecycleStore(t)
 	healthy := lifecycleBuild("healthy-running", domain.BuildRunning, "job-running")
+	heartbeat := time.Now().UTC()
+	healthy.LastHeartbeatAt = &heartbeat
 	terminal := lifecycleBuild("already-succeeded", domain.BuildSucceeded, "job-failed")
 	saveLifecycleBuild(t, st, healthy)
 	saveLifecycleBuild(t, st, terminal)
@@ -197,7 +203,10 @@ func TestReconcilePrunesOnlyOldReadNotifications(t *testing.T) {
 
 func TestReconcileReturnsInspectErrorsAfterProcessingBuilds(t *testing.T) {
 	st := newLifecycleStore(t)
-	saveLifecycleBuild(t, st, lifecycleBuild("inspect-error", domain.BuildRunning, "job-error"))
+	build := lifecycleBuild("inspect-error", domain.BuildRunning, "job-error")
+	heartbeat := time.Now().UTC()
+	build.LastHeartbeatAt = &heartbeat
+	saveLifecycleBuild(t, st, build)
 
 	monitor := NewMonitor(st, fakeScheduler{err: errors.New("nomad unavailable")}, time.Second, time.Hour)
 

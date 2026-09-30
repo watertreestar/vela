@@ -4,6 +4,10 @@ Last updated: 2026-06-25
 
 This file is the current execution plan and status board. It reflects the repository state after the latest frontend, Manifest management, release gate, API automation, runner, AuthN/AuthZ, storage, and secret-management work.
 
+## Phase 7 PR-4 evidence
+
+Implemented automatic auth-enabled runner protocol fixture (`packaging.runner_e2e.report/v1`), aggregate readiness skipped/require live gate, and Windows raw_exec secret-directory/readiness diagnostics. Fixture evidence is deliberately a warning rather than deployed Nomad success; real Linux/Windows Nomad allocation validation remains an external live gate and must use the documented human operator/admin-token command. Reports redact bearer/capability/header/query-secret material.
+
 ## Current Focus
 
 Make the admin console usable for configuring product manifests, creating preview builds, validating preview installers, and promoting validated builds to release without changing build scripts. P1 governance explicitly includes AuthN/AuthZ, access control, auditability, notifications, metrics, and secret handling.

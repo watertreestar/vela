@@ -317,6 +317,46 @@ func (s *Store) ReleaseEvidenceArchiveURI(digest string) (string, error) {
 	return "local-release-evidence://sha256/" + digest + ".json", nil
 }
 
+func (s *Store) DeleteUpload(id string) error {
+	if s.backend == "minio" {
+		prefix := "uploads/" + id + "/"
+		objects := s.minioClient.ListObjects(context.Background(), s.bucket, minio.ListObjectsOptions{Prefix: prefix})
+		for item := range objects {
+			if item.Err != nil {
+				return item.Err
+			}
+			if err := s.minioClient.RemoveObject(context.Background(), s.bucket, item.Key, minio.RemoveObjectOptions{}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return os.RemoveAll(filepath.Join(s.dataDir, "uploads", id))
+}
+
+func (s *Store) ReadUpload(id string) ([]byte, error) {
+	if s.backend == "minio" {
+		prefix := "uploads/" + id + "/"
+		for item := range s.minioClient.ListObjects(context.Background(), s.bucket, minio.ListObjectsOptions{Prefix: prefix}) {
+			if item.Err != nil {
+				return nil, item.Err
+			}
+			object, err := s.minioClient.GetObject(context.Background(), s.bucket, item.Key, minio.GetObjectOptions{})
+			if err != nil {
+				return nil, err
+			}
+			defer object.Close()
+			return io.ReadAll(object)
+		}
+		return nil, os.ErrNotExist
+	}
+	file, _, err := s.UploadPath(id)
+	if err != nil {
+		return nil, err
+	}
+	return os.ReadFile(file)
+}
+
 func (s *Store) ServeUpload(w http.ResponseWriter, r *http.Request, id string) error {
 	if s.backend == "minio" {
 		return s.serveMinIOUpload(w, r, id)

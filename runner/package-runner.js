@@ -9,14 +9,79 @@ const API_URL = process.env.PACKAGING_API_URL || "http://localhost:8080";
 const RUNNER_ID = process.env.RUNNER_ID || `runner-${process.pid}`;
 const TARGET = process.env.TARGET || "";
 const RUNNER_DIR = path.dirname(fileURLToPath(import.meta.url));
+let runnerBearer;
+let executionCapability;
 
-async function request(pathname, options = {}) {
+export function resolveRunnerTokenPath(secretsDir, tokenFile) {
+  const name = String(tokenFile || "").trim();
+  if (!name || path.isAbsolute(name) || name === "." || name === ".." || name.includes("/") || name.includes("\\")) {
+    throw new Error("PACKAGING_API_TOKEN_FILE must be a safe relative file name");
+  }
+  return path.resolve(secretsDir, name);
+}
+
+export async function loadRunnerBearer({
+  secretsDir = process.env.NOMAD_SECRETS_DIR || "",
+  tokenFile = process.env.PACKAGING_API_TOKEN_FILE || "vela-runner-auth",
+  required = process.env.RUNNER_AUTH_REQUIRED === "true",
+} = {}) {
+  if (!secretsDir) {
+    if (required) throw new Error("runner bearer is required but NOMAD_SECRETS_DIR is unavailable");
+    return "";
+  }
+  const tokenPath = resolveRunnerTokenPath(secretsDir, tokenFile);
+  try {
+    const token = (await readFile(tokenPath, "utf8")).trim();
+    if (!token) throw new Error("runner bearer file is empty");
+    return token;
+  } catch (err) {
+    if (required) throw new Error(`runner bearer is unavailable: ${err.message}`);
+    return "";
+  }
+}
+
+export function setRunnerBearerForTest(value) {
+  runnerBearer = value || "";
+}
+
+export async function loadExecutionCapability({
+  secretsDir = process.env.NOMAD_SECRETS_DIR || "",
+  tokenFile = process.env.RUNNER_EXECUTION_FILE || "vela-runner-execution",
+  required = process.env.RUNNER_AUTH_REQUIRED === "true",
+} = {}) {
+  if (!secretsDir) {
+    if (required) throw new Error("runner execution capability is required but NOMAD_SECRETS_DIR is unavailable");
+    return "";
+  }
+  const tokenPath = resolveRunnerTokenPath(secretsDir, tokenFile);
+  try {
+    const token = (await readFile(tokenPath, "utf8")).trim();
+    if (!token) throw new Error("runner execution capability file is empty");
+    return token;
+  } catch (err) {
+    if (required) throw new Error(`runner execution capability is unavailable: ${err.message}`);
+    return "";
+  }
+}
+
+export function setExecutionCapabilityForTest(value) {
+  executionCapability = value || "";
+}
+
+function runnerHeaders(headers = {}) {
+  const result = { ...headers };
+  if (runnerBearer) result.Authorization = `Bearer ${runnerBearer}`;
+  if (executionCapability) result["X-Runner-Execution"] = executionCapability;
+  return result;
+}
+
+export async function request(pathname, options = {}) {
   const response = await fetch(`${API_URL}${pathname}`, {
-    headers: {
+    ...options,
+    headers: runnerHeaders({
       "Content-Type": "application/json",
       ...options.headers,
-    },
-    ...options,
+    }),
   });
   if (response.status === 204) return null;
   const payload = await response.json().catch(() => null);
@@ -26,13 +91,19 @@ async function request(pathname, options = {}) {
   return payload;
 }
 
-async function upload(filePath) {
+export async function upload(filePath, buildID = "", kind = "") {
+  const authRequired = process.env.RUNNER_AUTH_REQUIRED === "true";
+  if (authRequired && (!buildID || !["final", "checksum"].includes(kind))) {
+    throw new Error("auth-required runner output must be a build-scoped final or checksum artifact");
+  }
   const form = new FormData();
   const data = await readFile(filePath);
   form.append("file", new Blob([data]), path.basename(filePath));
-  const response = await fetch(`${API_URL}/api/uploads`, {
+  const endpoint = buildID && kind ? `/api/runner/tasks/${buildID}/artifacts/${kind}` : "/api/uploads";
+  const response = await fetch(`${API_URL}${endpoint}`, {
     method: "POST",
     body: form,
+    headers: runnerHeaders(),
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
@@ -79,15 +150,37 @@ async function log(build, message) {
   });
 }
 
+export function runnerTaskRequest({
+  operation,
+  buildID,
+  runnerID = RUNNER_ID,
+  target = TARGET,
+  message,
+  completion,
+  authRequired = process.env.RUNNER_AUTH_REQUIRED === "true",
+}) {
+  if (authRequired && !buildID) throw new Error("BUILD_ID is required");
+  if (operation === "claim") {
+    return authRequired
+      ? { pathname: `/api/runner/tasks/${buildID}/claim`, body: {} }
+      : { pathname: "/api/runner/tasks/claim", body: { runnerId: runnerID, target } };
+  }
+  if (operation === "heartbeat") {
+    return authRequired
+      ? { pathname: `/api/runner/tasks/${buildID}/heartbeat`, body: { message } }
+      : { pathname: "/api/runner/heartbeat", body: { runnerId: runnerID, buildId: buildID, target, message } };
+  }
+  if (operation === "complete") {
+    return { pathname: `/api/runner/tasks/${buildID}/complete`, body: completion };
+  }
+  throw new Error(`unsupported runner task operation: ${operation}`);
+}
+
 async function heartbeat(build, message) {
-  await request("/api/runner/heartbeat", {
+  const taskRequest = runnerTaskRequest({ operation: "heartbeat", buildID: build.id, message });
+  await request(taskRequest.pathname, {
     method: "POST",
-    body: JSON.stringify({
-      runnerId: RUNNER_ID,
-      buildId: build.id,
-      target: build.target,
-      message,
-    }),
+    body: JSON.stringify(taskRequest.body),
   });
 }
 
@@ -317,7 +410,7 @@ function minioDownloadURL(uri) {
 }
 
 function downloadHeaders(url) {
-  const headers = {};
+  const headers = url.startsWith(API_URL.replace(/\/$/, "")) ? runnerHeaders({}) : {};
   const gitlabBaseURL = process.env.GITLAB_PACKAGE_BASE_URL || "";
   const gitlabToken = process.env.GITLAB_PACKAGE_TOKEN || "";
   if (gitlabBaseURL && gitlabToken && url.startsWith(gitlabBaseURL.replace(/\/$/, ""))) {
@@ -326,7 +419,7 @@ function downloadHeaders(url) {
   return headers;
 }
 
-async function downloadToFile(url, target) {
+export async function downloadToFile(url, target) {
   const response = await fetch(url, { headers: downloadHeaders(url) });
   if (!response.ok) {
     throw new Error(`download failed ${response.status}: ${url}`);
@@ -363,6 +456,7 @@ function escapeRegExp(value) {
 
 async function downloadComponents(build, workspace) {
   const componentsDir = path.join(workspace, "context", "components");
+  const lockedComponents = new Map((build.buildLock?.components || []).map((component) => [component.id, component]));
   const manifest = [];
   for (const component of build.components || []) {
     if (!component.uri) {
@@ -373,7 +467,14 @@ async function downloadComponents(build, workspace) {
     if (component.uri.startsWith("http://") || component.uri.startsWith("https://")) {
       await downloadToFile(component.uri, target);
     } else if (component.uri.startsWith("local-upload://")) {
-      await downloadToFile(localUploadDownloadURL(component.uri), target);
+      const locked = lockedComponents.get(component.id);
+      if (!locked || locked.uri !== component.uri || !locked.sha256) {
+        throw new Error(`component ${component.id} is not a locked local upload`);
+      }
+      await downloadToFile(`${API_URL}/api/runner/tasks/${build.id}/inputs/${locked.source?.uploadId || component.uri.split("//")[1].split("/")[0]}/download`, target);
+      if ((await sha256(target)).toLowerCase() !== locked.sha256.toLowerCase()) {
+        throw new Error(`component sha256 mismatch: ${component.id}`);
+      }
     } else if (component.uri.startsWith("minio://") && process.env.MINIO_PUBLIC_URL) {
       await downloadToFile(minioDownloadURL(component.uri), target);
     } else {
@@ -574,8 +675,8 @@ async function runPackaging(build) {
   await log(runtimeBuild, `package created: ${output}`);
   await reportCacheSnapshot(runtimeBuild, workspace, "after");
 
-  const uploaded = await upload(output);
-  const checksum = await upload(checksumFile);
+  const uploaded = await upload(output, runtimeBuild.id, "final");
+  const checksum = await upload(checksumFile, runtimeBuild.id, "checksum");
   await log(runtimeBuild, `uploaded checksum: ${checksum.uri}`);
   await log(runtimeBuild, `uploaded artifact: ${uploaded.uri}`);
   return uploaded;
@@ -590,11 +691,21 @@ function shellArg(value) {
   return `"${String(value).replaceAll('"', '\\"')}"`;
 }
 
-async function main() {
-  const build = await request("/api/runner/tasks/claim", {
+export async function main() {
+  const authRequired = process.env.RUNNER_AUTH_REQUIRED === "true";
+  const buildID = process.env.BUILD_ID || "";
+  if (authRequired && !buildID) throw new Error("BUILD_ID is required");
+  runnerBearer = authRequired ? await loadRunnerBearer() : "";
+  executionCapability = authRequired ? await loadExecutionCapability() : "";
+  if (authRequired && !executionCapability) throw new Error("runner execution capability is required");
+  const claim = runnerTaskRequest({ operation: "claim", buildID, authRequired });
+  const build = await request(claim.pathname, {
     method: "POST",
-    body: JSON.stringify({ runnerId: RUNNER_ID, target: TARGET }),
+    body: JSON.stringify(claim.body),
   });
+  if (authRequired && (!build || build.id !== buildID || build.target !== TARGET)) {
+    throw new Error("claim response does not match assigned build and target");
+  }
 
   if (!build) {
     console.log("no queued build");
@@ -609,33 +720,34 @@ async function main() {
         console.warn(`heartbeat failed: ${err.message}`);
       });
     }, Number(process.env.HEARTBEAT_INTERVAL_MS || 30000));
-    const uploaded = await runPackaging(build);
+    await runPackaging(build);
     clearInterval(heartbeatTimer);
-    await request(`/api/runner/tasks/${build.id}/complete`, {
+    const completion = runnerTaskRequest({ operation: "complete", buildID: build.id, completion: { status: "succeeded" } });
+    await request(completion.pathname, {
       method: "POST",
-      body: JSON.stringify({
-        status: "succeeded",
-        artifactUri: uploaded.uri,
-        downloadUrl: uploaded.downloadUrl,
-      }),
+      body: JSON.stringify(completion.body),
     });
   } catch (err) {
     if (heartbeatTimer) {
       clearInterval(heartbeatTimer);
     }
     await log(build, `failed: ${err.message}`);
-    await request(`/api/runner/tasks/${build.id}/complete`, {
+    const completion = runnerTaskRequest({
+      operation: "complete",
+      buildID: build.id,
+      completion: { status: "failed", error: err.message },
+    });
+    await request(completion.pathname, {
       method: "POST",
-      body: JSON.stringify({
-        status: "failed",
-        error: err.message,
-      }),
+      body: JSON.stringify(completion.body),
     });
     process.exit(1);
   }
 }
 
-main().catch((err) => {
-  console.error(err.message);
-  process.exit(1);
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((err) => {
+    console.error(err.message);
+    process.exit(1);
+  });
+}

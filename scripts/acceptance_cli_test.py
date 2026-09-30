@@ -102,6 +102,7 @@ def args(**overrides):
         "allow_existing_queued": False,
         "cancel_stale_acceptance": True,
         "api_mode": "docker",
+        "auth_enabled": False,
         "api_container": "packaging-api-acceptance",
         "api_container_image": "debian:stable-slim",
         "api_docker_network": "packaging-net",
@@ -128,6 +129,19 @@ def args(**overrides):
 
 
 class AcceptanceCliTest(unittest.TestCase):
+    def test_auth_enabled_mode_refuses_local_fixture_boundary(self):
+        with self.assertRaisesRegex(RuntimeError, "not implemented"):
+            acceptance_cli.ensure_auth_mode_secret_boundary(args(auth_enabled=True))
+
+    def test_auth_enabled_mode_refuses_runner_secret_environment(self):
+        with patch.dict("os.environ", {"AUTH_RUNNER_TOKEN": "do-not-pass"}):
+            with self.assertRaisesRegex(RuntimeError, "refuses runner secrets"):
+                acceptance_cli.ensure_auth_mode_secret_boundary(args(auth_enabled=True))
+
+    def test_auth_enabled_mode_refuses_nomad_label_false_pass(self):
+        with self.assertRaisesRegex(RuntimeError, "not implemented"):
+            acceptance_cli.ensure_auth_mode_secret_boundary(args(auth_enabled=True, api_mode="host"))
+
     def test_docker_runner_command_sets_dagger_host_image_mode(self):
         command = acceptance_cli.docker_runner_command(args())
 

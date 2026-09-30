@@ -15,6 +15,9 @@ import (
 
 func main() {
 	cfg := config.Load()
+	if cfg.AuthEnabled && cfg.RunnerExecutionHMACKey == "" {
+		log.Fatal("RUNNER_EXECUTION_HMAC_KEY is required when AUTH_ENABLED=true")
+	}
 
 	st, err := store.New(cfg)
 	if err != nil {
@@ -56,8 +59,10 @@ func main() {
 			SessionTTL:       cfg.AuthSessionTTL,
 			SessionStore:     cfg.AuthSessionStoreEnabled,
 		},
-		AuditArchiveHMACKey:   cfg.AuditArchiveHMACKey,
-		AuditArchiveHMACKeyID: cfg.AuditArchiveHMACKeyID,
+		AuditArchiveHMACKey:    cfg.AuditArchiveHMACKey,
+		AuditArchiveHMACKeyID:  cfg.AuditArchiveHMACKeyID,
+		RunnerExecutionHMACKey: cfg.RunnerExecutionHMACKey,
+		RunnerCapabilityTTL:    cfg.RunnerCapabilityTTL,
 	})
 	addr := ":" + cfg.Port
 	log.Printf("packaging api listening on %s", addr)

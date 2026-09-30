@@ -626,6 +626,16 @@ def approve_build(api_url: str, build_id: str) -> dict[str, Any]:
     return build
 
 
+def ensure_auth_mode_secret_boundary(args: argparse.Namespace) -> None:
+    if not getattr(args, "auth_enabled", False):
+        return
+    forbidden = ("AUTH_RUNNER_TOKEN", "RUNNER_EXECUTION_HMAC_KEY", "X_RUNNER_EXECUTION", "RUNNER_EXECUTION_CAPABILITY")
+    leaked = [key for key in forbidden if os.environ.get(key)]
+    if leaked:
+        raise RuntimeError("auth-enabled acceptance refuses runner secrets from process environment; use the dedicated Nomad live E2E gate")
+    raise RuntimeError("auth-enabled acceptance is not implemented by the local Docker/host runner flow; use scripts/runner_e2e_cli.py --live against a real Nomad allocation")
+
+
 def docker_runner_command(args: argparse.Namespace) -> list[str]:
     command = ["docker", "run", "--rm"]
     if args.add_host_gateway:
@@ -747,6 +757,7 @@ def verify_artifact_download(args: argparse.Namespace, build: dict[str, Any]) ->
 
 
 def run_acceptance(args: argparse.Namespace) -> int:
+    ensure_auth_mode_secret_boundary(args)
     root = repo_root()
     started_api: StartedApi | None = None
     progress = Progress(total=9)
@@ -855,6 +866,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-existing-queued", action="store_true")
     parser.add_argument("--cancel-stale-acceptance", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--api-mode", choices=["docker", "host"], default="docker")
+    parser.add_argument("--auth-enabled", action="store_true", help="refuses local acceptance; use runner_e2e_cli.py --live for auth-enabled Nomad evidence")
     parser.add_argument("--api-container", default="packaging-api-acceptance")
     parser.add_argument("--api-container-image", default="debian:stable-slim")
     parser.add_argument("--api-docker-network", default="packaging-net")

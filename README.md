@@ -20,6 +20,7 @@ Key docs:
 - [Core Feature Plan](docs/core-feature-plan.md)
 - [API](docs/api.md)
 - [Nomad Runner Lifecycle](docs/nomad-runner-lifecycle.md)
+- [Auth-enabled Runner E2E](docs/runner-auth-e2e.md) — fixture contract versus real Nomad live gate and redaction boundary.
 - [lsapctl Runtime Contract](docs/lsapctl-runtime.md)
 - [Development Summary](docs/development-summary.md)
 - [Implementation Plan](docs/implementation-plan.md)
@@ -91,6 +92,10 @@ docker run -d --name packaging-postgres \
   -e POSTGRES_DB=packaging \
   -p 5432:5432 postgres:16
 
+# Local S3-compatible artifact testing uses RustFS, not MinIO.
+docker compose up -d rustfs
+# If Docker runs on a remote host, set RUSTFS_HOST_PORT and point RUSTFS_ENDPOINT at that host.
+
 cd conductor
 go run ./cmd/server
 ```
@@ -139,16 +144,16 @@ python scripts/acceptance_cli.py run --target windows --rebuild-runner
 python scripts/windows_runner_check_cli.py check --packager-command "iscc C:\\packaging-runner\\context\\rendered\\setup.iss" --signing-command "signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 %OUTPUT%"
 ```
 
-RustFS / MinIO-compatible storage check:
+RustFS storage check (the test environment uses RustFS, not MinIO):
 
 ```bash
 python scripts/rustfs_check.py
 python scripts/rustfs_check.py --object-lock --object-lock-bucket packaging-audit-lock
-python scripts/rustfs_check.py --production --skip-container-check --endpoint rustfs.example.com:9000 --access-key "$MINIO_ACCESS_KEY" --secret-key "$MINIO_SECRET_KEY" --use-ssl --object-lock --object-lock-bucket packaging-audit-lock --retention-mode COMPLIANCE --retention-days 3650 --legal-hold
+python scripts/rustfs_check.py --production --skip-container-check --endpoint rustfs.example.com:9000 --access-key "$RUSTFS_ACCESS_KEY" --secret-key "$RUSTFS_SECRET_KEY" --use-ssl --object-lock --object-lock-bucket packaging-audit-lock --retention-mode COMPLIANCE --retention-days 3650 --legal-hold
 ```
 
-The RustFS check expects a local container named `packaging-rustfs` by default, endpoint `127.0.0.1:9000`, and credentials `rustfsadmin/rustfsadmin`. It connects the container to Docker `bridge` when needed and runs the conductor integration test that verifies wildcard artifact resolution and `.sha256` sidecar locking.
-Use `--production --skip-container-check --object-lock --object-lock-bucket ... --retention-mode ... --retention-days ...` for a managed production-like RustFS/MinIO-compatible bucket; production mode refuses to pass without an explicit object-lock bucket and valid retention policy.
+The RustFS check expects a local container named `packaging-rustfs` by default, endpoint `127.0.0.1:9000`, and credentials `rustfsadmin/rustfsadmin`. It connects the container to Docker `bridge` when needed and runs the conductor integration test that verifies wildcard artifact resolution and `.sha256` sidecar locking. If the active Docker context is remote, pass its reachable endpoint plus `--integration-endpoint <remote-host-visible-endpoint>` (and, when needed, `--remote-docker-host <ssh-host>`) so the Go test runs beside RustFS rather than incorrectly probing the local workstation.
+Use `--production --skip-container-check --object-lock --object-lock-bucket ... --retention-mode ... --retention-days ...` for a managed production-like RustFS bucket; production mode refuses to pass without an explicit object-lock bucket and valid retention policy. The service speaks S3, so existing `MINIO_*` application setting names remain for backward compatibility.
 
 Observability checks:
 
@@ -179,7 +184,7 @@ The `/metrics` endpoint also exports runner cache status, bytes, file counts, an
 `correlation_trace_cli.py` is a read-only incident/debugging helper. It queries audit events, builds, build logs, uploads, and notifications by requestId/correlationId, and can emit `packaging.correlation_trace.report/v1` JSON with `--json`.
 Production identity and object-lock acceptance details are documented in `docs/production-readiness.md`.
 
-The conductor defaults to PostgreSQL storage and dry-run Nomad scheduling. Set `DRY_RUN=false`, `NOMAD_ADDR`, and `PACKAGING_RUNNER_IMAGE` to submit real Nomad jobs.
+The conductor defaults to PostgreSQL storage and dry-run Nomad scheduling. Set `DRY_RUN=false`, `NOMAD_ADDR`, and `PACKAGING_RUNNER_IMAGE` to submit real Nomad jobs. When `AUTH_ENABLED=true`, real scheduling also requires `AUTH_RUNNER_TOKEN`; Conductor stores it only in a task-owned Nomad Variable and the allocation template renders it under `$NOMAD_SECRETS_DIR`, never in task environment variables or logs.
 
 Nomad runner image:
 
@@ -257,7 +262,9 @@ Conductor variables:
 - `AUTH_ADMIN_TOKEN` - admin token; can publish releases and perform all protected operations.
 - `AUTH_OPERATOR_TOKEN` - operator token; can create/approve/reject/validate/retry/cancel builds, update manifests/overlays, upload artifacts, and download restricted artifacts.
 - `AUTH_VIEWER_TOKEN` - viewer token; can download `platform` artifacts when auth is enabled.
-- `AUTH_RUNNER_TOKEN` - runner token; required for runner claim/complete/heartbeat/log APIs when auth is enabled.
+- `AUTH_RUNNER_TOKEN` - runner token; required for runner claim/complete/heartbeat/log APIs when auth is enabled and `DRY_RUN=false`. It stays in the Conductor environment and is rendered only into dispatched allocation secrets files.
+- `PACKAGING_API_TOKEN_FILE` - safe relative allocation-secrets file name for the runner bearer, default `vela-runner-auth`.
+- `RUNNER_CAPABILITY_TTL_SECONDS`, `RUNNER_EXECUTION_HMAC_KEY` - reserved independent capability configuration; the HMAC key stays Conductor-only.
 - `OIDC_ISSUER`, `OIDC_AUDIENCE`, `OIDC_JWKS_URL` - optional OIDC/JWKS bearer JWT verification for human users when `AUTH_ENABLED=true`; RS256 tokens must pass issuer, audience, expiry, and signature checks.
 - `OIDC_TOKEN_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` - optional server-side OIDC Authorization Code + PKCE token broker settings. `OIDC_CLIENT_SECRET` is only required for confidential clients.
 - `OIDC_ROLE_CLAIM` - role claim name, default `roles`.

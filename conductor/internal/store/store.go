@@ -26,6 +26,7 @@ type Store interface {
 	RetryBuild(id string) (domain.Build, error)
 	CancelBuild(id string) (domain.Build, error)
 	SaveUploadRecord(record domain.UploadRecord) error
+	DeleteUploadRecord(id string) error
 	ListUploads() ([]domain.UploadRecord, error)
 	ReadUpload(id string) (domain.UploadRecord, error)
 	SaveAuditEvent(event domain.AuditEvent) error

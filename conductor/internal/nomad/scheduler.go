@@ -3,6 +3,7 @@ package nomad
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 )
 
 type Scheduler interface {
-	Submit(build domain.Build, product domain.Product) (jobID string, log string, err error)
+	Submit(build domain.Build, product domain.Product, executionCapability string) (jobID string, log string, err error)
 	Inspect(jobID string) (JobStatus, error)
 	Stop(jobID string) error
 }
@@ -41,6 +42,15 @@ func NewScheduler(cfg config.Config) (Scheduler, error) {
 	if cfg.DryRun {
 		return DryRunScheduler{cfg: cfg}, nil
 	}
+	if cfg.AuthEnabled && strings.TrimSpace(cfg.AuthRunnerToken) == "" {
+		return nil, fmt.Errorf("AUTH_RUNNER_TOKEN is required when AUTH_ENABLED=true and DRY_RUN=false")
+	}
+	if cfg.AuthEnabled && strings.TrimSpace(cfg.RunnerExecutionHMACKey) == "" {
+		return nil, fmt.Errorf("RUNNER_EXECUTION_HMAC_KEY is required when AUTH_ENABLED=true and DRY_RUN=false")
+	}
+	if cfg.AuthEnabled && !safeTokenFileName(cfg.RunnerAuthTokenFile) {
+		return nil, fmt.Errorf("PACKAGING_API_TOKEN_FILE must be a safe relative file name")
+	}
 
 	nomadConfig := nomadapi.DefaultConfig()
 	nomadConfig.Address = cfg.NomadAddr
@@ -54,13 +64,30 @@ func NewScheduler(cfg config.Config) (Scheduler, error) {
 	return NomadScheduler{cfg: cfg, client: client}, nil
 }
 
-func (s NomadScheduler) Submit(build domain.Build, product domain.Product) (string, string, error) {
+func (s NomadScheduler) Submit(build domain.Build, product domain.Product, executionCapability string) (string, string, error) {
 	job, err := s.buildJobWithSecrets(build, product)
 	if err != nil {
 		return "", "", err
 	}
+	variablePath := ""
+	if s.cfg.AuthEnabled {
+		if strings.TrimSpace(executionCapability) == "" {
+			return "", "", fmt.Errorf("execution capability is required when auth is enabled")
+		}
+		variablePath = runnerVariablePath(*job.ID)
+		_, _, err = s.client.Variables().Create(&nomadapi.Variable{
+			Path:  variablePath,
+			Items: nomadapi.VariableItems{"runner_bearer": s.cfg.AuthRunnerToken, "execution_capability": executionCapability},
+		}, nil)
+		if err != nil {
+			return "", "", fmt.Errorf("create runner credential variable: %w", err)
+		}
+	}
 	_, _, err = s.client.Jobs().Register(job, nil)
 	if err != nil {
+		if variablePath != "" {
+			_, _ = s.client.Variables().Delete(variablePath, nil)
+		}
 		return "", "", err
 	}
 	return *job.ID, fmt.Sprintf("submitted Nomad job %s", *job.ID), nil
@@ -126,7 +153,10 @@ func (s NomadScheduler) buildJobWithSecrets(build domain.Build, product domain.P
 	env := map[string]string{
 		"BUILD_ID":          build.ID,
 		"PACKAGING_API_URL": s.cfg.APIBaseURL,
-		"RUNNER_ID":         fmt.Sprintf("nomad-%s", build.ID),
+		"RUNNER_ID":         fmt.Sprintf("nomad-%s-a%d", build.ID, build.Attempt),
+		"NOMAD_JOB_ID":      jobID,
+		"NOMAD_TASK_GROUP":  groupName,
+		"NOMAD_TASK_NAME":   taskName,
 		"PRODUCT_ID":        build.ProductID,
 		"PRODUCT_NAME":      product.Name,
 		"TARGET":            build.Target,
@@ -157,6 +187,11 @@ func (s NomadScheduler) buildJobWithSecrets(build domain.Build, product domain.P
 	addEnv(env, "WINDOWS_PACKAGER_CMD", s.cfg.WindowsPackagerCmd)
 	addEnv(env, "WINDOWS_SIGNING_CMD", s.cfg.WindowsSigningCmd)
 	addEnv(env, "SECRET_ENV_PREFIX", s.cfg.SecretEnvPrefix)
+	if s.cfg.AuthEnabled {
+		env["PACKAGING_API_TOKEN_FILE"] = s.cfg.RunnerAuthTokenFile
+		env["RUNNER_EXECUTION_FILE"] = "vela-runner-execution"
+		env["RUNNER_AUTH_REQUIRED"] = "true"
+	}
 	for key, value := range build.Variables {
 		env["VAR_"+strings.ToUpper(key)] = fmt.Sprint(value)
 	}
@@ -173,9 +208,14 @@ func (s NomadScheduler) buildJobWithSecrets(build domain.Build, product domain.P
 	}
 
 	return &nomadapi.Job{
-		ID:          &jobID,
-		Name:        &jobID,
-		Type:        ptr("batch"),
+		ID:   &jobID,
+		Name: &jobID,
+		Type: ptr("batch"),
+		Meta: map[string]string{
+			"packaging.build_id":  build.ID,
+			"packaging.attempt":   strconv.Itoa(build.Attempt),
+			"packaging.runner_id": build.RunnerID,
+		},
 		Datacenters: []string{"dc1"},
 		TaskGroups: []*nomadapi.TaskGroup{{
 			Name:             &groupName,
@@ -193,6 +233,8 @@ func (s NomadScheduler) buildJobWithSecrets(build domain.Build, product domain.P
 				Resources:   taskResources(s.cfg),
 				LogConfig:   logConfig(s.cfg),
 				KillTimeout: durationPtr(s.cfg.RunnerKillTimeout),
+				Templates:   runnerAuthTemplates(s.cfg, jobID, build.Target),
+				Identities:  runnerWorkloadIdentities(s.cfg),
 			}},
 		}},
 	}, nil
@@ -238,6 +280,11 @@ func (s NomadScheduler) Inspect(jobID string) (JobStatus, error) {
 
 func (s NomadScheduler) Stop(jobID string) error {
 	_, _, err := s.client.Jobs().Deregister(jobID, false, nil)
+	if s.cfg.AuthEnabled {
+		if _, deleteErr := s.client.Variables().Delete(runnerVariablePath(jobID), nil); deleteErr != nil && err == nil {
+			err = fmt.Errorf("delete runner credential variable: %w", deleteErr)
+		}
+	}
 	return err
 }
 
@@ -245,7 +292,7 @@ type DryRunScheduler struct {
 	cfg config.Config
 }
 
-func (s DryRunScheduler) Submit(build domain.Build, product domain.Product) (string, string, error) {
+func (s DryRunScheduler) Submit(build domain.Build, product domain.Product, _ string) (string, string, error) {
 	id := jobID(build)
 	log := fmt.Sprintf(
 		"dry-run: would submit Nomad batch job %s for product=%s target=%s profile=%s version=%s bucket=%s",
@@ -268,7 +315,40 @@ func (s DryRunScheduler) Stop(jobID string) error {
 }
 
 func jobID(build domain.Build) string {
-	return fmt.Sprintf("pkg-%s-%s", build.ProductID, build.ID)
+	return fmt.Sprintf("pkg-%s-%s-a%d", build.ProductID, build.ID, build.Attempt)
+}
+
+func runnerVariablePath(jobID string) string {
+	return fmt.Sprintf("nomad/jobs/%s/builder/package/runner", jobID)
+}
+
+func safeTokenFileName(name string) bool {
+	name = strings.TrimSpace(name)
+	return name != "" && !strings.ContainsAny(name, `/\\`) && name != "." && name != ".."
+}
+
+func runnerAuthTemplates(cfg config.Config, jobID, target string) []*nomadapi.Template {
+	if !cfg.AuthEnabled {
+		return nil
+	}
+	perms := "0400"
+	files := []struct{ name, item string }{{cfg.RunnerAuthTokenFile, "runner_bearer"}, {"vela-runner-execution", "execution_capability"}}
+	templates := make([]*nomadapi.Template, 0, len(files))
+	for _, file := range files {
+		template := &nomadapi.Template{DestPath: ptr(fmt.Sprintf("secrets/%s", file.name)), EmbeddedTmpl: ptr(fmt.Sprintf(`{{ with nomadVar %q }}{{ .%s }}{{ end }}`, runnerVariablePath(jobID), file.item)), Envvars: ptr(false), ChangeMode: ptr("noop"), ErrMissingKey: ptr(true)}
+		if target != "windows" {
+			template.Perms = &perms
+		}
+		templates = append(templates, template)
+	}
+	return templates
+}
+
+func runnerWorkloadIdentities(cfg config.Config) []*nomadapi.WorkloadIdentity {
+	if !cfg.AuthEnabled {
+		return nil
+	}
+	return []*nomadapi.WorkloadIdentity{{Name: "runner-variable", File: true, Env: false}}
 }
 
 func ptr[T any](value T) *T {

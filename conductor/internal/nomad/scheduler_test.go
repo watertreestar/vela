@@ -1,6 +1,7 @@
 package nomad
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -8,6 +9,17 @@ import (
 	"vela/conductor/internal/config"
 	"vela/conductor/internal/domain"
 )
+
+func TestNewSchedulerRejectsMissingRunnerTokenForAuthEnabledRealScheduling(t *testing.T) {
+	_, err := NewScheduler(config.Config{AuthEnabled: true, DryRun: false})
+	if err == nil || !strings.Contains(err.Error(), "AUTH_RUNNER_TOKEN") {
+		t.Fatalf("expected missing runner token validation error, got %v", err)
+	}
+	_, err = NewScheduler(config.Config{AuthEnabled: true, DryRun: false, AuthRunnerToken: "runner"})
+	if err == nil || !strings.Contains(err.Error(), "RUNNER_EXECUTION_HMAC_KEY") {
+		t.Fatalf("expected missing execution key validation error, got %v", err)
+	}
+}
 
 func TestNomadJobRunsPackagingRunner(t *testing.T) {
 	scheduler := NomadScheduler{cfg: config.Config{
@@ -38,6 +50,9 @@ func TestNomadJobRunsPackagingRunner(t *testing.T) {
 	}
 	if task.Env["TARGET"] != "linux" {
 		t.Fatalf("target env missing: %#v", task.Env)
+	}
+	if job.Meta["packaging.build_id"] != "build-1" || job.Meta["packaging.attempt"] != "0" || job.Meta["packaging.runner_id"] != "" {
+		t.Fatalf("dispatch metadata missing or incorrect: %#v", job.Meta)
 	}
 }
 
@@ -225,6 +240,54 @@ func TestNomadJobInjectsResolvedSecretEnvironment(t *testing.T) {
 	}
 	if task.Env["VAR_ROOTPASSWORD"] == "secret-value" {
 		t.Fatalf("secret value should not be copied into build variables: %#v", task.Env)
+	}
+}
+
+func TestAuthEnabledJobRendersRunnerBearerFromNomadSecrets(t *testing.T) {
+	scheduler := NomadScheduler{cfg: config.Config{
+		AuthEnabled:            true,
+		AuthRunnerToken:        "must-not-appear-in-job",
+		RunnerAuthTokenFile:    "vela-runner-auth",
+		RunnerExecutionHMACKey: "execution-key",
+		APIBaseURL:             "http://packaging-api:8080",
+	}}
+	job, err := scheduler.buildJobWithSecrets(domain.Build{ID: "build-auth", ProductID: "lsap", Target: "linux"}, domain.Product{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := job.TaskGroups[0].Tasks[0]
+	if task.Env["PACKAGING_API_TOKEN_FILE"] != "vela-runner-auth" || task.Env["RUNNER_AUTH_REQUIRED"] != "true" {
+		t.Fatalf("runner auth file configuration missing: %#v", task.Env)
+	}
+	if _, found := task.Env["AUTH_RUNNER_TOKEN"]; found {
+		t.Fatalf("runner bearer must not be put in task environment: %#v", task.Env)
+	}
+	if len(task.Templates) != 2 || *task.Templates[0].DestPath != "secrets/vela-runner-auth" || *task.Templates[1].DestPath != "secrets/vela-runner-execution" || *task.Templates[0].Envvars || *task.Templates[1].Envvars {
+		t.Fatalf("runner secret templates incorrect: %#v", task.Templates)
+	}
+	if *task.Templates[0].Perms != "0400" || *task.Templates[1].Perms != "0400" || !strings.Contains(*task.Templates[0].EmbeddedTmpl, runnerVariablePath(*job.ID)) || !strings.Contains(*task.Templates[1].EmbeddedTmpl, "execution_capability") {
+		t.Fatalf("runner secret template permissions/path incorrect: %#v", task.Templates[0])
+	}
+	if len(task.Identities) != 1 || !task.Identities[0].File || task.Identities[0].Env {
+		t.Fatalf("runner workload identity incorrect: %#v", task.Identities)
+	}
+	serialized, err := json.Marshal(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(serialized), "must-not-appear-in-job") {
+		t.Fatal("runner bearer must not appear in serialized Nomad job")
+	}
+}
+
+func TestWindowsAuthTemplateDoesNotClaimPOSIXPermissions(t *testing.T) {
+	scheduler := NomadScheduler{cfg: config.Config{AuthEnabled: true, AuthRunnerToken: "must-not-appear-in-job", RunnerAuthTokenFile: "vela-runner-auth"}}
+	job, err := scheduler.buildJobWithSecrets(domain.Build{ID: "build-auth-windows", ProductID: "lsap", Target: "windows"}, domain.Product{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.TaskGroups[0].Tasks[0].Templates[0].Perms != nil {
+		t.Fatal("Windows template must rely on allocation secrets directory ACLs, not POSIX permissions")
 	}
 }
 

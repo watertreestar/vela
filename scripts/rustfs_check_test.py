@@ -62,6 +62,9 @@ class RustFSCheckTest(unittest.TestCase):
 
         args = Namespace(
             endpoint="127.0.0.1:9000",
+            integration_endpoint="",
+            remote_docker_host="",
+            skip_container_check=True,
             access_key="rustfsadmin",
             secret_key="rustfsadmin",
             bucket="packaging-default",
@@ -84,6 +87,22 @@ class RustFSCheckTest(unittest.TestCase):
         self.assertEqual(captured["env"]["RUSTFS_OBJECT_LOCK_RETENTION_MODE"], "COMPLIANCE")
         self.assertEqual(captured["env"]["RUSTFS_OBJECT_LOCK_RETENTION_DAYS"], "3650")
         self.assertEqual(captured["env"]["RUSTFS_OBJECT_LOCK_LEGAL_HOLD"], "true")
+
+    def test_local_container_uses_service_endpoint_for_integration(self):
+        args = Namespace(integration_endpoint="", endpoint="127.0.0.1:9000")
+        self.assertEqual(rustfs_check.integration_endpoint(args), "127.0.0.1:9000")
+
+    def test_explicit_integration_endpoint_overrides_container_default(self):
+        args = Namespace(integration_endpoint="rustfs.internal:9000", endpoint="127.0.0.1:9000")
+        self.assertEqual(rustfs_check.integration_endpoint(args), "rustfs.internal:9000")
+
+    def test_remote_docker_context_uses_ssh_host(self):
+        with patch.object(rustfs_check, "run_command") as run:
+            run.side_effect = [
+                type("Result", (), {"returncode": 0, "stdout": "remote\n", "stderr": ""})(),
+                type("Result", (), {"returncode": 0, "stdout": "ssh://ubuntu-a\n", "stderr": ""})(),
+            ]
+            self.assertEqual(rustfs_check.docker_context_host(pathlib.Path("repo")), "ubuntu-a")
 
     def test_production_mode_requires_valid_retention_policy(self):
         args = Namespace(

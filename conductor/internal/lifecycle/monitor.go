@@ -89,7 +89,7 @@ func (m Monitor) reconcileBuild(build domain.Build, now time.Time) error {
 		return nil
 	}
 
-	if build.Status == domain.BuildRunning && m.runTimeout > 0 && now.Sub(build.UpdatedAt) > m.runTimeout {
+	if build.Status == domain.BuildRunning && m.runTimeout > 0 && (build.LastHeartbeatAt == nil || now.Sub(*build.LastHeartbeatAt) > m.runTimeout) {
 		message := fmt.Sprintf("runner heartbeat timeout after %s", m.runTimeout)
 		if err := m.failBuild(build.ID, message); err != nil {
 			return err
@@ -134,6 +134,13 @@ func (m Monitor) failBuild(id string, message string) error {
 	return err
 }
 
+func heartbeatTime(value *time.Time) time.Time {
+	if value == nil {
+		return time.Time{}
+	}
+	return *value
+}
+
 func (m Monitor) recordRunnerOfflineNotification(build domain.Build, now time.Time, message string) {
 	runnerID := build.RunnerID
 	if runnerID == "" {
@@ -158,7 +165,7 @@ func (m Monitor) recordRunnerOfflineNotification(build domain.Build, now time.Ti
 			"version":         build.Version,
 			"releaseChannel":  build.ReleaseChannel,
 			"timeout":         m.runTimeout.String(),
-			"lastHeartbeatAt": build.UpdatedAt.Format(time.RFC3339),
+			"lastHeartbeatAt": heartbeatTime(build.LastHeartbeatAt).Format(time.RFC3339),
 			"error":           message,
 		},
 	}

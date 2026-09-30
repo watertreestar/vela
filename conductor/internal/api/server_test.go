@@ -39,6 +39,10 @@ func (s failingArtifactStore) ServeUpload(http.ResponseWriter, *http.Request, st
 	return errors.New("serve upload failed")
 }
 
+func (s failingArtifactStore) DeleteUpload(string) error {
+	return nil
+}
+
 func (s failingArtifactStore) AuditArchiveURI(digest string) (string, error) {
 	return "memory-audit-archive://" + digest, nil
 }
@@ -374,7 +378,7 @@ func TestAPIReadEndpointsExposeProductsBuildsLocksAndUploads(t *testing.T) {
 		t.Fatalf("unexpected lock response: %#v", lock)
 	}
 
-	response = doRequest(t, server, http.MethodGet, "/api/uploads", "")
+	response = doRequestWithHeaders(t, server, http.MethodGet, "/api/uploads", "", bearer("viewer-token"))
 	assertStatus(t, response, http.StatusOK)
 	var uploads []domain.UploadRecord
 	decodeJSON(t, response, &uploads)
@@ -549,15 +553,19 @@ func TestPreviewValidationRequiredBeforeRelease(t *testing.T) {
 	server := NewServer(store, nil, nil).Routes()
 	now := time.Now().UTC()
 	build := domain.Build{
-		ID:             "build-preview",
-		ProductID:      "lsap",
-		Target:         "linux",
-		Profile:        "qa",
-		Version:        "1.0.0",
-		ReleaseChannel: "preview",
-		Status:         domain.BuildSucceeded,
-		ArtifactURI:    "local-upload://preview/lsap.tar.gz",
-		DownloadURL:    "http://example.test/preview.tar.gz",
+		ID:                         "build-preview",
+		ProductID:                  "lsap",
+		Target:                     "linux",
+		Profile:                    "qa",
+		Version:                    "1.0.0",
+		ReleaseChannel:             "preview",
+		Status:                     domain.BuildSucceeded,
+		ArtifactURI:                "local-upload://preview/lsap.tar.gz",
+		DownloadURL:                "http://example.test/preview.tar.gz",
+		ArtifactUploadID:           "verified-final",
+		ChecksumUploadID:           "verified-checksum",
+		ArtifactVerifiedAt:         &now,
+		ArtifactVerificationStatus: "verified",
 		BuildLock: domain.BuildLock{
 			BuildID:        "build-preview",
 			ProductID:      "lsap",
@@ -618,15 +626,19 @@ func TestReleaseCheckReportsPreviewAndReleaseBlockingChecks(t *testing.T) {
 	server := NewServer(store, nil, nil).Routes()
 	now := time.Now().UTC()
 	build := domain.Build{
-		ID:             "build-check",
-		ProductID:      "lsap",
-		Target:         "linux",
-		Profile:        "qa",
-		Version:        "latest",
-		ReleaseChannel: "preview",
-		Status:         domain.BuildSucceeded,
-		ArtifactURI:    "local-upload://preview/lsap.tar.gz",
-		DownloadURL:    "http://example.test/preview.tar.gz",
+		ID:                         "build-check",
+		ProductID:                  "lsap",
+		Target:                     "linux",
+		Profile:                    "qa",
+		Version:                    "latest",
+		ReleaseChannel:             "preview",
+		Status:                     domain.BuildSucceeded,
+		ArtifactURI:                "local-upload://preview/lsap.tar.gz",
+		DownloadURL:                "http://example.test/preview.tar.gz",
+		ArtifactUploadID:           "verified-final",
+		ChecksumUploadID:           "verified-checksum",
+		ArtifactVerifiedAt:         &now,
+		ArtifactVerificationStatus: "verified",
 		BuildLock: domain.BuildLock{
 			BuildID:        "build-check",
 			ProductID:      "lsap",
@@ -827,6 +839,9 @@ func TestReproducibilityReportIncludesLockGateAndArtifactEvidence(t *testing.T) 
 	uploadCreatedAt := now.Add(-30 * time.Minute)
 	if err := store.SaveUploadRecord(domain.UploadRecord{
 		ID:              "final-upload",
+		BuildID:         "report-build",
+		Attempt:         0,
+		Kind:            "final",
 		FileName:        "setup.exe",
 		URI:             "local-upload://final-upload/setup.exe",
 		DownloadURL:     "http://api.test/api/uploads/final-upload/download",
@@ -843,11 +858,36 @@ func TestReproducibilityReportIncludesLockGateAndArtifactEvidence(t *testing.T) 
 	build := releaseReadyBuild("report-build", "lsap", "windows", "qa", "1.0.0", now)
 	build.ArtifactURI = "local-upload://final-upload/setup.exe"
 	build.DownloadURL = "http://api.test/api/uploads/final-upload/download"
+	build.ArtifactUploadID = "final-upload"
+	build.ArtifactSHA256 = "final-sha256"
+	build.ArtifactSize = 4096
+	build.ChecksumUploadID = "checksum-upload"
+	build.ArtifactVerifiedAt = &now
+	build.ArtifactVerificationStatus = "verified"
 	build.RunnerID = "windows-runner-01"
 	build.NomadJobID = "job-report-build"
 	build.BuildLock.Components[0].Source.Kind = "artifact-repository"
 	build.BuildLock.Components[0].SHA256 = "component-sha256"
 	build.Components = build.BuildLock.Components
+	if err := store.SaveUploadRecord(domain.UploadRecord{
+		ID:              "checksum-upload",
+		BuildID:         build.ID,
+		Attempt:         build.Attempt,
+		Kind:            "checksum",
+		ParentUploadID:  "final-upload",
+		FileName:        "setup.exe.sha256",
+		URI:             "local-upload://checksum-upload/setup.exe.sha256",
+		DownloadURL:     "http://api.test/api/uploads/checksum-upload/download",
+		SHA256:          "checksum-sha256",
+		Size:            80,
+		ContentType:     "text/plain",
+		DownloadPolicy:  "restricted",
+		RetentionDays:   30,
+		RetentionStatus: "active",
+		CreatedAt:       now,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.SaveBuild(build); err != nil {
 		t.Fatal(err)
 	}
@@ -875,6 +915,44 @@ func TestReproducibilityReportIncludesLockGateAndArtifactEvidence(t *testing.T) 
 	}
 }
 
+func TestRunnerE2EEvidenceRequiresOperatorAndProjectsBoundOutputs(t *testing.T) {
+	store, _ := newTestServerStore(t)
+	server := NewServerWithAuth(store, nil, nil, testAuthConfig()).Routes()
+	now := time.Now().UTC()
+	build := domain.Build{
+		ID: "runner-e2e-build", ProductID: "lsap", Target: "windows", Status: domain.BuildSucceeded,
+		Attempt: 3, RunnerID: "nomad-runner-e2e-build-a3", NomadJobID: "pkg-lsap-runner-e2e-build-a3",
+		ArtifactUploadID: "runner-e2e-final", ChecksumUploadID: "runner-e2e-checksum", ArtifactSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ArtifactVerifiedAt: &now,
+		DispatchStartedAt:  &now,
+	}
+	if err := store.SaveUploadRecord(domain.UploadRecord{ID: "runner-e2e-final", BuildID: build.ID, Attempt: build.Attempt, RunnerID: build.RunnerID, Kind: "final"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveUploadRecord(domain.UploadRecord{ID: "runner-e2e-checksum", BuildID: build.ID, Attempt: build.Attempt, RunnerID: build.RunnerID, Kind: "checksum", ParentUploadID: "runner-e2e-final"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveBuild(build); err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/builds/runner-e2e-build/runner-e2e-evidence"
+	for _, token := range []string{"", "viewer-token", "runner-token"} {
+		response := doRequestWithHeaders(t, server, http.MethodGet, path, "", bearer(token))
+		if response.Code != http.StatusUnauthorized && response.Code != http.StatusForbidden {
+			t.Fatalf("expected non-operator token %q to be rejected, got %d: %s", token, response.Code, response.Body.String())
+		}
+	}
+	response := doRequestWithHeaders(t, server, http.MethodGet, path, "", bearer("operator-token"))
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected operator evidence access, got %d: %s", response.Code, response.Body.String())
+	}
+	var evidence domain.RunnerE2EEvidence
+	decodeJSON(t, response, &evidence)
+	if evidence.BuildID != build.ID || evidence.NomadJobID != build.NomadJobID || evidence.FinalBuildID != build.ID || evidence.ChecksumParentUpload != build.ArtifactUploadID {
+		t.Fatalf("unexpected runner E2E evidence: %#v", evidence)
+	}
+}
+
 func TestReleaseEvidenceArchivePersistsDigestSignatureAndAudit(t *testing.T) {
 	store, _ := newTestServerStore(t)
 	dataDir := t.TempDir()
@@ -896,14 +974,42 @@ func TestReleaseEvidenceArchivePersistsDigestSignatureAndAudit(t *testing.T) {
 	build.Status = domain.BuildPreviewValidated
 	build.ArtifactURI = "local-upload://final-upload/package.tar.gz"
 	build.DownloadURL = "http://api.test/api/uploads/final-upload/download"
+	build.ArtifactUploadID = "final-upload"
+	build.ArtifactSHA256 = "final-sha256"
+	build.ArtifactSize = 1024
+	build.ChecksumUploadID = "checksum-upload"
+	build.ArtifactVerifiedAt = &now
+	build.ArtifactVerificationStatus = "verified"
 	if err := store.SaveUploadRecord(domain.UploadRecord{
 		ID:              "final-upload",
+		BuildID:         build.ID,
+		Attempt:         build.Attempt,
+		Kind:            "final",
 		FileName:        "package.tar.gz",
 		URI:             build.ArtifactURI,
 		DownloadURL:     build.DownloadURL,
 		SHA256:          "final-sha256",
 		Size:            1024,
 		ContentType:     "application/gzip",
+		DownloadPolicy:  "restricted",
+		RetentionDays:   30,
+		RetentionStatus: "active",
+		CreatedAt:       now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveUploadRecord(domain.UploadRecord{
+		ID:              "checksum-upload",
+		BuildID:         build.ID,
+		Attempt:         build.Attempt,
+		Kind:            "checksum",
+		ParentUploadID:  "final-upload",
+		FileName:        "package.tar.gz.sha256",
+		URI:             "local-upload://checksum-upload/package.tar.gz.sha256",
+		DownloadURL:     "http://api.test/api/uploads/checksum-upload/download",
+		SHA256:          "checksum-sha256",
+		Size:            80,
+		ContentType:     "text/plain",
 		DownloadPolicy:  "restricted",
 		RetentionDays:   30,
 		RetentionStatus: "active",
@@ -971,15 +1077,19 @@ func TestValidatePreviewRejectsMismatchedBuildLock(t *testing.T) {
 	server := NewServer(store, nil, nil).Routes()
 	now := time.Now().UTC()
 	build := domain.Build{
-		ID:             "build-mismatch",
-		ProductID:      "lsap",
-		Target:         "linux",
-		Profile:        "qa",
-		Version:        "1.0.0",
-		ReleaseChannel: "preview",
-		Status:         domain.BuildSucceeded,
-		ArtifactURI:    "local-upload://preview/lsap.tar.gz",
-		DownloadURL:    "http://example.test/preview.tar.gz",
+		ID:                         "build-mismatch",
+		ProductID:                  "lsap",
+		Target:                     "linux",
+		Profile:                    "qa",
+		Version:                    "1.0.0",
+		ReleaseChannel:             "preview",
+		Status:                     domain.BuildSucceeded,
+		ArtifactURI:                "local-upload://preview/lsap.tar.gz",
+		DownloadURL:                "http://example.test/preview.tar.gz",
+		ArtifactUploadID:           "verified-final",
+		ChecksumUploadID:           "verified-checksum",
+		ArtifactVerifiedAt:         &now,
+		ArtifactVerificationStatus: "verified",
 		BuildLock: domain.BuildLock{
 			BuildID:        "build-mismatch",
 			ProductID:      "lsap",
@@ -1224,8 +1334,12 @@ func TestAuthProtectsWriteAndRunnerRoutes(t *testing.T) {
 		t.Fatalf("expected runner claim without token status 401, got %d: %s", response.Code, response.Body.String())
 	}
 	response = doRequestWithHeaders(t, server, http.MethodPost, "/api/runner/tasks/claim", `{"runnerId":"runner-1","target":"linux"}`, bearer("runner-token"))
-	if response.Code != http.StatusNoContent {
-		t.Fatalf("expected runner token can claim queue, got %d: %s", response.Code, response.Body.String())
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("expected auth-enabled target-wide claim rejection, got %d: %s", response.Code, response.Body.String())
+	}
+	response = doRequestWithHeaders(t, server, http.MethodPost, "/api/runner/tasks/claim", `{"runnerId":"runner-1","target":"linux"}`, map[string]string{})
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected auth-enabled legacy claim without capability or authorization rejection, got %d: %s", response.Code, response.Body.String())
 	}
 }
 
@@ -1297,16 +1411,17 @@ func TestAuthEnforcesBuildDownloadLinkedUploadPolicyAndAudit(t *testing.T) {
 	decodeJSON(t, uploadResponse, &upload)
 	now := time.Now().UTC()
 	build := domain.Build{
-		ID:          "restricted-build-download",
-		ProductID:   "lsap",
-		Target:      "linux",
-		Profile:     "qa",
-		Version:     "1.0.0",
-		Status:      domain.BuildSucceeded,
-		ArtifactURI: upload.URI,
-		DownloadURL: upload.DownloadURL,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:               "restricted-build-download",
+		ProductID:        "lsap",
+		Target:           "linux",
+		Profile:          "qa",
+		Version:          "1.0.0",
+		Status:           domain.BuildSucceeded,
+		ArtifactURI:      upload.URI,
+		DownloadURL:      upload.DownloadURL,
+		ArtifactUploadID: upload.ID,
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}
 	if err := store.SaveBuild(build); err != nil {
 		t.Fatal(err)
@@ -1683,7 +1798,7 @@ func TestAuditEventsRecordUploadCreateAndDownload(t *testing.T) {
 		t.Fatalf("expected upload record request context, got %#v", upload)
 	}
 
-	response := doRequest(t, server, http.MethodGet, "/api/uploads", "")
+	response := doRequestWithHeaders(t, server, http.MethodGet, "/api/uploads", "", bearer("viewer-token"))
 	assertStatus(t, response, http.StatusOK)
 	var uploads []domain.UploadRecord
 	decodeJSON(t, response, &uploads)
@@ -1783,7 +1898,7 @@ func TestNotificationsRecordBuildLifecycleAndReadState(t *testing.T) {
 	if err := store.SaveBuild(build); err != nil {
 		t.Fatal(err)
 	}
-	server := NewServerWithAuth(store, &fakeScheduler{}, nil, testAuthConfig()).Routes()
+	server := NewServer(store, &fakeScheduler{}, nil).Routes()
 
 	response := doRequestWithHeaders(t, server, http.MethodPost, "/api/runner/tasks/notify-build/complete", `{"status":"succeeded","artifactUri":"minio://artifact/lsap.tar.gz","downloadUrl":"http://api.test/api/uploads/final/download"}`, bearer("runner-token"))
 	if response.Code != http.StatusOK {
@@ -1801,8 +1916,8 @@ func TestNotificationsRecordBuildLifecycleAndReadState(t *testing.T) {
 	}
 
 	response = doRequest(t, server, http.MethodGet, "/api/notifications", "")
-	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("expected notifications endpoint to require auth, got %d: %s", response.Code, response.Body.String())
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected notifications endpoint local compatibility status 200, got %d: %s", response.Code, response.Body.String())
 	}
 
 	response = doRequestWithHeaders(t, server, http.MethodPost, "/api/notifications/"+notifications[0].ID+"/read", "", bearer("viewer-token"))
@@ -1931,23 +2046,27 @@ func releaseReadyBuild(id string, productID string, target string, profile strin
 		},
 	}
 	return domain.Build{
-		ID:             id,
-		ProductID:      productID,
-		Target:         target,
-		Profile:        profile,
-		Customer:       "city-bank",
-		Version:        version,
-		ReleaseChannel: "preview",
-		Status:         domain.BuildPreviewValidated,
-		ArtifactURI:    "minio://artifact/packages/" + productID + "/" + version + "/" + target + "/setup.exe",
-		DownloadURL:    "https://artifacts.example.test/packages/" + productID + "/" + version + "/" + target + "/setup.exe",
-		FinalConfig:    lock.Config,
-		Components:     components,
-		Workloads:      lock.Workloads,
-		BuildLock:      lock,
-		CreatedAt:      now.Add(-3 * time.Hour),
-		UpdatedAt:      now,
-		ValidatedAt:    &now,
+		ID:                         id,
+		ProductID:                  productID,
+		Target:                     target,
+		Profile:                    profile,
+		Customer:                   "city-bank",
+		Version:                    version,
+		ReleaseChannel:             "preview",
+		Status:                     domain.BuildPreviewValidated,
+		ArtifactURI:                "minio://artifact/packages/" + productID + "/" + version + "/" + target + "/setup.exe",
+		DownloadURL:                "https://artifacts.example.test/packages/" + productID + "/" + version + "/" + target + "/setup.exe",
+		ArtifactUploadID:           id + "-final",
+		ChecksumUploadID:           id + "-checksum",
+		ArtifactVerifiedAt:         &now,
+		ArtifactVerificationStatus: "verified",
+		FinalConfig:                lock.Config,
+		Components:                 components,
+		Workloads:                  lock.Workloads,
+		BuildLock:                  lock,
+		CreatedAt:                  now.Add(-3 * time.Hour),
+		UpdatedAt:                  now,
+		ValidatedAt:                &now,
 	}
 }
 
