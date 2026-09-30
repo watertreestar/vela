@@ -1,7 +1,7 @@
 # Phase 7：构建执行闭环、Runner 鉴权与真实 Release
 
-> 状态：Finalized  
-> 交付分支：`phase7/runner-integrity`  
+> 状态：Finalized
+> 交付分支：`phase7/runner-integrity`
 > 基线：`6ec7a6f1e8f425e1d7b51c3cdfc016c688b01140`
 
 ## 目标
