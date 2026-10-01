@@ -47,6 +47,12 @@ if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = function scrollIntoView() {};
 }
 
+const originalGetComputedStyle = window.getComputedStyle;
+window.getComputedStyle = (element, pseudoElement) => {
+  if (pseudoElement) return originalGetComputedStyle(element);
+  return originalGetComputedStyle(element);
+};
+
 const originalConsoleError = console.error;
 
 console.error = (...args) => {
