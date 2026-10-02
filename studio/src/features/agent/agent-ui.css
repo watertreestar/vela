@@ -36,6 +36,11 @@
   background: #eff6ff;
 }
 
+.agent-copilot__mode-note,
+.agent-copilot__notice {
+  margin-bottom: 12px;
+}
+
 .agent-copilot__error {
   margin-bottom: 12px;
 }

@@ -400,6 +400,10 @@ export function listProducts() {
   return request("/api/products");
 }
 
+export function getHealth() {
+  return request("/api/health");
+}
+
 export function listBuilds() {
   return request("/api/builds");
 }

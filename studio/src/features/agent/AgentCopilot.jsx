@@ -226,6 +226,7 @@ export function AgentCopilotPanel({
   messages = [],
   status,
   error,
+  notice,
   onSend,
   onStop,
   onApprove,
@@ -285,6 +286,14 @@ export function AgentCopilotPanel({
       <div className="agent-copilot__context" aria-label="当前 Agent 上下文">
         <Badge status="processing" text={contextLabel} />
       </div>
+      <Alert
+        className="agent-copilot__mode-note"
+        type="info"
+        showIcon
+        message="回复、工具调用与审批是三种不同状态"
+        description="文字回复只提供建议；工具调用会展示名称、参数和结果；有生产影响的操作必须先进入等待确认状态，并由服务端再次校验授权与审批绑定。"
+      />
+      {notice && <Alert className="agent-copilot__notice" type="warning" showIcon message="当前为说明模式" description={String(notice)} />}
       {error && <Alert className="agent-copilot__error" type="error" showIcon message="Agent 请求失败" description={String(error)} />}
       <AgentMessageList messages={messages} status={status} onApprove={onApprove} onDeny={onDeny} />
     </Drawer>

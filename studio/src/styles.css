@@ -235,6 +235,42 @@ select { font: inherit; }
 .vela-shell .ant-list-item { border-block-end-color: var(--vela-line); }
 
 .vela-alert { margin-bottom: 16px; border-radius: var(--vela-radius); }
+.vela-hint {
+  display: inline-grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: #7b8794;
+  cursor: help;
+  padding: 0;
+}
+.vela-hint:hover { color: var(--vela-orange); }
+.vela-field-label { display: inline-flex; align-items: center; gap: 3px; }
+.vela-context-note {
+  display: grid;
+  grid-template-columns: 18px minmax(0,1fr);
+  gap: 10px;
+  margin-bottom: 16px;
+  border-left: 3px solid #5b84b1;
+  background: #f4f7fa;
+  color: #36506c;
+  padding: 11px 13px;
+}
+.vela-context-note.is-warning { border-left-color: #d97706; background: #fff8e6; color: #7a4b00; }
+.vela-context-note.is-secure { border-left-color: #24835b; background: #f0f8f4; color: #245f49; }
+.vela-context-note > div { display: grid; gap: 2px; }
+.vela-context-note .ant-typography { color: inherit; line-height: 1.55; }
+.vela-error-banner .ant-alert-description { margin-top: 7px; }
+.vela-error-detail { display: grid; gap: 8px; }
+.vela-error-detail ul, .vela-validation-list { margin: 0; padding-left: 20px; }
+.vela-error-meta { display: flex; flex-wrap: wrap; gap: 6px; }
+.vela-error-meta code, .vela-result-meta code { border: 1px solid #e0c2c0; border-radius: 3px; background: rgb(255 255 255 / 65%); color: #7f2f29; padding: 2px 5px; }
+.vela-notification-card .ant-card-body { max-height: min(520px, 70vh); overflow-y: auto; }
+.vela-notification-card .ant-list-item.is-unread { background: #fff9f5; }
+.vela-notification-copy { display: grid; gap: 3px; }
+.vela-notification-copy time { color: var(--vela-muted); font-size: 11px; }
 .vela-loading { display: grid; min-height: 240px; place-items: center; }
 .vela-code {
   max-height: 460px;
@@ -296,6 +332,7 @@ select { font: inherit; }
 .vela-page-heading > div:first-child { min-width: 0; }
 .vela-shell .vela-header-search { flex: 1; min-width: 0; max-width: 520px; }
 .vela-header-search > .ant-space-item:last-child { flex: 1; min-width: 0; }
+.vela-search-suffix { display: inline-flex; min-width: 34px; justify-content: flex-end; }
 .vela-header-tools { flex-shrink: 0; }
 .vela-header kbd { color: var(--vela-muted); font: inherit; font-size: 11px; white-space: nowrap; }
 .vela-footer-caption { margin-top: 4px; font-size: 11px; color: var(--vela-muted); }
@@ -417,6 +454,8 @@ select { font: inherit; }
 .vela-json-editor.ant-input { border-color: #cfd5dd; background: #fbfcfd; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 12px; line-height: 1.65; tab-size: 2; }
 .vela-editor-result { margin-top: 14px; }
 .vela-editor-result pre { max-height: 220px; overflow: auto; margin-bottom: 0; }
+.vela-result-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 9px; }
+.vela-validation-list { display: grid; gap: 4px; }
 .vela-revision-list { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--vela-line); }
 .vela-revision-list .ant-list-item { padding-inline: 0; }
 .vela-audit-page { display: grid; gap: 24px; }

@@ -13,12 +13,13 @@ async function mockApi(page) {
   await page.route("http://localhost:8080/api/**", async (route) => {
     const request = route.request(); const url = new URL(request.url()); const { pathname: path } = url; const method = request.method(); state.requests.push({ path, method });
     const json = (body, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
+    if (method === "GET" && path === "/api/health") return json({ status: "ok" });
     if (method === "GET" && path === "/api/products") return json([product]);
     if (method === "GET" && path === "/api/builds") return json(state.builds.map(withRelease));
     if (method === "GET" && path === "/api/uploads") return json(Array.from({ length: 16 }, (_, i) => ({ id: `upload-${i}`, fileName: `artifact-${i}.tar.gz`, retentionStatus: i === 0 ? "expired" : "active", downloadPolicy: "platform" })));
     if (method === "GET" && path === "/api/runners") return json([]);
     if (method === "GET" && path === "/api/notifications") return json([]);
-    if (method === "GET" && path === "/api/audit-events") return json([{ id: "audit-1", createdAt: "2026-05-28T06:00:00Z", action: "build.create", resourceType: "build", resourceId: "build-pending", actor: "operator" }]);
+    if (method === "GET" && path === "/api/audit-events") return json([{ id: "audit-1", time: "2026-05-28T06:00:00Z", action: "build.create", resourceType: "build", resourceId: "build-pending", actorId: "operator", status: "success", summary: "创建 Preview 构建", requestId: "req-1" }]);
     if (method === "GET" && path === "/api/products/lsap/manifest") return json(product);
     if (method === "GET" && /\/(manifest\/revisions|overlays\/profiles|overlays\/customers)$/.test(path)) return json([]);
     if (method === "POST" && path === "/api/builds") { const payload = JSON.parse(request.postData() || "{}"); state.creates.push(payload); const created = { ...state.builds[0], id: "build-created", customer: payload.customer, finalConfig: payload.configOverrides, buildLock: { ...lock, buildId: "build-created", config: payload.configOverrides } }; state.builds.unshift(created); return json(withRelease(created), 202); }
