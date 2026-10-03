@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
-const product = { id: "lsap", name: "智能定位平台", targets: ["linux", "windows"], targetConfig: { linux: { installDir: "/opt/lsap" }, windows: { installDir: "C:\\Program Files\\LSAP" } }, profiles: ["qa", "prod"], versions: ["latest", "1.0.0"], components: [{ id: "guard", source: { kind: "artifact-repository" } }], workloads: [], config: { ports: { web: 48000 }, customer: { name: "默认客户", license: "community" }, database: { passwordPolicy: "strong" }, modules: { map: true } } };
-const lock = { productId: "lsap", config: product.config, components: [{ id: "guard", version: "1.0.0", uri: "minio://guard/1.0.0.tar.gz", sha256: "abc" }], workloads: [] };
+const product = { id: "lsap", name: "智能定位平台", targets: ["linux", "windows"], targetConfig: { linux: { installDir: "/opt/lsap" }, windows: { installDir: "C:\\Program Files\\LSAP" } }, profiles: ["qa", "prod"], versions: ["latest", "1.0.0"], components: [{ id: "guard", required: true, source: { kind: "artifact-repository", repository: "minio", path: "guard/{{version}}/guard.tar.gz" } }], workloads: [{ id: "location-guard", component: "guard", module: "map", runtime: "docker", docker: { image: "registry.local/guard:{{version}}", ports: ["{{ports.web}}:8080"] } }], config: { ports: { web: 48000 }, customer: { name: "默认客户", license: "community" }, database: { passwordPolicy: "strong" }, modules: { map: true } } };
+const lock = { productId: "lsap", config: product.config, components: [{ id: "guard", version: "1.0.0", uri: "minio://guard/1.0.0.tar.gz", sha256: "abc" }], workloads: product.workloads };
 const builds = [
   { id: "build-pending", productId: "lsap", target: "linux", profile: "qa", version: "latest", customer: "acme", status: "pending_approval", finalConfig: product.config, buildLock: { ...lock, buildId: "build-pending" }, updatedAt: "2026-05-28T06:00:00Z" },
   { id: "build-success", productId: "lsap", target: "windows", profile: "prod", version: "1.0.0", customer: "bank", status: "succeeded", artifactUri: "minio://setup.exe", finalConfig: product.config, buildLock: { ...lock, buildId: "build-success" }, updatedAt: "2026-05-28T06:10:00Z" },
@@ -17,6 +17,7 @@ async function mockApi(page) {
     if (method === "GET" && path === "/api/products") return json([product]);
     if (method === "GET" && path === "/api/builds") return json(state.builds.map(withRelease));
     if (method === "GET" && path === "/api/uploads") return json(Array.from({ length: 16 }, (_, i) => ({ id: `upload-${i}`, fileName: `artifact-${i}.tar.gz`, retentionStatus: i === 0 ? "expired" : "active", downloadPolicy: "platform" })));
+    if (method === "POST" && path === "/api/uploads") return json({ id: "upload-component-1", uri: "artifact://uploads/upload-component-1" }, 201);
     if (method === "GET" && path === "/api/runners") return json([]);
     if (method === "GET" && path === "/api/notifications") return json([]);
     if (method === "GET" && path === "/api/audit-events") return json([{ id: "audit-1", time: "2026-05-28T06:00:00Z", action: "build.create", resourceType: "build", resourceId: "build-pending", actorId: "operator", status: "success", summary: "创建 Preview 构建", requestId: "req-1" }]);
@@ -50,10 +51,25 @@ test("总览和 AntD 菜单可进入构建记录并过滤、打开详情 Drawer"
 
 test("创建向导提交 configOverrides 而非法端口不发请求", async ({ page }, testInfo) => {
   const state = await mockApi(page); await page.goto("/"); await nav(page, "创建构建", testInfo.project.name);
-  const inputs = page.locator("input.ant-input"); await inputs.nth(1).fill("city-bank");
-  await page.getByRole("button", { name: "下一步" }).click(); await inputs.nth(2).fill("49100");
-  await page.getByRole("button", { name: "提交构建申请" }).click();
+  await page.getByPlaceholder("可选，例如 city-bank").fill("city-bank");
+  for (let index = 0; index < 3; index += 1) await page.getByRole("button", { name: "保存并继续" }).click();
+  await page.getByRole("spinbutton").fill("49100");
+  await page.getByRole("button", { name: "保存并继续" }).click();
+  await page.getByRole("button", { name: "发起 Preview 构建" }).click();
   await expect(page.getByText("构建请求已创建，等待审批")).toBeVisible(); expect(state.creates[0]).toMatchObject({ customer: "city-bank", configOverrides: { ports: { web: 49100 } } });
+});
+
+test("组件可切换固定链接和上传来源并实时更新 BuildLock 蓝图", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === "mobile-chrome", "desktop source composition coverage");
+  await mockApi(page); await page.goto("/"); await nav(page, "创建构建", testInfo.project.name);
+  await page.getByRole("button", { name: "保存并继续" }).click();
+  await page.locator("label").filter({ hasText: "固定链接" }).click();
+  await page.getByPlaceholder("https://downloads.example.com/component.tar.gz").fill("https://downloads.example.com/guard.zip");
+  await expect(page.getByLabel("BuildLock 实时蓝图")).toContainText("1 个请求覆盖");
+  await page.locator("label").filter({ hasText: "上传文件" }).click();
+  await page.locator("input[type=file]").setInputFiles({ name: "guard.tar.gz", mimeType: "application/gzip", buffer: Buffer.from("guard") });
+  await expect(page.getByText("文件已上传")).toBeVisible();
+  await expect(page.getByText("已关联 upload-component-1")).toBeVisible();
 });
 
 test("高密度制品表保留过期下载禁用", async ({ page }, testInfo) => {
@@ -100,8 +116,11 @@ test("窗口缩小后导航切换为移动抽屉且无页面横向溢出", async
   await expect(page.getByRole("heading", { name: "创建构建", exact: true })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.emulateMedia({ reducedMotion: "reduce" });
-  await expect(page.getByRole("button", { name: "下一步" })).toBeEnabled();
-  await page.getByRole("button", { name: "下一步" }).click();
+  await expect(page.getByRole("button", { name: "保存并继续" })).toBeEnabled();
+  for (let index = 0; index < 3; index += 1) {
+    await page.getByRole("button", { name: "保存并继续" }).click();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  }
   await expect(page.getByText("Web 端口", { exact: true })).toBeVisible();
 });
 

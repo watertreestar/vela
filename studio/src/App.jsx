@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Alert, Badge, Button, Card, Col, Descriptions, Drawer, Dropdown, Empty, Form,
-  Input, Layout, List, Menu, Modal, Popconfirm, Row, Select, Space, Spin,
-  Table, Tabs, Tag, Tooltip, Typography, Upload, Steps, message,
+  Input, Layout, List, Menu, Modal, Popconfirm, Radio, Row, Select, Space, Spin,
+  Switch, Table, Tabs, Tag, Tooltip, Typography, Upload, Steps, message,
 } from "antd";
 import {
-  AuditOutlined, BellOutlined, BuildOutlined, CloudUploadOutlined, CodeOutlined,
+  ApartmentOutlined, AuditOutlined, BellOutlined, BuildOutlined, CheckCircleOutlined,
+  CloudServerOutlined, CloudUploadOutlined, CodeOutlined, DatabaseOutlined,
   DashboardOutlined, DownloadOutlined, FileTextOutlined, HistoryOutlined,
-  InfoCircleOutlined, QuestionCircleOutlined, SafetyCertificateOutlined,
-  MenuFoldOutlined, MenuUnfoldOutlined, PlusOutlined, RobotOutlined,
+  InboxOutlined, InfoCircleOutlined, LinkOutlined, QuestionCircleOutlined, SafetyCertificateOutlined,
+  MenuFoldOutlined, MenuUnfoldOutlined, PlusOutlined, ReloadOutlined, RobotOutlined,
   SettingOutlined, UploadOutlined, WarningOutlined,
 } from "@ant-design/icons";
 import {
@@ -95,6 +96,25 @@ function parseObject(text, label) {
   return value;
 }
 function buildStatus(build) { const [label, color] = statusMeta[build?.status] || [build?.status || "未知", "default"]; return <Tooltip title={statusDescriptions[build?.status] || "服务端返回的当前构建状态。"}><Tag color={color}>{label}</Tag></Tooltip>; }
+function BuildLifecycle({ build }) {
+  const stages = [
+    ["pending_approval", "待审批", "BuildLock 已生成"],
+    ["queued", "排队", "等待 Runner 领取"],
+    ["running", "执行", "持续回传状态与日志"],
+    ["succeeded", "Preview", "制品已生成"],
+    ["preview_validated", "已验证", "Release 门禁检查"],
+    ["published", "已发布", "Release 可分发"],
+  ];
+  const indexByStatus = Object.fromEntries(stages.map((stage, index) => [stage[0], index]));
+  const exceptional = ["failed", "rejected", "canceled"].includes(build?.status);
+  let current = indexByStatus[build?.status] ?? 0;
+  if (exceptional) {
+    if (build?.status === "rejected") current = 0;
+    else if (build?.runnerId || build?.status === "failed") current = 2;
+    else current = 1;
+  }
+  return <ol className="vela-build-lifecycle" aria-label="构建生命周期">{stages.map(([key, label, detail], index) => { const state = exceptional && index === current ? "error" : index < current ? "done" : index === current ? "current" : "future"; return <li className={`is-${state}`} key={key}><span>{state === "done" ? <CheckCircleOutlined /> : index + 1}</span><div><strong>{label}</strong><small>{state === "error" ? statusMeta[build.status]?.[0] || build.status : detail}</small></div></li>; })}</ol>;
+}
 function releaseGateStatus(build) {
   const summary = build?.releaseCheckSummary || {};
   if (summary.releaseReady || build?.releaseReady) return <Tooltip title="服务端 Release 门禁已通过；发布操作仍需要管理员权限。"><Tag color="success">可发布</Tag></Tooltip>;
@@ -198,7 +218,7 @@ export default function App() {
     if (load && manifest !== savedManifest && !window.confirm("Manifest 有未保存修改，确认丢弃草稿？")) return;
     const target = next.targets?.[0] || "linux";
     const config = next.targetConfig?.[target] || {};
-    setForm((old) => ({ ...old, productId: next.id, target, profile: next.profiles?.[0] || "qa", version: next.versions?.[0] || "latest", installDir: config.installDir || "", webPort: String(next.config?.ports?.web || 48000), serviceVersion: next.versions?.[0] || "latest", customerName: next.config?.customer?.name || "", license: next.config?.customer?.license || "community", passwordPolicy: next.config?.database?.passwordPolicy || "strong", modules: next.config?.modules || {} }));
+    setForm((old) => ({ ...old, productId: next.id, target, profile: next.profiles?.[0] || "qa", version: next.versions?.[0] || "latest", installDir: config.installDir || "", webPort: String(next.config?.ports?.web || 48000), serviceVersion: next.versions?.[0] || "latest", customerName: next.config?.customer?.name || "", license: next.config?.customer?.license || "community", passwordPolicy: next.config?.database?.passwordPolicy || "strong", modules: next.config?.modules || {}, componentOverridesText: "{}" }));
     if (!load) return;
     try {
       const [m, h, profiles, customers] = await Promise.all([getProductManifest(next.id), listProductManifestRevisions(next.id), listProductOverlays(next.id, "profiles"), listProductOverlays(next.id, "customers")]);
@@ -262,10 +282,11 @@ export default function App() {
       });
       if (componentId) {
         const current = parseObject(form.componentOverridesText, "组件覆盖");
-        current[componentId] = { ...(current[componentId] || {}), kind: "manual-upload", uploadId: result.id, uri: result.uri };
+        current[componentId] = { kind: "manual-upload", uploadId: result.id, uri: result.uri };
         setForm((x) => ({ ...x, componentOverridesText: asJson(current) }));
       }
-      await refresh(); notice.success("文件已上传");
+      setUploads((current) => [{ ...result, fileName: result.fileName || file.name }, ...current.filter((item) => item.id !== result.id)]);
+      notice.success("文件已上传");
     } catch (e) { setError(e); }
     return false;
   }
@@ -382,17 +403,104 @@ function Overview({ products, builds, runners, uploads, inspect, setBuildFilter,
     <section className="vela-recent" aria-labelledby="recent-title"><div className="vela-section-heading"><div><Title level={2} id="recent-title">最近动态</Title><Text type="secondary">按最近更新时间排列</Text></div><Button type="link" onClick={() => queue("all")}>查看全部构建</Button></div>{builds.length ? <ul className="vela-build-stream">{builds.slice(0, 6).map((build) => <li key={build.id}><span className={`vela-build-pulse is-${build.status}`} aria-hidden="true" /><button type="button" className="vela-build-identity" onClick={() => inspect(build)} aria-label={`查看构建 ${build.id}`}><strong>{products.find((item) => item.id === build.productId)?.name || build.productId}</strong><span className="vela-build-meta"><span>{build.id}</span><span>{build.target || "—"} / {build.profile || "—"}</span><span>{build.version || "—"}</span></span></button><span className="vela-build-stream-status">{buildStatus(build)}</span><time dateTime={build.updatedAt || ""}>{when(build.updatedAt)}</time></li>)}</ul> : <Empty description="还没有构建记录" image={Empty.PRESENTED_IMAGE_SIMPLE} />}</section>
   </div>;
 }
+function parseDraftObject(text) {
+  try { const value = JSON.parse(text || "{}"); return value && !Array.isArray(value) && typeof value === "object" ? value : {}; }
+  catch { return {}; }
+}
+function resolveWorkloadText(value, form) {
+  return String(value || "")
+    .replaceAll("{{installDir}}", form.installDir || "{installDir}")
+    .replaceAll("{{version}}", form.version || "{version}")
+    .replaceAll("{{profile}}", form.profile || "{profile}")
+    .replaceAll("{{customer.name}}", form.customerName || form.customer || "{customer}")
+    .replaceAll("{{ports.web}}", form.webPort || "{port}");
+}
+function componentSourceLabel(source) {
+  return ({ "artifact-repository": "制品仓库", "manual-upload": "上传文件", "fixed-url": "固定链接", "previous-build": "历史构建" }[source?.kind] || "产品默认");
+}
 function CreateForm({ form, setForm, products, product, selectProduct, upload, create, auth, busy }) {
   const [step, setStep] = useState(0);
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const patch = (key, value) => setForm((x) => ({ ...x, [key]: value }));
+  const [stepError, setStepError] = useState("");
+  const patch = (key, value) => setForm((current) => ({ ...current, [key]: value }));
   const components = product?.components || [];
-  const target = <Card title="构建目标"><div className="vela-form-grid"><Form.Item label={<FieldLabel tip="产品 Manifest 决定可选平台、Profile、组件和默认配置。">产品</FieldLabel>}><Select value={form.productId || undefined} options={products.map((x) => ({ value: x.id, label: x.name || x.id }))} onChange={(id) => selectProduct(products.find((x) => x.id === id))} /></Form.Item><Form.Item label={<FieldLabel tip="目标平台同时决定安装目录、打包工具和 Runner 调度约束。">目标平台</FieldLabel>}><Select value={form.target} options={(product?.targets || []).map((x) => ({ value: x }))} onChange={(v) => patch("target", v)} /></Form.Item><Form.Item label={<FieldLabel tip="Profile overlay 会覆盖目标配置，优先级低于本次请求参数。">Profile</FieldLabel>}><Select value={form.profile} options={(product?.profiles || []).map((x) => ({ value: x }))} onChange={(v) => patch("profile", v)} /></Form.Item><Form.Item label={<FieldLabel tip="填写后会尝试合并同名客户 overlay；留空则不应用客户覆盖。">客户标识</FieldLabel>}><Input placeholder="可选，例如 city-bank" value={form.customer} onChange={(e) => patch("customer", e.target.value)} /></Form.Item><Form.Item label={<FieldLabel tip="Release 发布要求固定版本；latest 可以用于 Preview，但会阻塞 Release 门禁。">构建版本</FieldLabel>} className="is-wide"><Input value={form.version} onChange={(e) => patch("version", e.target.value)} /></Form.Item></div></Card>;
-  const config = <Card title="运行配置"><div className="vela-form-grid"><Form.Item label="安装目录"><Input value={form.installDir} onChange={(e) => patch("installDir", e.target.value)} /></Form.Item><Form.Item label="Web 端口"><Input value={form.webPort} onChange={(e) => patch("webPort", e.target.value)} /></Form.Item><Form.Item label="服务版本"><Input value={form.serviceVersion} onChange={(e) => patch("serviceVersion", e.target.value)} /></Form.Item><Form.Item label="客户名称"><Input value={form.customerName} onChange={(e) => patch("customerName", e.target.value)} /></Form.Item><Form.Item label="启用模块" className="is-wide"><Select mode="multiple" placeholder="沿用产品默认模块" value={Object.keys(form.modules).filter((x) => form.modules[x])} options={Object.keys(product?.config?.modules || {}).map((x) => ({ value: x }))} onChange={(v) => patch("modules", Object.fromEntries(v.map((x) => [x, true])))} /></Form.Item></div></Card>;
-  const component = <Card title="组件来源"><Text type="secondary">只替换本次构建需要变更的组件；其余组件继续使用产品定义中的锁定来源。</Text>{components.length ? <div className="vela-component-list">{components.map((c) => <div className="vela-component-row" key={c.id}><div><Text strong>{c.id}</Text><Text type="secondary">{c.required ? "必需组件" : "可选组件"} / {c.source?.kind || "默认来源"}</Text></div><Upload beforeUpload={(file) => upload(file, c.id)} showUploadList={false}><Button icon={<UploadOutlined />} aria-label={`上传 ${c.id} 组件文件`}>替换文件</Button></Upload></div>)}</div> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="该产品没有可替换组件" />}</Card>;
-  const confirm = <Card title="提交前确认"><Descriptions column={1} size="small"><Descriptions.Item label="产品">{product?.name || form.productId || "未选择"}</Descriptions.Item><Descriptions.Item label="构建目标">{form.target} / {form.profile}</Descriptions.Item><Descriptions.Item label="版本">{form.version || "未填写"}</Descriptions.Item><Descriptions.Item label="安装目录">{form.installDir || "使用产品默认值"}</Descriptions.Item><Descriptions.Item label="组件覆盖">{form.componentOverridesText === "{}" ? "无" : "已配置，将在服务端校验"}</Descriptions.Item></Descriptions><Alert className="vela-inline-alert" type="info" showIcon message="提交后由服务端生成不可变 BuildLock" description="构建会以 pending_approval 状态保存。前端不推导锁定结果，也不会直接创建 Release。" /></Card>;
-  const content = [target, config, component, confirm][step];
-  return <div className="vela-create-workspace"><Form layout="vertical" className="vela-create-form"><ContextNote title="构建始终从 Preview 开始">Release 只能由已验证的 Preview 通过服务端发布操作提升，不能在创建时直接选择。</ContextNote><Steps size="small" current={step} onChange={setStep} items={[{ title: "目标" }, { title: "配置" }, { title: "组件" }, { title: "确认" }]} /><div key={step} className="vela-form-step">{content}</div><div className="vela-step-tools"><Space wrap><Button disabled={step === 0} onClick={() => setStep(step - 1)}>上一步</Button><Button onClick={() => setAdvancedOpen(true)}>高级 JSON</Button></Space><Space wrap>{step < 3 && <Button type="primary" onClick={() => setStep(step + 1)}>下一步</Button>}<GuardedButton auth={auth} permission="build.create" title="提交构建申请" type={step === 3 ? "primary" : "default"} loading={busy === "create"} onClick={create}>提交构建申请</GuardedButton></Space></div><Drawer title="高级构建 JSON" open={advancedOpen} onClose={() => setAdvancedOpen(false)} width="min(560px, 100vw)"><Alert type="warning" showIcon message="高级配置会覆盖表单生成的同名字段" description="不要在变量、覆盖配置或组件 URI 中填写 token、密码、私钥或对象存储凭据。" style={{ marginBottom: 16 }} /><Form.Item label="构建变量 JSON"><Input.TextArea aria-label="构建变量 JSON" rows={8} value={form.variablesText} onChange={(e) => patch("variablesText", e.target.value)} /></Form.Item><Form.Item label="组件覆盖 JSON"><Input.TextArea aria-label="组件覆盖 JSON" rows={10} value={form.componentOverridesText} onChange={(e) => patch("componentOverridesText", e.target.value)} /></Form.Item></Drawer></Form><aside className="vela-create-context" aria-label="当前构建配置"><div className="vela-context-heading"><Title level={2}>本次构建</Title><Tag>{step + 1} / 4</Tag></div><Descriptions column={1} size="small"><Descriptions.Item label="产品">{product?.name || form.productId || "未选择"}</Descriptions.Item><Descriptions.Item label="目标">{form.target} / {form.profile}</Descriptions.Item><Descriptions.Item label="版本">{form.version || "未填写"}</Descriptions.Item><Descriptions.Item label="发布通道"><Tooltip title="创建接口只接受 preview；发布需在 Preview 验证通过后由管理员执行。"><Tag color="blue">Preview</Tag></Tooltip></Descriptions.Item></Descriptions><div className="vela-create-guidance"><Text strong>{["选择打包目标", "检查运行配置", "按需替换组件", "准备提交审批"][step]}</Text><p>{["产品定义决定可用目标与 Profile。构建将使用所选产品的默认配置。", "配置仅作用于本次构建，不会更改产品 Manifest。Web 端口范围为 1–65535。", "上传组件后会写入当前构建的组件覆盖；未覆盖的组件沿用产品定义。", "提交后进入审批队列。审批与发布门禁仍由服务端校验。"][step]}</p></div></aside></div>;
+  const workloads = product?.workloads || [];
+  const overrides = useMemo(() => parseDraftObject(form.componentOverridesText), [form.componentOverridesText]);
+  const enabledWorkloads = workloads.filter((workload) => workload.enabled !== false && form.modules?.[workload.module] !== false);
+  const overrideCount = Object.keys(overrides).length;
+  const targetReady = Boolean(form.productId && form.target && form.profile && form.version);
+  const sourceReady = (component) => {
+    const source = overrides[component.id] || component.source || {};
+    if (!component.required) return true;
+    if (source.kind === "manual-upload") return Boolean(source.uploadId || source.uri);
+    if (source.kind === "fixed-url") return Boolean(source.url || source.uri);
+    if (source.kind === "previous-build") return Boolean(source.uri);
+    if (source.kind === "artifact-repository") return Boolean(source.path || source.uri);
+    return false;
+  };
+  const componentsReady = components.every(sourceReady);
+  const workloadsReady = workloads.length === 0 || enabledWorkloads.length > 0;
+  const port = Number(form.webPort);
+  const runtimeReady = Boolean(form.installDir && Number.isInteger(port) && port > 0 && port <= 65535);
+  const stepReady = [targetReady, componentsReady, workloadsReady, runtimeReady, targetReady && componentsReady && workloadsReady && runtimeReady][step];
+  const completion = [targetReady, componentsReady, workloadsReady, runtimeReady].filter(Boolean).length * 25;
+  const sourceModes = [
+    { label: "产品默认", value: "manifest" },
+    { label: "上传文件", value: "manual-upload" },
+    { label: "固定链接", value: "fixed-url" },
+    { label: "仓库路径", value: "artifact-repository" },
+    { label: "历史构建", value: "previous-build" },
+  ];
+  const updateOverride = (id, next) => {
+    const value = { ...overrides };
+    if (!next) delete value[id]; else value[id] = next;
+    patch("componentOverridesText", asJson(value));
+  };
+  const changeSourceMode = (component, kind) => {
+    if (kind === "manifest") return updateOverride(component.id, null);
+    const previous = overrides[component.id];
+    if (previous?.kind === kind) return;
+    const base = component.source?.kind === kind ? component.source : {};
+    updateOverride(component.id, { ...base, kind });
+  };
+  const changeTarget = (target) => {
+    const targetConfig = product?.targetConfig?.[target] || {};
+    setForm((current) => ({ ...current, target, installDir: targetConfig.installDir || current.installDir }));
+  };
+  const toggleModule = (module, enabled) => patch("modules", { ...form.modules, [module]: enabled });
+  const nextStep = () => {
+    if (!stepReady) {
+      setStepError(["请选择完整的产品、目标、Profile 和版本。", "必需组件还没有可解析的来源。", "至少需要启用一个可执行 Workload。", "请填写安装目录，并使用 1–65535 范围内的 Web 端口。", "构建配置还不完整。"][step]);
+      return;
+    }
+    setStepError(""); setStep((current) => Math.min(current + 1, 4));
+  };
+  const sourceEditor = (component) => {
+    const override = overrides[component.id];
+    const source = override || component.source || {};
+    const mode = override ? override.kind : "manifest";
+    const setSource = (next) => updateOverride(component.id, { ...source, ...next });
+    if (mode === "manual-upload") return <Upload.Dragger className="vela-component-upload" accept={(source.accept || component.source?.accept || []).join(",")} showUploadList={false} beforeUpload={async (file) => { updateOverride(component.id, { kind: "manual-upload" }); return upload(file, component.id); }}><InboxOutlined /><p>拖入文件或点击上传</p><Text type="secondary">{source.uploadId ? `已关联 ${source.uploadId}` : "上传后写入 uploadId 与受控制品 URI"}</Text></Upload.Dragger>;
+    if (mode === "fixed-url") return <Form.Item label={<FieldLabel tip="后端会下载该 URL、计算 SHA256 并写入 BuildLock。不要把带凭据的临时签名放入长期配置。">下载链接</FieldLabel>}><Input prefix={<LinkOutlined />} placeholder="https://downloads.example.com/component.tar.gz" value={source.url || ""} onChange={(event) => setSource({ kind: "fixed-url", url: event.target.value })} /></Form.Item>;
+    if (mode === "artifact-repository") return <div className="vela-source-grid"><Form.Item label="仓库"><Input prefix={<DatabaseOutlined />} placeholder="gitlab 或 minio" value={source.repository || ""} onChange={(event) => setSource({ kind: "artifact-repository", repository: event.target.value })} /></Form.Item><Form.Item label="精确包路径"><Input placeholder="artifact/Publish/app/main/{{version}}/app.tar.gz" value={source.path || ""} onChange={(event) => setSource({ kind: "artifact-repository", path: event.target.value })} /></Form.Item></div>;
+    if (mode === "previous-build") return <Form.Item label={<FieldLabel tip="填写已批准的历史构建制品 URI；服务端仍会重新解析和校验。">历史制品 URI</FieldLabel>}><Input prefix={<HistoryOutlined />} placeholder="artifact://builds/build-123/output" value={source.uri || ""} onChange={(event) => setSource({ kind: "previous-build", uri: event.target.value })} /></Form.Item>;
+    return <div className="vela-source-default"><CheckCircleOutlined /><div><Text strong>{componentSourceLabel(component.source)}</Text><Text type="secondary">{component.source?.path || component.source?.url || component.source?.uri || "由产品 Manifest 在服务端解析"}</Text></div></div>;
+  };
+  const targetPanel = <section className="vela-create-panel"><div className="vela-panel-heading"><div><Title level={2}>选择交付目标</Title><Text type="secondary">产品定义决定平台、Profile、组件目录与打包模板。</Text></div><Tag color="blue">Preview</Tag></div><Form.Item label={<FieldLabel tip="切换产品会重新加载 Manifest 默认值，并清理不兼容的组件覆盖。">产品</FieldLabel>}><Select size="large" value={form.productId || undefined} placeholder="选择产品定义" options={products.map((item) => ({ value: item.id, label: item.name || item.id, title: item.description }))} onChange={(id) => selectProduct(products.find((item) => item.id === id))} /></Form.Item>{product && <div className="vela-product-choice"><div><Text strong>{product.name || product.id}</Text><Text type="secondary">{product.description || `${components.length} 个组件，${workloads.length} 个 Workload`}</Text></div><span>{components.length} 组件 / {workloads.length} Workload</span></div>}<div className="vela-form-grid"><Form.Item className="is-wide" label={<FieldLabel tip="目标平台会改变安装目录、模板和 Runner 调度约束。">目标平台</FieldLabel>}><Radio.Group className="vela-target-choice" optionType="button" buttonStyle="solid" value={form.target} onChange={(event) => changeTarget(event.target.value)} options={(product?.targets || []).map((value) => ({ value, label: value === "windows" ? "Windows Installer" : "Linux Package" }))} /></Form.Item><Form.Item label={<FieldLabel tip="Profile overlay 在 target 之后合并，本次请求参数仍拥有更高优先级。">Profile</FieldLabel>}><Select value={form.profile} options={(product?.profiles || []).map((value) => ({ value }))} onChange={(value) => patch("profile", value)} /></Form.Item><Form.Item label={<FieldLabel tip="填写后会合并同名客户 overlay；留空表示不应用客户覆盖。">客户标识</FieldLabel>}><Input placeholder="可选，例如 city-bank" value={form.customer} onChange={(event) => patch("customer", event.target.value)} /></Form.Item><Form.Item className="is-wide" label={<FieldLabel tip="latest 可用于 Preview，但 Release 门禁要求固定版本。">构建版本</FieldLabel>}><Input list="vela-version-options" value={form.version} onChange={(event) => patch("version", event.target.value)} placeholder="例如 1.4.2 或 latest" /><datalist id="vela-version-options">{(product?.versions || []).map((value) => <option key={value} value={value} />)}</datalist></Form.Item></div></section>;
+  const componentsPanel = <section className="vela-create-panel"><div className="vela-panel-heading"><div><Title level={2}>选择组件来源</Title><Text type="secondary">默认来源不产生 override；只为本次构建替换的组件写入 ComponentSource。</Text></div><Tag>{overrideCount} 个覆盖</Tag></div>{components.length ? <div className="vela-component-studio">{components.map((component) => { const source = overrides[component.id] || component.source || {}; const mode = overrides[component.id] ? source.kind : "manifest"; return <article className={`vela-component-editor ${sourceReady(component) ? "is-ready" : "has-error"}`} key={component.id}><div className="vela-component-heading"><div className="vela-component-identity"><span><CloudServerOutlined /></span><div><Space size={6}><Text strong>{component.id}</Text>{component.required ? <Tag color="orange">必需</Tag> : <Tag>可选</Tag>}</Space><Text type="secondary">{component.type || "artifact"} / 当前：{mode === "manifest" ? componentSourceLabel(component.source) : componentSourceLabel(source)}</Text></div></div><Radio.Group size="small" value={mode} onChange={(event) => changeSourceMode(component, event.target.value)} options={sourceModes} optionType="button" /></div><div className="vela-component-source">{sourceEditor(component)}</div></article>; })}</div> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="该产品没有外部组件；可直接进入 Workload 配置" />}</section>;
+  const workloadsPanel = <section className="vela-create-panel"><div className="vela-panel-heading"><div><Title level={2}>编排 Workload</Title><Text type="secondary">Workload 结构来自 Manifest；模块开关决定哪些服务进入最终 BuildLock。</Text></div><Tag color={workloadsReady ? "success" : "warning"}>{enabledWorkloads.length} / {workloads.length} 启用</Tag></div><ContextNote title="这里配置的是解析结果">创建接口没有 workloadOverrides。页面通过模块、变量和运行配置预览服务端将解析出的 docker/systemd 工作负载。</ContextNote>{workloads.length ? <div className="vela-workload-map">{workloads.map((workload, index) => { const enabled = workload.enabled !== false && form.modules?.[workload.module] !== false; const runtime = workload.runtime === "systemd" ? workload.systemd || {} : workload.docker || {}; const primary = workload.runtime === "systemd" ? resolveWorkloadText(runtime.execStart, form) : resolveWorkloadText(runtime.image, form); const secondary = workload.runtime === "systemd" ? runtime.unitName : (runtime.ports || []).map((value) => resolveWorkloadText(value, form)).join(", "); return <article className={`vela-workload-node ${enabled ? "is-enabled" : "is-disabled"}`} key={workload.id}><span className="vela-workload-index">{index + 1}</span><div className="vela-workload-copy"><div><Space size={7}><Text strong>{workload.id}</Text><Tag color={workload.runtime === "docker" ? "cyan" : "purple"}>{workload.runtime}</Tag></Space><Text type="secondary">组件 {workload.component} / 模块 {workload.module}</Text></div><code>{primary || "运行入口由服务端模板生成"}</code>{secondary && <Text type="secondary">{secondary}</Text>}</div><div className="vela-workload-switch"><Switch checked={enabled} onChange={(checked) => toggleModule(workload.module, checked)} aria-label={`${enabled ? "停用" : "启用"} ${workload.id}`} /><Text type="secondary">{enabled ? "进入 BuildLock" : "本次不部署"}</Text></div></article>; })}</div> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Manifest 没有 Workload；构建只生成安装制品" />}</section>;
+  const runtimePanel = <section className="vela-create-panel"><div className="vela-panel-heading"><div><Title level={2}>运行与安装参数</Title><Text type="secondary">这些值进入 configOverrides，并参与 Workload 模板渲染。</Text></div><Button onClick={() => setAdvancedOpen(true)}>高级变量</Button></div><div className="vela-form-grid"><Form.Item label={<FieldLabel tip="随目标平台自动切换，可在本次构建覆盖。">安装目录</FieldLabel>}><Input value={form.installDir} onChange={(event) => patch("installDir", event.target.value)} /></Form.Item><Form.Item label={<FieldLabel tip="进入 ports.web，并替换 Workload 中的 {{ports.web}}。">Web 端口</FieldLabel>}><Input type="number" min={1} max={65535} value={form.webPort} onChange={(event) => patch("webPort", event.target.value)} /></Form.Item><Form.Item label="服务版本"><Input value={form.serviceVersion} onChange={(event) => patch("serviceVersion", event.target.value)} /></Form.Item><Form.Item label="客户显示名称"><Input value={form.customerName} onChange={(event) => patch("customerName", event.target.value)} /></Form.Item><Form.Item label="许可类型"><Select value={form.license} onChange={(value) => patch("license", value)} options={[{ value: "community" }, { value: "enterprise" }, { value: "trial" }]} /></Form.Item><Form.Item label={<FieldLabel tip="这里只提交策略名称，密码和 secret value 不得进入构建请求。">密码策略</FieldLabel>}><Select value={form.passwordPolicy} onChange={(value) => patch("passwordPolicy", value)} options={[{ value: "strong" }, { value: "generated" }, { value: "external-secret" }]} /></Form.Item></div><div className="vela-runtime-preview"><div><Text type="secondary">安装根目录</Text><code>{form.installDir || "未设置"}</code></div><div><Text type="secondary">启用服务</Text><strong>{enabledWorkloads.length}</strong></div><div><Text type="secondary">对外端口</Text><strong>{form.webPort || "—"}</strong></div></div></section>;
+  const confirmPanel = <section className="vela-create-panel"><div className="vela-panel-heading"><div><Title level={2}>检查并发起构建</Title><Text type="secondary">服务端会重新解析全部来源，生成不可变 BuildLock，再保存为待审批构建。</Text></div><Tag color="gold">pending_approval</Tag></div><div className="vela-review-grid"><div><Text type="secondary">交付目标</Text><strong>{product?.name || form.productId}</strong><span>{form.target} / {form.profile} / {form.version}</span></div><div><Text type="secondary">组件来源</Text><strong>{components.length} 个组件</strong><span>{overrideCount ? `${overrideCount} 个使用本次覆盖` : "全部使用 Manifest 默认来源"}</span></div><div><Text type="secondary">Workload</Text><strong>{enabledWorkloads.length} 个启用</strong><span>{enabledWorkloads.map((item) => item.id).join("、") || "无运行服务"}</span></div><div><Text type="secondary">运行参数</Text><strong>{form.installDir}</strong><span>Web {form.webPort} / {form.license}</span></div></div><div className="vela-preflight-list">{[[targetReady, "目标与版本完整"], [componentsReady, "必需组件来源可解析"], [workloadsReady, "Workload 编排有效"], [runtimeReady, "运行参数有效"]].map(([ok, label]) => <div className={ok ? "is-pass" : "is-blocked"} key={label}>{ok ? <CheckCircleOutlined /> : <WarningOutlined />}<span>{label}</span><Tag color={ok ? "success" : "warning"}>{ok ? "通过" : "需处理"}</Tag></div>)}</div><Alert className="vela-inline-alert" type="info" showIcon message="提交不会立即执行" description="构建先进入 pending_approval。审批后才会调度 Runner；成功后仍需验证 Preview，Release 发布由服务端门禁裁决。" /></section>;
+  const panels = [targetPanel, componentsPanel, workloadsPanel, runtimePanel, confirmPanel];
+  const stepItems = [{ title: "目标" }, { title: "组件" }, { title: "Workload" }, { title: "运行参数" }, { title: "发起" }];
+  const guidance = [
+    ["锁定交付坐标", "选择产品、目标、Profile 与版本，右侧蓝图会立即更新。"],
+    ["解析组件来源", "保留默认来源，或使用上传、固定链接、仓库路径与历史构建制品。"],
+    ["形成服务拓扑", "模块开关直接影响进入 BuildLock 的 Workload；运行定义仍以 Manifest 为准。"],
+    ["渲染运行模板", "安装目录、端口与客户配置会替换 docker/systemd 模板中的变量。"],
+    ["等待服务端锁定", "发起后进入审批队列；页面不会乐观伪造状态或发布结果。"],
+  ][step];
+  return <div className="vela-create-workspace"><Form layout="vertical" className="vela-create-form"><ContextNote title="从构建输入到可复现蓝图">选择会实时组成组件、Workload 与运行参数预览；最终结果仍以服务端生成的 BuildLock 为准。</ContextNote><Steps className="vela-create-steps" size="small" current={step} items={stepItems} onChange={(next) => { if (next < step) { setStepError(""); setStep(next); } }} /><div key={step} className="vela-form-step">{panels[step]}</div>{stepError && <Alert className="vela-inline-alert" type="warning" showIcon message="当前步骤还不能继续" description={stepError} />}<div className="vela-step-tools"><Space wrap><Button disabled={step === 0} onClick={() => { setStepError(""); setStep(step - 1); }}>上一步</Button><Button onClick={() => setAdvancedOpen(true)}>查看高级 JSON</Button></Space><Space wrap>{step < 4 && <Button type="primary" onClick={nextStep}>保存并继续</Button>}{step === 4 && <GuardedButton auth={auth} permission="build.create" title="发起 Preview 构建" type="primary" loading={busy === "create"} disabled={!stepReady} onClick={create}>发起 Preview 构建</GuardedButton>}</Space></div><Drawer title="高级构建输入" open={advancedOpen} onClose={() => setAdvancedOpen(false)} width="min(620px, 100vw)"><Alert type="warning" showIcon message="高级输入会参与服务端合并" description="优先级为 request overrides ＞ variables ＞ customer ＞ profile ＞ target ＞ base。不要填写 token、密码、私钥或对象存储凭据。" style={{ marginBottom: 16 }} /><Form.Item label={<FieldLabel tip="可用于 Manifest 模板解析；必须是 JSON 对象。">构建变量 JSON</FieldLabel>}><Input.TextArea className="vela-json-editor" aria-label="构建变量 JSON" rows={9} value={form.variablesText} onChange={(event) => patch("variablesText", event.target.value)} /></Form.Item><Form.Item label={<FieldLabel tip="每个键是组件 ID，值必须符合 OpenAPI ComponentSource。">组件覆盖 JSON</FieldLabel>}><Input.TextArea className="vela-json-editor" aria-label="组件覆盖 JSON" rows={13} value={form.componentOverridesText} onChange={(event) => patch("componentOverridesText", event.target.value)} /></Form.Item></Drawer></Form><aside className="vela-create-context vela-build-blueprint" aria-label="BuildLock 实时蓝图"><div className="vela-context-heading"><div><Title level={2}>BuildLock 蓝图</Title><Text type="secondary">提交前预览</Text></div><Tag color={completion === 100 ? "success" : "processing"}>{completion}%</Tag></div><div className="vela-blueprint-progress"><span style={{ width: `${completion}%` }} /></div><div className="vela-blueprint-target"><span className="vela-blueprint-icon"><ApartmentOutlined /></span><div><Text strong>{product?.name || "等待选择产品"}</Text><Text type="secondary">{form.target || "target"} / {form.profile || "profile"} / {form.version || "version"}</Text></div></div><div className="vela-blueprint-flow"><div><span><DatabaseOutlined /></span><div><Text strong>{components.length} 个组件</Text><Text type="secondary">{overrideCount} 个请求覆盖</Text></div></div><div><span><BuildOutlined /></span><div><Text strong>{enabledWorkloads.length} 个 Workload</Text><Text type="secondary">{workloads.filter((item) => form.modules?.[item.module] === false).length} 个已停用</Text></div></div><div><span><CloudServerOutlined /></span><div><Text strong>{form.target === "windows" ? "Windows Runner" : "Linux Runner"}</Text><Text type="secondary">审批后由调度器分配</Text></div></div></div>{enabledWorkloads.length > 0 && <div className="vela-blueprint-workloads"><Text type="secondary">将进入锁定配置</Text>{enabledWorkloads.slice(0, 5).map((workload) => <div key={workload.id}><span className={`is-${workload.runtime}`} /><strong>{workload.id}</strong><small>{workload.runtime}</small></div>)}</div>}<div className="vela-create-guidance"><Text strong>{guidance[0]}</Text><p>{guidance[1]}</p></div><ol className="vela-build-lifecycle-preview"><li className="is-current"><span>1</span><div><strong>待审批</strong><small>BuildLock 已生成</small></div></li><li><span>2</span><div><strong>排队与执行</strong><small>Runner 回传状态和日志</small></div></li><li><span>3</span><div><strong>验证 Preview</strong><small>安装与运行验收</small></div></li><li><span>4</span><div><strong>发布 Release</strong><small>固定版本与门禁检查</small></div></li></ol></aside></div>;
 }
 function BuildTable({ builds, inspect, runAction, download, auth, allBuilds, buildFilter, setBuildFilter, busy, compact = false }) {
   const filterOptions = [
@@ -485,20 +593,33 @@ function LogsWorkspace({ builds }) {
   const [selectedId, setSelectedId] = useState(builds[0]?.id || "");
   const [data, setData] = useState({ logs: [], lock: null, release: null, reproducibility: null });
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [updatedAt, setUpdatedAt] = useState("");
   const [loadError, setLoadError] = useState("");
   const build = builds.find((item) => item.id === selectedId) || builds[0];
+  const live = ["queued", "running"].includes(build?.status);
+  const loadContext = async (buildId, background = false) => {
+    if (!buildId) return;
+    if (background) setRefreshing(true); else setLoading(true);
+    setLoadError("");
+    try {
+      const [logs, lock, release, reproducibility] = await Promise.all([getBuildLogs(buildId), getBuildLock(buildId), getBuildReleaseCheck(buildId), getBuildReproducibilityReport(buildId)]);
+      setData({ logs, lock, release, reproducibility });
+      setUpdatedAt(new Date().toISOString());
+    } catch (error) { setLoadError(error); }
+    finally { if (background) setRefreshing(false); else setLoading(false); }
+  };
   useEffect(() => {
     if (!build?.id) return;
-    let active = true;
-    setLoading(true); setLoadError("");
-    Promise.all([getBuildLogs(build.id), getBuildLock(build.id), getBuildReleaseCheck(build.id), getBuildReproducibilityReport(build.id)])
-      .then(([logs, lock, release, reproducibility]) => { if (active) setData({ logs, lock, release, reproducibility }); })
-      .catch((error) => { if (active) setLoadError(error); })
-      .finally(() => { if (active) setLoading(false); });
-    return () => { active = false; };
+    loadContext(build.id);
   }, [build?.id]);
+  useEffect(() => {
+    if (!build?.id || !live) return undefined;
+    const timer = window.setInterval(() => loadContext(build.id, true), 5000);
+    return () => window.clearInterval(timer);
+  }, [build?.id, live]);
   if (!builds.length) return <Empty description="还没有构建，创建构建后可在这里查看日志与锁定配置" />;
-  return <div className="vela-logs-workspace"><aside className="vela-log-builds"><div><Text strong>选择构建</Text><Text type="secondary">{builds.length} 个构建记录</Text></div><Select value={build?.id} onChange={setSelectedId} options={builds.map((item) => ({ value: item.id, label: `${item.productId} / ${item.id}` }))} /><List dataSource={builds.slice(0, 10)} renderItem={(item) => <List.Item className={item.id === build?.id ? "is-active" : ""}><button type="button" onClick={() => setSelectedId(item.id)}><span>{buildStatus(item)}</span><strong>{item.id}</strong><small>{item.target || "—"} / {item.profile || "—"}</small></button></List.Item>} /></aside><main className="vela-log-main"><div className="vela-log-heading"><div><Space>{buildStatus(build)}<Title level={2}>{build.id}</Title></Space><Text type="secondary">{build.productId} / {build.target || "—"} / {build.profile || "—"} / {build.version || "—"}</Text></div><Button icon={<DownloadOutlined />} onClick={async () => downloadJson(await exportBuildReleaseEvidenceArchive(build.id), `${build.id}-evidence.json`)}>导出证据</Button></div>{loadError && <ErrorBanner error={loadError} onClose={() => setLoadError("")} />}{loading ? <div className="vela-loading"><Spin /><Text type="secondary">加载构建上下文</Text></div> : <LogPanel build={build} data={data} />}</main></div>;
+  return <div className="vela-logs-workspace"><aside className="vela-log-builds"><div><Text strong>选择构建</Text><Text type="secondary">{builds.length} 个构建记录</Text></div><Select value={build?.id} onChange={setSelectedId} options={builds.map((item) => ({ value: item.id, label: `${item.productId} / ${item.id}` }))} /><List dataSource={builds.slice(0, 10)} renderItem={(item) => <List.Item className={item.id === build?.id ? "is-active" : ""}><button type="button" onClick={() => setSelectedId(item.id)}><span>{buildStatus(item)}</span><strong>{item.id}</strong><small>{item.target || "—"} / {item.profile || "—"}</small></button></List.Item>} /></aside><main className="vela-log-main"><div className="vela-log-heading"><div><Space>{buildStatus(build)}<Title level={2}>{build.id}</Title></Space><Text type="secondary">{build.productId} / {build.target || "—"} / {build.profile || "—"} / {build.version || "—"}</Text><div className="vela-log-freshness" aria-live="polite">{live && <Tag color="processing">运行中每 5 秒刷新</Tag>}<Text type="secondary">{updatedAt ? `上下文更新于 ${when(updatedAt)}` : "正在读取构建上下文"}</Text></div></div><Space wrap><Button icon={<ReloadOutlined />} loading={refreshing} onClick={() => loadContext(build.id, true)}>刷新上下文</Button><Button icon={<DownloadOutlined />} onClick={async () => downloadJson(await exportBuildReleaseEvidenceArchive(build.id), `${build.id}-evidence.json`)}>导出证据</Button></Space></div>{loadError && <ErrorBanner error={loadError} onClose={() => setLoadError("")} />}{loading ? <div className="vela-loading"><Spin /><Text type="secondary">加载构建上下文</Text></div> : <LogPanel build={build} data={data} />}</main></div>;
 }
 function LogPanel({ build, data }) {
   const logs = Array.isArray(data.logs) ? data.logs : data.logs?.items || [];
@@ -524,5 +645,5 @@ function BuildDrawer({ build, data, open, onClose, onDownload }) {
     label: item.stage === "release" ? "Release 门禁" : "Preview 门禁",
     children: <div className="vela-gate-row"><Tag color={item.status === "blocked" ? "error" : "success"}>{item.status === "blocked" ? "阻塞" : "通过"}</Tag><div><Text strong>{item.title}</Text><Text type="secondary">{item.reason || "检查通过"}</Text></div></div>,
   }));
-  return <Drawer title="构建详情" width="min(820px, 100vw)" open={open} onClose={onClose} extra={build && <Button icon={<DownloadOutlined />} disabled={!build.downloadUrl && !build.artifactUri} onClick={() => onDownload(build)}>下载制品</Button>}>{build && <><section className="vela-drawer-summary"><div><Space>{buildStatus(build)}<Title level={2}>{build.id}</Title></Space><Text type="secondary">{build.productId} / {build.version || "—"}</Text></div><Descriptions column={2} size="small"><Descriptions.Item label="构建 ID">{build.id}</Descriptions.Item><Descriptions.Item label="目标">{build.target} / {build.profile}</Descriptions.Item><Descriptions.Item label="Runner">{build.runnerId || "尚未分配"}</Descriptions.Item><Descriptions.Item label="更新时间">{when(build.updatedAt)}</Descriptions.Item></Descriptions><ContextNote title="详情以 BuildLock 为准" tone="secure">构建创建后，锁定配置不会被之后的 Manifest、Profile 或客户覆盖修改。界面中的最终配置用于阅读，BuildLock 才是复现依据。</ContextNote></section><Tabs className="vela-detail-tabs" items={[{ key: "logs", label: "日志", children: <LogPanel build={build} data={data} /> }, { key: "release", label: releaseReady ? "发布门禁（通过）" : "发布门禁", children: <div><ContextNote title="门禁由服务端裁决">每个 checks[] 项包含稳定 id、stage 与 pass/blocked 状态；前端只解释结果，不自行推导发布权限。</ContextNote>{releaseItems.length ? <div className="vela-gate-list">{releaseItems.map((item) => <div key={item.key}>{item.children}</div>)}</div> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="服务端尚未返回门禁检查项" />}</div> }, { key: "components", label: "组件锁定", children: <Table size="small" rowKey={(item) => item.id} dataSource={data.lock?.components || []} pagination={false} columns={[{ title: "组件", dataIndex: "id" }, { title: "版本", dataIndex: "version" }, { title: "URI", dataIndex: "uri", render: (v) => <code>{v || "—"}</code> }, { title: "SHA256", dataIndex: "sha256", render: (v) => <code>{v || "—"}</code> }]} /> }, { key: "workloads", label: "工作负载", children: <pre className="vela-code">{asJson(data.lock?.workloads || [])}</pre> }, { key: "config", label: "最终配置", children: <pre className="vela-code">{asJson(build.finalConfig || data.lock?.config || {})}</pre> }, { key: "lock", label: "构建锁", children: <div><ContextNote title="不可变构建输入" tone="secure">下载、复现和 Release 证据都应关联这个 BuildLock，而不是读取当前产品配置。</ContextNote><pre className="vela-code">{asJson(data.lock)}</pre></div> }, { key: "repro", label: "可复现报告", children: <pre className="vela-code">{asJson(data.reproducibility)}</pre> }, { key: "evidence", label: "证据", children: <div className="vela-evidence-action"><Text>导出包含门禁、锁定配置和可复现报告的 Release 证据。</Text><Button type="primary" onClick={() => exportBuildReleaseEvidenceArchive(build.id).then((value) => downloadJson(value, `${build.id}-evidence.json`))}>导出 Release 证据</Button></div> }]} /></>}</Drawer>;
+  return <Drawer title="构建详情" width="min(900px, 100vw)" open={open} onClose={onClose} extra={build && <Button icon={<DownloadOutlined />} disabled={!build.downloadUrl && !build.artifactUri} onClick={() => onDownload(build)}>下载制品</Button>}>{build && <><section className="vela-drawer-summary"><div><Space>{buildStatus(build)}<Title level={2}>{build.id}</Title></Space><Text type="secondary">{build.productId} / {build.version || "—"}</Text></div><Descriptions column={2} size="small"><Descriptions.Item label="构建 ID">{build.id}</Descriptions.Item><Descriptions.Item label="目标">{build.target} / {build.profile}</Descriptions.Item><Descriptions.Item label="Runner">{build.runnerId || "尚未分配"}</Descriptions.Item><Descriptions.Item label="更新时间">{when(build.updatedAt)}</Descriptions.Item><Descriptions.Item label="执行尝试">第 {Number(build.attempt || 0) + 1} 次</Descriptions.Item><Descriptions.Item label="Nomad Job">{build.nomadJobId || "尚未调度"}</Descriptions.Item></Descriptions><BuildLifecycle build={build} /><ContextNote title="详情以 BuildLock 为准" tone="secure">构建创建后，锁定配置不会被之后的 Manifest、Profile 或客户覆盖修改。界面中的最终配置用于阅读，BuildLock 才是复现依据。</ContextNote></section><Tabs className="vela-detail-tabs" items={[{ key: "logs", label: "日志", children: <LogPanel build={build} data={data} /> }, { key: "release", label: releaseReady ? "发布门禁（通过）" : "发布门禁", children: <div><ContextNote title="门禁由服务端裁决">每个 checks[] 项包含稳定 id、stage 与 pass/blocked 状态；前端只解释结果，不自行推导发布权限。</ContextNote>{releaseItems.length ? <div className="vela-gate-list">{releaseItems.map((item) => <div key={item.key}>{item.children}</div>)}</div> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="服务端尚未返回门禁检查项" />}</div> }, { key: "components", label: "组件锁定", children: <Table size="small" rowKey={(item) => item.id} dataSource={data.lock?.components || []} pagination={false} columns={[{ title: "组件", dataIndex: "id" }, { title: "版本", dataIndex: "version" }, { title: "URI", dataIndex: "uri", render: (v) => <code>{v || "—"}</code> }, { title: "SHA256", dataIndex: "sha256", render: (v) => <code>{v || "—"}</code> }]} /> }, { key: "workloads", label: `工作负载 ${data.lock?.workloads?.length || 0}`, children: <div className="vela-locked-workloads">{(data.lock?.workloads || []).map((workload) => <div key={workload.id}><Tag color={workload.enabled === false ? "default" : workload.runtime === "docker" ? "cyan" : "purple"}>{workload.runtime}</Tag><div><Text strong>{workload.id}</Text><Text type="secondary">{workload.component} / {workload.module} / {workload.enabled === false ? "未启用" : "已锁定"}</Text></div></div>)}</div> }, { key: "config", label: "最终配置", children: <pre className="vela-code">{asJson(build.finalConfig || data.lock?.config || {})}</pre> }, { key: "lock", label: "构建锁", children: <div><ContextNote title="不可变构建输入" tone="secure">下载、复现和 Release 证据都应关联这个 BuildLock，而不是读取当前产品配置。</ContextNote><pre className="vela-code">{asJson(data.lock)}</pre></div> }, { key: "repro", label: "可复现报告", children: <pre className="vela-code">{asJson(data.reproducibility)}</pre> }, { key: "evidence", label: "证据", children: <div className="vela-evidence-action"><Text>导出包含门禁、锁定配置和可复现报告的 Release 证据。</Text><Button type="primary" onClick={() => exportBuildReleaseEvidenceArchive(build.id).then((value) => downloadJson(value, `${build.id}-evidence.json`))}>导出 Release 证据</Button></div> }]} /></>}</Drawer>;
 }
