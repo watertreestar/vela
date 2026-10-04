@@ -1,10 +1,10 @@
 .agent-copilot-root .ant-drawer-content {
-  background: #f8fafc;
+  background: #f7f7f8;
 }
 
 .agent-copilot-root .ant-drawer-header {
   padding: 18px 20px;
-  border-bottom: 1px solid #e2e8f0;
+  border-bottom: 1px solid #d9d9dc;
   background: #ffffff;
 }
 
@@ -17,7 +17,7 @@
 
 .agent-copilot-root .ant-drawer-footer {
   padding: 12px 16px 16px;
-  border-top: 1px solid #e2e8f0;
+  border-top: 1px solid #d9d9dc;
   background: #ffffff;
 }
 
@@ -25,16 +25,22 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  color: #172554;
+  color: #202124;
 }
 
 .agent-copilot__context {
+  display: grid;
+  gap: 9px;
   margin-bottom: 12px;
   padding: 9px 12px;
-  border: 1px solid #dbeafe;
-  border-radius: 8px;
-  background: #eff6ff;
+  border: 1px solid #efc9a7;
+  border-radius: 5px;
+  background: #fff8f1;
 }
+
+.agent-copilot__context > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.agent-copilot__context-details { display: flex; flex-wrap: wrap; gap: 6px 12px; border-top: 1px solid #f1d7c0; color: #6b5748; font-size: 11px; padding-top: 8px; }
+.agent-copilot__context-details span + span::before { color: #c7a98f; content: "·"; margin-right: 12px; }
 
 .agent-copilot__mode-note,
 .agent-copilot__notice {
@@ -66,6 +72,9 @@
   gap: 6px;
 }
 
+.agent-copilot__starters { display: grid; gap: 7px; margin-top: 12px; }
+.agent-copilot__starters .ant-btn { height: auto; min-height: 30px; white-space: normal; text-align: left; }
+
 .agent-copilot__message {
   margin-bottom: 18px;
 }
@@ -89,10 +98,10 @@
   max-width: 94%;
   margin: 0;
   padding: 10px 12px;
-  border: 1px solid #e2e8f0;
-  border-radius: 4px 12px 12px;
+  border: 1px solid #dedee1;
+  border-radius: 4px 10px 10px;
   background: #ffffff;
-  color: #1e293b;
+  color: #202124;
   line-height: 1.65;
   white-space: pre-wrap;
 }
@@ -103,9 +112,9 @@
 }
 
 .agent-copilot__message--user .agent-copilot__message-text {
-  border-color: #bfdbfe;
-  border-radius: 12px 4px 12px 12px;
-  background: #eff6ff;
+  border-color: #a9c4ec;
+  border-radius: 10px 4px 10px 10px;
+  background: #eef5ff;
 }
 
 .agent-copilot__message--system .agent-copilot__message-text {
@@ -147,8 +156,8 @@
   width: 28px;
   height: 28px;
   border-radius: 7px;
-  color: #1d4ed8;
-  background: #dbeafe;
+  color: #0051c3;
+  background: #e5effd;
 }
 
 .agent-copilot__risk-icon {
@@ -198,7 +207,7 @@
   align-items: center;
   gap: 5px;
   width: fit-content;
-  color: #2563eb;
+  color: #0051c3;
   font-size: 12px;
 }
 
@@ -230,7 +239,7 @@
 .agent-copilot-root .ant-btn:focus-visible,
 .agent-copilot-root .ant-input:focus-visible,
 .agent-copilot-root a:focus-visible {
-  outline: 2px solid #2563eb;
+  outline: 2px solid #0051c3;
   outline-offset: 2px;
 }
 

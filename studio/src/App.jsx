@@ -42,6 +42,33 @@ const pages = [
   ["overlays", "覆盖配置", <SettingOutlined />], ["audit", "审计", <AuditOutlined />],
   ["logs", "日志与锁定", <CodeOutlined />],
 ];
+const pageGroups = [
+  ["构建交付", ["overview", "create", "builds", "logs"]],
+  ["配置", ["products", "overlays", "uploads"]],
+  ["平台", ["runners", "audit"]],
+];
+const pageDescriptions = {
+  overview: "从待处理任务开始，跟进 Preview 与 Release 进度。",
+  create: "配置打包目标与运行参数，提交后进入审批队列。",
+  builds: "筛选构建状态，查看执行详情与发布门禁。",
+  runners: "查看执行节点、当前任务与心跳状态。",
+  uploads: "管理构建制品、下载策略与保留期限。",
+  products: "编辑产品 Manifest，验证配置并管理历史版本。",
+  overlays: "管理 Profile 与客户的配置覆盖。",
+  audit: "检索操作记录并导出审计证据。",
+  logs: "查看构建日志、发布门禁与锁定配置。",
+};
+const agentPrompts = {
+  overview: ["检查当前工作台的首要风险", "解释下一步为什么优先", "给出今天的构建处理顺序"],
+  create: ["检查当前 BuildLock 蓝图", "找出构建输入中的风险", "解释这些 Workload 会如何运行"],
+  builds: ["分析当前构建队列", "找出最值得先处理的失败", "总结发布门禁状态"],
+  runners: ["检查 Runner 容量与异常", "解释当前调度状态", "给出扩容前检查清单"],
+  uploads: ["检查制品保留与下载风险", "找出即将过期的制品", "解释上传策略"],
+  products: ["检查 Manifest 的结构风险", "解释当前产品定义", "给出发布前配置检查项"],
+  overlays: ["检查覆盖配置冲突", "解释配置合并优先级", "找出可能覆盖错误的字段"],
+  audit: ["总结最近的高风险操作", "按关联 ID 串联审计事件", "生成审计检查清单"],
+  logs: ["定位当前日志中的失败线索", "解释 BuildLock 与最终配置差异", "总结发布证据"],
+};
 const statusMeta = {
   pending_approval: ["待审批", "orange"], queued: ["排队中", "blue"], running: ["构建中", "processing"],
   succeeded: ["Preview 已生成", "cyan"], preview_validated: ["Preview 已验证", "green"],
@@ -255,7 +282,7 @@ export default function App() {
   const [manifest, setManifest] = useState("{}"), [savedManifest, setSavedManifest] = useState("{}"), [revisions, setRevisions] = useState([]), [dryRun, setDryRun] = useState(null);
   const [overlayKind, setOverlayKind] = useState("profiles"), [overlayName, setOverlayName] = useState(""), [overlayText, setOverlayText] = useState("{}"), [savedOverlay, setSavedOverlay] = useState("{}"), [overlays, setOverlays] = useState({ profiles: [], customers: [] });
   const [detail, setDetail] = useState(null), [detailData, setDetailData] = useState({ logs: [], lock: null, release: null, reproducibility: null }), [detailOpen, setDetailOpen] = useState(false);
-  const [busy, setBusy] = useState(""), [search, setSearch] = useState(""), [agentOpen, setAgentOpen] = useState(false), [agentMessages, setAgentMessages] = useState([]);
+  const [busy, setBusy] = useState(""), [search, setSearch] = useState(""), [agentOpen, setAgentOpen] = useState(false), [agentMessages, setAgentMessages] = useState([]), [agentDraftSeed, setAgentDraftSeed] = useState(null);
   const product = products.find((p) => p.id === form.productId);
   const permitted = (permission) => can(auth, permission);
 
@@ -383,7 +410,8 @@ export default function App() {
       || (buildFilter === "blocked" && b.status === "preview_validated" && !ready);
     return matchesSearch && matchesFilter;
   }), [builds, search, buildFilter]);
-  const menu = <Menu className="vela-nav" id="admin-sidebar" mode="inline" selectedKeys={[page]} items={pages.map(([key, label, icon]) => ({ key, label, icon, "aria-label": `导航：${label}` }))} onClick={({ key }) => { setPage(key); setMobileNav(false); if (key === "audit") loadAudit(); }} />;
+  const pageItem = (key) => { const [, label, icon] = pages.find((item) => item[0] === key); return { key, label, icon, "aria-label": `导航：${label}` }; };
+  const menu = <Menu className="vela-nav" id="admin-sidebar" mode="inline" selectedKeys={[page]} items={pageGroups.map(([label, keys]) => ({ type: "group", label, children: keys.map(pageItem) }))} onClick={({ key }) => { setPage(key); setMobileNav(false); if (key === "audit") loadAudit(); }} />;
   const saveAuth = (values) => {
     const token = String(values.token || "").trim();
     if (!token) return setError("请输入访问令牌");
@@ -396,14 +424,26 @@ export default function App() {
     clearAuthState(); setAuth({ token: "", role: "operator", source: "" }); setAuthOpen(false); notice.success("本地认证已清除");
   };
   const changePage = (next) => setPage(next);
+  const openAgent = (prompt = "") => {
+    if (prompt) setAgentDraftSeed({ id: Date.now(), text: prompt });
+    setAgentOpen(true);
+  };
+  const agentContext = {
+    label: detail ? `构建 ${detail.id}` : `${pages.find((item) => item[0] === page)?.[1]}工作区`,
+    details: [
+      `${builds.filter((build) => ["pending_approval", "failed", "canceled"].includes(build.status)).length} 项需要处理`,
+      `${builds.filter((build) => ["queued", "running"].includes(build.status)).length} 项正在执行`,
+      detail ? `${detail.target || "—"} / ${detail.profile || "—"} / ${detail.version || "—"}` : `${products.length} 个产品定义`,
+    ],
+  };
   const healthStatus = health.state === "reachable" ? "success" : health.state === "unreachable" ? "error" : "processing";
   const healthLabel = health.state === "reachable" ? "API 可达" : health.state === "unreachable" ? "API 不可达" : "检查 API";
   const healthTip = health.state === "reachable" ? "仅表示 /api/health HTTP handler 可达，不代表 PostgreSQL、Nomad、对象存储或 OIDC 正常。" : health.state === "unreachable" ? "无法访问 /api/health；业务请求可能失败。" : "正在检查 API handler 存活状态。";
   return <Layout className={`vela-shell admin-shell ${collapsed ? "is-sidebar-collapsed" : ""}`}>{holder}
-    {screens.lg && <Sider width={224} collapsed={collapsed} className="vela-sider"><div className="vela-brand"><BuildOutlined /><span>Vela Studio</span></div>{menu}<Tooltip title={healthTip} placement="right"><div className="vela-sider-footer"><Badge status={healthStatus} /><Text type="secondary">{collapsed ? "" : `${apiEnvironmentLabel(API_URL)} · ${healthLabel}`}</Text>{!collapsed && <div className="vela-footer-caption">打包与发布控制平面</div>}</div></Tooltip></Sider>}
+    {screens.lg && <Sider width={236} collapsed={collapsed} className="vela-sider"><div className="vela-brand"><BuildOutlined /><div className="vela-brand-copy"><span>Vela</span><small>Packaging workspace</small></div></div>{menu}<Tooltip title={healthTip} placement="right"><div className="vela-sider-footer"><Badge status={healthStatus} /><Text type="secondary">{collapsed ? "" : `${apiEnvironmentLabel(API_URL)} · ${healthLabel}`}</Text>{!collapsed && <div className="vela-footer-caption">打包与发布控制平面</div>}</div></Tooltip></Sider>}
     <Drawer className="vela-nav-drawer" title="Vela Studio" placement="left" width={screens.xs ? "88vw" : 280} open={mobileNav} onClose={() => setMobileNav(false)}>{!screens.lg && menu}</Drawer>
-    <Layout className="vela-main"><Header className="vela-header"><Space className="vela-header-search"><Button aria-label={!screens.lg ? "展开导航" : collapsed ? "展开导航" : "折叠导航"} aria-expanded={screens.lg ? !collapsed : mobileNav} type="text" icon={screens.lg && !collapsed ? <MenuFoldOutlined /> : <MenuUnfoldOutlined />} onClick={() => { if (!screens.lg) return setMobileNav(true); const next = !collapsed; setCollapsed(next); localStorage.setItem("packaging.sidebarCollapsed", String(next)); }} /><Input id="global-build-search" aria-label="搜索构建 ID、产品、状态" placeholder="搜索构建 ID、产品、状态" value={search} onChange={(e) => setSearch(e.target.value)} onPressEnter={() => setPage("builds")} suffix={<span className="vela-search-suffix">{search ? <Button type="link" size="small" aria-label="清空全局搜索" onClick={() => setSearch("")}>清空</Button> : !screens.xs && <kbd>Ctrl K</kbd>}</span>} /></Space><Space className="vela-header-tools"><Tooltip title="界面角色用于提前禁用操作，服务端仍会再次鉴权。"><Button aria-label="认证与角色" icon={<SettingOutlined />} onClick={() => setAuthOpen(true)}>{!screens.xs && (auth.token ? `${auth.role || "viewer"} 角色` : "本地开发访问")}</Button></Tooltip><Tooltip title="助手会区分建议、工具调用与待审批操作；生产操作仍需服务端授权。"><Button icon={<RobotOutlined />} aria-label="打开构建助手" onClick={() => setAgentOpen(true)}>{!screens.xs && "构建助手"}</Button></Tooltip><Dropdown trigger={["click"]} popupRender={() => <Card className="vela-notification-card" title="通知中心" size="small" style={{ width: "min(380px, calc(100vw - 24px))" }} extra={<Button type="link" onClick={async () => { try { await markAllNotificationsRead(); setNotifications((x) => x.map((n) => ({ ...n, readAt: new Date().toISOString() }))); } catch (e) { setError(e); } }}>全部已读</Button>}><Text type="secondary">{notifications.filter((n) => !n.readAt).length ? `${notifications.filter((n) => !n.readAt).length} 条未读` : "没有未读通知"}</Text><List dataSource={notifications} locale={{ emptyText: "暂无平台通知" }} renderItem={(n) => <List.Item className={!n.readAt ? "is-unread" : ""} actions={[!n.readAt && <Button key="read" size="small" onClick={() => readNotification(n)}>已读</Button>, n.buildId && <Button key="view" size="small" onClick={() => { const b = builds.find((x) => x.id === n.buildId); if (b) inspect(b); }}>查看</Button>].filter(Boolean)}><List.Item.Meta avatar={<Badge status={notificationStatus(n.severity)} />} title={n.title || n.type || "平台通知"} description={<div className="vela-notification-copy"><span>{n.message || "没有详细说明"}</span><time>{when(n.createdAt)}</time></div>} /></List.Item>} /></Card>}><Badge count={notifications.filter((n) => !n.readAt).length}><Button aria-label={`通知，${notifications.filter((n) => !n.readAt).length} 条未读`} icon={<BellOutlined />} /></Badge></Dropdown></Space></Header>
-      <Content className="vela-content"><ErrorBanner error={error} onClose={() => setError("")} /><div className="vela-page-heading"><div><Title level={1}>{pages.find((x) => x[0] === page)?.[1]}</Title><Text type="secondary">{{ overview: "从待处理任务开始，跟进 Preview 与 Release 进度。", create: "配置打包目标与运行参数，提交后进入审批队列。", builds: "筛选构建状态，查看执行详情与发布门禁。", runners: "查看执行节点、当前任务与心跳状态。", uploads: "管理构建制品、下载策略与保留期限。", products: "编辑产品 Manifest，验证配置并管理历史版本。", overlays: "管理 Profile 与客户的配置覆盖。", audit: "检索操作记录并导出审计证据。", logs: "查看构建日志、发布门禁与锁定配置。" }[page]}</Text></div></div>{loading ? <div className="vela-loading" role="status" aria-label="正在加载工作台"><Space direction="vertical" align="center"><Spin /><Text type="secondary">加载工作台</Text></Space></div> : <Page page={page} products={products} product={product} builds={shownBuilds} allBuilds={builds} buildFilter={buildFilter} setBuildFilter={setBuildFilter} runners={runners} uploads={uploads} form={form} setForm={setForm} selectProduct={selectProduct} create={create} inspect={inspect} runAction={runAction} busy={busy} upload={upload} manifest={manifest} setManifest={setManifest} savedManifest={savedManifest} revisions={revisions} saveManifest={saveManifest} manifestDryRun={manifestDryRun} dryRun={dryRun} overlay={{ overlayKind, setOverlayKind, overlayName, setOverlayName, overlayText, setOverlayText, savedOverlay, overlays, loadOverlay, saveOverlay }} audit={{ audit, auditFilter, setAuditFilter, loadAudit }} auth={auth} download={downloadBuild} changePage={changePage} />}</Content></Layout>
+    <Layout className="vela-main"><Header className="vela-header"><Space className="vela-header-search"><Button aria-label={!screens.lg ? "展开导航" : collapsed ? "展开导航" : "折叠导航"} aria-expanded={screens.lg ? !collapsed : mobileNav} type="text" icon={screens.lg && !collapsed ? <MenuFoldOutlined /> : <MenuUnfoldOutlined />} onClick={() => { if (!screens.lg) return setMobileNav(true); const next = !collapsed; setCollapsed(next); localStorage.setItem("packaging.sidebarCollapsed", String(next)); }} /><Input id="global-build-search" aria-label="搜索构建 ID、产品、状态" placeholder="搜索构建 ID、产品、状态" value={search} onChange={(e) => setSearch(e.target.value)} onPressEnter={() => setPage("builds")} suffix={<span className="vela-search-suffix">{search ? <Button type="link" size="small" aria-label="清空全局搜索" onClick={() => setSearch("")}>清空</Button> : !screens.xs && <kbd>Ctrl K</kbd>}</span>} /></Space><Space className="vela-header-tools"><Tooltip title="界面角色用于提前禁用操作，服务端仍会再次鉴权。"><Button aria-label="认证与角色" icon={<SettingOutlined />} onClick={() => setAuthOpen(true)}>{!screens.xs && (auth.token ? `${auth.role || "viewer"} 角色` : "本地开发访问")}</Button></Tooltip><Tooltip title="助手会携带当前页面与构建状态；生产操作仍需明确确认和服务端授权。"><Button className="vela-agent-trigger" icon={<RobotOutlined />} aria-label="打开构建助手" onClick={() => openAgent()}>{!screens.xs && "Ask Vela"}</Button></Tooltip><Dropdown trigger={["click"]} popupRender={() => <Card className="vela-notification-card" title="通知中心" size="small" style={{ width: "min(380px, calc(100vw - 24px))" }} extra={<Button type="link" onClick={async () => { try { await markAllNotificationsRead(); setNotifications((x) => x.map((n) => ({ ...n, readAt: new Date().toISOString() }))); } catch (e) { setError(e); } }}>全部已读</Button>}><Text type="secondary">{notifications.filter((n) => !n.readAt).length ? `${notifications.filter((n) => !n.readAt).length} 条未读` : "没有未读通知"}</Text><List dataSource={notifications} locale={{ emptyText: "暂无平台通知" }} renderItem={(n) => <List.Item className={!n.readAt ? "is-unread" : ""} actions={[!n.readAt && <Button key="read" size="small" onClick={() => readNotification(n)}>已读</Button>, n.buildId && <Button key="view" size="small" onClick={() => { const b = builds.find((x) => x.id === n.buildId); if (b) inspect(b); }}>查看</Button>].filter(Boolean)}><List.Item.Meta avatar={<Badge status={notificationStatus(n.severity)} />} title={n.title || n.type || "平台通知"} description={<div className="vela-notification-copy"><span>{n.message || "没有详细说明"}</span><time>{when(n.createdAt)}</time></div>} /></List.Item>} /></Card>}><Badge count={notifications.filter((n) => !n.readAt).length}><Button aria-label={`通知，${notifications.filter((n) => !n.readAt).length} 条未读`} icon={<BellOutlined />} /></Badge></Dropdown></Space></Header>
+      <Content className="vela-content"><div className="vela-content-inner"><ErrorBanner error={error} onClose={() => setError("")} /><div className="vela-page-heading"><div><Title level={1}>{pages.find((x) => x[0] === page)?.[1]}</Title><Text type="secondary">{pageDescriptions[page]}</Text></div><div className="vela-page-agent"><span><RobotOutlined /> Agent 已读取本页上下文</span><Button size="small" onClick={() => openAgent(agentPrompts[page][0])}>检查本页</Button></div></div>{loading ? <div className="vela-loading" role="status" aria-label="正在加载工作台"><Space direction="vertical" align="center"><Spin /><Text type="secondary">加载工作台</Text></Space></div> : <Page page={page} products={products} product={product} builds={shownBuilds} allBuilds={builds} buildFilter={buildFilter} setBuildFilter={setBuildFilter} runners={runners} uploads={uploads} form={form} setForm={setForm} selectProduct={selectProduct} create={create} inspect={inspect} runAction={runAction} busy={busy} upload={upload} manifest={manifest} setManifest={setManifest} savedManifest={savedManifest} revisions={revisions} saveManifest={saveManifest} manifestDryRun={manifestDryRun} dryRun={dryRun} overlay={{ overlayKind, setOverlayKind, overlayName, setOverlayName, overlayText, setOverlayText, savedOverlay, overlays, loadOverlay, saveOverlay }} audit={{ audit, auditFilter, setAuditFilter, loadAudit }} auth={auth} download={downloadBuild} changePage={changePage} askAgent={openAgent} />}</div></Content></Layout>
     <BuildDrawer build={detail} data={detailData} open={detailOpen} onClose={() => setDetailOpen(false)} onDownload={downloadBuild} />
     <Modal title="访问令牌与认证" open={authOpen} onCancel={() => setAuthOpen(false)} footer={null} destroyOnHidden>
       <Alert type="warning" showIcon message="Bearer Token 属于敏感凭据" description="令牌只保存在当前浏览器本地存储，不会写入产品、BuildLock、日志或审计样例。界面角色只用于预判按钮权限，服务端仍是最终授权方。" style={{ marginBottom: 16 }} />
@@ -414,9 +454,10 @@ export default function App() {
       </Form>
       {!oidcLoginConfigured() && <Text type="secondary">OIDC 未配置；可使用本地访问令牌。</Text>}
     </Modal>
-    <AgentCopilotPanel open={agentOpen} onClose={() => setAgentOpen(false)} context={{ label: detail ? `构建 ${detail.id}` : "控制台" }} messages={agentMessages} onSend={(text) => {
-      if (!import.meta.env.VITE_AGENT_API_URL) { setAgentMessages((x) => [...x, { id: Date.now(), role: "system", parts: [{ type: "text", text: "Agent 服务未配置；不会发起 API 请求或执行操作。" }] }]); return; }
-      setAgentMessages((x) => [...x, { id: Date.now(), role: "user", parts: [{ type: "text", text }] }, { id: Date.now() + 1, role: "system", parts: [{ type: "text", text: "Agent BFF 集成等待服务端实现；不会模拟或执行特权操作。" }] }]);
+    <AgentCopilotPanel open={agentOpen} onClose={() => setAgentOpen(false)} context={agentContext} messages={agentMessages} draftSeed={agentDraftSeed} starterPrompts={agentPrompts[page]} onSend={(text) => {
+      const userMessage = { id: Date.now(), role: "user", parts: [{ type: "text", text }] };
+      if (!import.meta.env.VITE_AGENT_API_URL) { setAgentMessages((x) => [...x, userMessage, { id: Date.now() + 1, role: "system", parts: [{ type: "text", text: "Agent 服务未配置；已保留问题和当前页面上下文，但不会发起 API 请求或执行操作。" }] }]); return; }
+      setAgentMessages((x) => [...x, userMessage, { id: Date.now() + 1, role: "system", parts: [{ type: "text", text: "Agent BFF 集成等待服务端实现；不会模拟或执行特权操作。" }] }]);
     }} status="ready" notice={import.meta.env.VITE_AGENT_API_URL ? "Agent BFF 传输层尚未接入；当前不会发送模型请求或执行工具。" : "Agent 服务未配置；不会发起 API 请求。"} />
   </Layout>;
 }
@@ -434,7 +475,7 @@ function Page(props) {
   if (page === "audit") return <FadeUp key={page}><Audit {...props.audit} /></FadeUp>;
   return <FadeUp key={page}><LogsWorkspace builds={props.allBuilds || props.builds} inspect={props.inspect} /></FadeUp>;
 }
-function Overview({ products, builds, runners, uploads, inspect, setBuildFilter, allBuilds, changePage }) {
+function Overview({ products, builds, runners, uploads, inspect, setBuildFilter, allBuilds, changePage, askAgent }) {
   const records = allBuilds || builds;
   const pending = records.filter((b) => b.status === "pending_approval");
   const failed = records.filter((b) => ["failed", "canceled"].includes(b.status));
@@ -463,6 +504,19 @@ function Overview({ products, builds, runners, uploads, inspect, setBuildFilter,
   } : {
     label: "最近构建", title: `${focusName} / ${focus.version || "—"}`, description: "查看构建结果、锁定配置与发布证据。", action: "查看构建详情",
   };
+  const agentBrief = attention.length ? {
+    title: `先处理 ${focus?.id || "待办队列"}`,
+    summary: pending.length ? "审批是当前吞吐瓶颈。先核对 BuildLock 与版本，再让任务进入 Runner 队列。" : "当前存在失败或已取消的任务。建议先读取最后一段日志，再决定重试或重新配置。",
+    prompt: `请分析工作台中最优先的构建 ${focus?.id || ""}，列出判断依据、风险和下一步；不要直接执行任何操作。`,
+  } : blocked.length ? {
+    title: "先解释 Release 门禁",
+    summary: "Preview 已验证，但发布条件尚未全部满足。建议逐项解释服务端 checks[]，避免盲目重建。",
+    prompt: "请分析当前 Release 门禁阻塞项，按影响范围排序并给出不会改变生产状态的排查步骤。",
+  } : {
+    title: "当前无需人工救火",
+    summary: active.length ? "构建正在执行。Agent 可以先整理完成后的验证清单，而不是打断运行中的任务。" : "工作台状态稳定。可以让 Agent 生成下一次构建前的配置检查清单。",
+    prompt: "请根据当前工作台状态生成下一步检查清单，区分只读检查、需要确认的操作和生产变更。",
+  };
   const queue = (filter) => { setBuildFilter(filter); changePage("builds"); };
   return <div className="vela-overview">
     <section className={`vela-command ${attention.length ? "has-attention" : "is-clear"}`} aria-labelledby="command-title">
@@ -478,6 +532,12 @@ function Overview({ products, builds, runners, uploads, inspect, setBuildFilter,
         <ol>{metrics.map(([title, value, filter], index) => <li key={title} className={value ? "has-value" : ""}><span className="vela-lane-marker" aria-hidden="true">{index + 1}</span><Button type="text" aria-label={`${title}：${value}，查看队列`} onClick={() => queue(filter)}><span>{title}</span><strong>{value}</strong></Button></li>)}</ol>
         <div className="vela-resource-line"><span>产品定义 <strong>{products.length}</strong></span><span>Runner <strong>{runners.length}</strong></span><span>上传制品 <strong>{uploads.length}</strong></span></div>
       </div>
+    </section>
+    <section className="vela-agent-brief" aria-labelledby="agent-brief-title">
+      <div className="vela-agent-brief-mark" aria-hidden="true"><RobotOutlined /></div>
+      <div className="vela-agent-brief-copy"><div><Text className="vela-agent-kicker">Vela Agent 建议</Text><Title level={2} id="agent-brief-title">{agentBrief.title}</Title></div><Text type="secondary">{agentBrief.summary}</Text></div>
+      <div className="vela-agent-signals" aria-label="建议依据"><span><strong>{attention.length}</strong> 需要处理</span><span><strong>{active.length}</strong> 正在执行</span><span><strong>{blocked.length}</strong> 发布阻塞</span></div>
+      <Button onClick={() => askAgent(agentBrief.prompt)}>查看分析计划</Button>
     </section>
     <section className="vela-recent" aria-labelledby="recent-title"><div className="vela-section-heading"><div><Title level={2} id="recent-title">最近动态</Title><Text type="secondary">按最近更新时间排列</Text></div><Button type="link" onClick={() => queue("all")}>查看全部构建</Button></div>{builds.length ? <ul className="vela-build-stream">{builds.slice(0, 6).map((build) => <li key={build.id}><span className={`vela-build-pulse is-${build.status}`} aria-hidden="true" /><button type="button" className="vela-build-identity" onClick={() => inspect(build)} aria-label={`查看构建 ${build.id}`}><strong>{products.find((item) => item.id === build.productId)?.name || build.productId}</strong><span className="vela-build-meta"><span>{build.id}</span><span>{build.target || "—"} / {build.profile || "—"}</span><span>{build.version || "—"}</span></span></button><span className="vela-build-stream-status">{buildStatus(build)}</span><time dateTime={build.updatedAt || ""}>{when(build.updatedAt)}</time></li>)}</ul> : <Empty description="还没有构建记录" image={Empty.PRESENTED_IMAGE_SIMPLE} />}</section>
   </div>;
@@ -497,7 +557,7 @@ function resolveWorkloadText(value, form) {
 function componentSourceLabel(source) {
   return ({ "artifact-repository": "制品仓库", "manual-upload": "上传文件", "fixed-url": "固定链接", "previous-build": "历史构建" }[source?.kind] || "产品默认");
 }
-function CreateForm({ form, setForm, products, product, selectProduct, upload, create, auth, busy }) {
+function CreateForm({ form, setForm, products, product, selectProduct, upload, create, auth, busy, askAgent }) {
   const [step, setStep] = useState(0);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [stepError, setStepError] = useState("");
@@ -582,7 +642,9 @@ function CreateForm({ form, setForm, products, product, selectProduct, upload, c
     ["渲染运行模板", "安装目录、端口与客户配置会替换 docker/systemd 模板中的变量。"],
     ["等待服务端锁定", "发起后进入审批队列；页面不会乐观伪造状态或发布结果。"],
   ][step];
-  return <div className="vela-create-workspace"><Form layout="vertical" className="vela-create-form"><ContextNote title="从构建输入到可复现蓝图">选择会实时组成组件、Workload 与运行参数预览；最终结果仍以服务端生成的 BuildLock 为准。</ContextNote><Steps className="vela-create-steps" size="small" current={step} items={stepItems} onChange={(next) => { if (next < step) { setStepError(""); setStep(next); } }} /><div key={step} className="vela-form-step">{panels[step]}</div>{stepError && <Alert className="vela-inline-alert" type="warning" showIcon message="当前步骤还不能继续" description={stepError} />}<div className="vela-step-tools"><Space wrap><Button disabled={step === 0} onClick={() => { setStepError(""); setStep(step - 1); }}>上一步</Button><Button onClick={() => setAdvancedOpen(true)}>查看高级 JSON</Button></Space><Space wrap>{step < 4 && <Button type="primary" onClick={nextStep}>保存并继续</Button>}{step === 4 && <GuardedButton auth={auth} permission="build.create" title="发起 Preview 构建" type="primary" loading={busy === "create"} disabled={!stepReady} onClick={create}>发起 Preview 构建</GuardedButton>}</Space></div><Drawer title="高级构建输入" open={advancedOpen} onClose={() => setAdvancedOpen(false)} width="min(680px, 100vw)"><Alert type="warning" showIcon message="高级输入会参与服务端合并" description="优先级为 request overrides ＞ variables ＞ customer ＞ profile ＞ target ＞ base。不要填写 token、密码、私钥或对象存储凭据。" style={{ marginBottom: 16 }} /><Form.Item label={<FieldLabel tip="可用于 Manifest 模板解析；必须是 JSON 对象。">构建变量 JSON</FieldLabel>}><JsonEditor label="构建变量 JSON" rows={9} value={form.variablesText} onChange={(value) => patch("variablesText", value)} /></Form.Item><Form.Item label={<FieldLabel tip="每个键是组件 ID，值必须符合 OpenAPI ComponentSource。">组件覆盖 JSON</FieldLabel>}><JsonEditor label="组件覆盖 JSON" rows={13} value={form.componentOverridesText} onChange={(value) => patch("componentOverridesText", value)} /></Form.Item></Drawer></Form><aside className="vela-create-context vela-build-blueprint" aria-label="BuildLock 实时蓝图"><div className="vela-context-heading"><div><Title level={2}>BuildLock 蓝图</Title><Text type="secondary">提交前预览</Text></div><Tag color={completion === 100 ? "success" : "processing"}>{completion}%</Tag></div><div className="vela-blueprint-progress"><span style={{ width: `${completion}%` }} /></div><div className="vela-blueprint-target"><span className="vela-blueprint-icon"><ApartmentOutlined /></span><div><Text strong>{product?.name || "等待选择产品"}</Text><Text type="secondary">{form.target || "target"} / {form.profile || "profile"} / {form.version || "version"}</Text></div></div><div className="vela-blueprint-flow"><div><span><DatabaseOutlined /></span><div><Text strong>{components.length} 个组件</Text><Text type="secondary">{overrideCount} 个请求覆盖</Text></div></div><div><span><BuildOutlined /></span><div><Text strong>{enabledWorkloads.length} 个 Workload</Text><Text type="secondary">{workloads.filter((item) => form.modules?.[item.module] === false).length} 个已停用</Text></div></div><div><span><CloudServerOutlined /></span><div><Text strong>{form.target === "windows" ? "Windows Runner" : "Linux Runner"}</Text><Text type="secondary">审批后由调度器分配</Text></div></div></div>{enabledWorkloads.length > 0 && <div className="vela-blueprint-workloads"><Text type="secondary">将进入锁定配置</Text>{enabledWorkloads.slice(0, 5).map((workload) => <div key={workload.id}><span className={`is-${workload.runtime}`} /><strong>{workload.id}</strong><small>{workload.runtime}</small></div>)}</div>}<div className="vela-create-guidance"><Text strong>{guidance[0]}</Text><p>{guidance[1]}</p></div><ol className="vela-build-lifecycle-preview"><li className="is-current"><span>1</span><div><strong>待审批</strong><small>BuildLock 已生成</small></div></li><li><span>2</span><div><strong>排队与执行</strong><small>Runner 回传状态和日志</small></div></li><li><span>3</span><div><strong>验证 Preview</strong><small>安装与运行验收</small></div></li><li><span>4</span><div><strong>发布 Release</strong><small>固定版本与门禁检查</small></div></li></ol></aside></div>;
+  const agentAssessment = !targetReady ? "还缺少完整的交付坐标，Agent 会先检查产品、目标、Profile 与版本。" : !componentsReady ? "存在无法解析的必需组件来源，建议先检查 URI、上传结果与固定版本。" : !workloadsReady ? "当前没有可执行 Workload；需要确认这是纯制品构建还是模块开关误操作。" : !runtimeReady ? "运行参数未通过检查，Agent 会重点核对安装目录与端口冲突。" : !advancedReady ? "高级 JSON 存在语法错误，当前蓝图不能安全提交。" : form.version === "latest" ? "Preview 可以使用 latest；正式发布前应固定产品与组件版本。" : "当前输入已通过本地预检，可以让 Agent 解释影响范围，再提交服务端生成 BuildLock。";
+  const askBlueprint = () => askAgent(`请检查当前构建蓝图：产品 ${product?.name || form.productId || "未选择"}，目标 ${form.target}，Profile ${form.profile}，版本 ${form.version}，${components.length} 个组件，${enabledWorkloads.length} 个 Workload，安装目录 ${form.installDir || "未设置"}，端口 ${form.webPort || "未设置"}。先列出依据和风险，不要直接发起构建。`);
+  return <div className="vela-create-workspace"><Form layout="vertical" className="vela-create-form"><ContextNote title="从构建输入到可复现蓝图">选择会实时组成组件、Workload 与运行参数预览；最终结果仍以服务端生成的 BuildLock 为准。</ContextNote><Steps className="vela-create-steps" size="small" current={step} items={stepItems} onChange={(next) => { if (next < step) { setStepError(""); setStep(next); } }} /><div key={step} className="vela-form-step">{panels[step]}</div>{stepError && <Alert className="vela-inline-alert" type="warning" showIcon message="当前步骤还不能继续" description={stepError} />}<div className="vela-step-tools"><Space wrap><Button disabled={step === 0} onClick={() => { setStepError(""); setStep(step - 1); }}>上一步</Button><Button onClick={() => setAdvancedOpen(true)}>查看高级 JSON</Button></Space><Space wrap>{step < 4 && <Button type="primary" onClick={nextStep}>保存并继续</Button>}{step === 4 && <GuardedButton auth={auth} permission="build.create" title="发起 Preview 构建" type="primary" loading={busy === "create"} disabled={!stepReady} onClick={create}>发起 Preview 构建</GuardedButton>}</Space></div><Drawer title="高级构建输入" open={advancedOpen} onClose={() => setAdvancedOpen(false)} width="min(680px, 100vw)"><Alert type="warning" showIcon message="高级输入会参与服务端合并" description="优先级为 request overrides ＞ variables ＞ customer ＞ profile ＞ target ＞ base。不要填写 token、密码、私钥或对象存储凭据。" style={{ marginBottom: 16 }} /><Form.Item label={<FieldLabel tip="可用于 Manifest 模板解析；必须是 JSON 对象。">构建变量 JSON</FieldLabel>}><JsonEditor label="构建变量 JSON" rows={9} value={form.variablesText} onChange={(value) => patch("variablesText", value)} /></Form.Item><Form.Item label={<FieldLabel tip="每个键是组件 ID，值必须符合 OpenAPI ComponentSource。">组件覆盖 JSON</FieldLabel>}><JsonEditor label="组件覆盖 JSON" rows={13} value={form.componentOverridesText} onChange={(value) => patch("componentOverridesText", value)} /></Form.Item></Drawer></Form><aside className="vela-create-context vela-build-blueprint" aria-label="BuildLock 实时蓝图"><div className="vela-context-heading"><div><Title level={2}>BuildLock 蓝图</Title><Text type="secondary">提交前预览</Text></div><Tag color={completion === 100 ? "success" : "processing"}>{completion}%</Tag></div><div className="vela-blueprint-progress"><span style={{ width: `${completion}%` }} /></div><div className="vela-blueprint-agent"><div><span><RobotOutlined /></span><div><Text strong>Agent 配置诊断</Text><Text type="secondary">{agentAssessment}</Text></div></div><Button size="small" onClick={askBlueprint}>检查蓝图</Button></div><div className="vela-blueprint-target"><span className="vela-blueprint-icon"><ApartmentOutlined /></span><div><Text strong>{product?.name || "等待选择产品"}</Text><Text type="secondary">{form.target || "target"} / {form.profile || "profile"} / {form.version || "version"}</Text></div></div><div className="vela-blueprint-flow"><div><span><DatabaseOutlined /></span><div><Text strong>{components.length} 个组件</Text><Text type="secondary">{overrideCount} 个请求覆盖</Text></div></div><div><span><BuildOutlined /></span><div><Text strong>{enabledWorkloads.length} 个 Workload</Text><Text type="secondary">{workloads.filter((item) => form.modules?.[item.module] === false).length} 个已停用</Text></div></div><div><span><CloudServerOutlined /></span><div><Text strong>{form.target === "windows" ? "Windows Runner" : "Linux Runner"}</Text><Text type="secondary">审批后由调度器分配</Text></div></div></div>{enabledWorkloads.length > 0 && <div className="vela-blueprint-workloads"><Text type="secondary">将进入锁定配置</Text>{enabledWorkloads.slice(0, 5).map((workload) => <div key={workload.id}><span className={`is-${workload.runtime}`} /><strong>{workload.id}</strong><small>{workload.runtime}</small></div>)}</div>}<div className="vela-create-guidance"><Text strong>{guidance[0]}</Text><p>{guidance[1]}</p></div><ol className="vela-build-lifecycle-preview"><li className="is-current"><span>1</span><div><strong>待审批</strong><small>BuildLock 已生成</small></div></li><li><span>2</span><div><strong>排队与执行</strong><small>Runner 回传状态和日志</small></div></li><li><span>3</span><div><strong>验证 Preview</strong><small>安装与运行验收</small></div></li><li><span>4</span><div><strong>发布 Release</strong><small>固定版本与门禁检查</small></div></li></ol></aside></div>;
 }
 function BuildTable({ builds, inspect, runAction, download, auth, allBuilds, buildFilter, setBuildFilter, busy, compact = false }) {
   const filterOptions = [

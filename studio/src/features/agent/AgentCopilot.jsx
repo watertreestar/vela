@@ -174,7 +174,7 @@ function MessagePart({ part, onApprove, onDeny }) {
   }
 }
 
-export function AgentMessageList({ messages = [], status, onApprove, onDeny }) {
+export function AgentMessageList({ messages = [], status, onApprove, onDeny, starterPrompts = [], onStarter }) {
   const bottomRef = useRef(null);
 
   useEffect(() => {
@@ -186,6 +186,7 @@ export function AgentMessageList({ messages = [], status, onApprove, onDeny }) {
       <div className="agent-copilot__empty-state" aria-label="Agent 对话空状态">
         <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有对话">
           <Text type="secondary">服务端 Agent / BFF 尚未配置时，不会执行任何生产操作。</Text>
+          {starterPrompts.length > 0 && <div className="agent-copilot__starters" aria-label="建议问题">{starterPrompts.map((prompt) => <Button key={prompt} size="small" onClick={() => onStarter?.(prompt)}>{prompt}</Button>)}</div>}
         </Empty>
       </div>
     );
@@ -224,6 +225,8 @@ export function AgentCopilotPanel({
   onClose,
   context,
   messages = [],
+  draftSeed,
+  starterPrompts = [],
   status,
   error,
   notice,
@@ -236,6 +239,9 @@ export function AgentCopilotPanel({
   const isBusy = ['submitted', 'streaming'].includes(status);
   const canSend = Boolean(draft.trim()) && !isBusy;
   const contextLabel = useMemo(() => getContextLabel(context), [context]);
+  useEffect(() => {
+    if (open && draftSeed?.text) setDraft(draftSeed.text);
+  }, [open, draftSeed]);
 
   const send = () => {
     const content = draft.trim();
@@ -284,7 +290,8 @@ export function AgentCopilotPanel({
       }
     >
       <div className="agent-copilot__context" aria-label="当前 Agent 上下文">
-        <Badge status="processing" text={contextLabel} />
+        <div><Badge status="processing" text={contextLabel} /><Tag bordered={false}>只读上下文</Tag></div>
+        {context?.details?.length > 0 && <div className="agent-copilot__context-details">{context.details.map((detail) => <span key={detail}>{detail}</span>)}</div>}
       </div>
       <Alert
         className="agent-copilot__mode-note"
@@ -295,7 +302,7 @@ export function AgentCopilotPanel({
       />
       {notice && <Alert className="agent-copilot__notice" type="warning" showIcon message="当前为说明模式" description={String(notice)} />}
       {error && <Alert className="agent-copilot__error" type="error" showIcon message="Agent 请求失败" description={String(error)} />}
-      <AgentMessageList messages={messages} status={status} onApprove={onApprove} onDeny={onDeny} />
+      <AgentMessageList messages={messages} status={status} onApprove={onApprove} onDeny={onDeny} starterPrompts={starterPrompts} onStarter={setDraft} />
     </Drawer>
   );
 }

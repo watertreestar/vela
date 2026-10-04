@@ -90,6 +90,27 @@ test("构建助手未配置时展示安全本地状态而不请求 Agent", async
   await page.getByRole("button", { name: "打开构建助手" }).click(); await expect(page.getByText(/Agent 服务未配置；不会发起 API 请求/)).toBeVisible(); expect(state.requests).toHaveLength(count);
 });
 
+test("Agentic UX 从工作台建议带进入带上下文的检查计划", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === "mobile-chrome", "desktop agent workspace coverage");
+  await mockApi(page); await page.goto("/");
+  await expect(page.getByText("Vela Agent 建议")).toBeVisible();
+  await expect(page.getByText("先处理 build-pending")).toBeVisible();
+  await page.getByRole("button", { name: "查看分析计划" }).click();
+  await expect(page.getByLabel("当前 Agent 上下文")).toContainText("总览工作区");
+  await expect(page.getByLabel("Agent 消息输入")).toHaveValue(/最优先的构建 build-pending/);
+  await page.getByRole("button", { name: "发送" }).click();
+  await expect(page.getByText(/已保留问题和当前页面上下文/)).toBeVisible();
+});
+
+test("构建蓝图的 Agent 配置诊断随输入更新", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === "mobile-chrome", "desktop build diagnosis coverage");
+  await mockApi(page); await page.goto("/"); await nav(page, "创建构建", testInfo.project.name);
+  await expect(page.getByText("Agent 配置诊断")).toBeVisible();
+  await expect(page.getByText(/Preview 可以使用 latest/)).toBeVisible();
+  await page.getByRole("button", { name: "检查蓝图" }).click();
+  await expect(page.getByLabel("Agent 消息输入")).toHaveValue(/1 个组件，1 个 Workload/);
+});
+
 test("审计和日志工作区可定位证据上下文", async ({ page }, testInfo) => {
   await mockApi(page); await page.goto("/");
   await nav(page, "审计", testInfo.project.name); await expect(page.getByRole("heading", { name: "定位审计事件" })).toBeVisible(); await expect(page.getByText("build.create")).toBeVisible();
