@@ -97,6 +97,39 @@ test("审计和日志工作区可定位证据上下文", async ({ page }, testIn
   await page.getByRole("tab", { name: "构建锁" }).click(); await expect(page.getByLabel("构建锁 JSON")).toContainText("lsap");
 });
 
+test("JSON 编辑器即时校验、格式化并高亮只读 BuildLock", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === "mobile-chrome", "desktop editor interaction coverage");
+  await mockApi(page); await page.goto("/"); await nav(page, "产品配置", testInfo.project.name);
+  const editor = page.getByLabel("Manifest JSON");
+  await editor.fill('{"id":}');
+  await expect(page.getByText("JSON 语法错误")).toBeVisible();
+  await expect(editor).toHaveAttribute("aria-invalid", "true");
+  await expect(page.getByRole("button", { name: "保存 Manifest" })).toBeDisabled();
+  await editor.fill(JSON.stringify(product));
+  await page.getByRole("button", { name: "格式化" }).click();
+  await expect(page.getByText("JSON 语法有效")).toBeVisible();
+  await expect(editor).toHaveValue(/\n  "name": "智能定位平台"/);
+  await nav(page, "日志与锁定", testInfo.project.name);
+  await page.getByRole("tab", { name: "构建锁" }).click();
+  await expect(page.locator(".vela-json-code .token-key").first()).toBeVisible();
+  await page.getByRole("button", { name: "复制" }).click();
+  await expect(page.getByRole("button", { name: "已复制" })).toBeVisible();
+});
+
+test("高级构建 JSON 语法错误会阻止发起构建", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === "mobile-chrome", "desktop advanced editor coverage");
+  await mockApi(page); await page.goto("/"); await nav(page, "创建构建", testInfo.project.name);
+  await page.getByRole("button", { name: "查看高级 JSON" }).click();
+  const variables = page.getByLabel("构建变量 JSON");
+  await variables.fill('{"region":}');
+  await expect(variables).toHaveAttribute("aria-invalid", "true");
+  await expect(page.getByText("JSON 语法错误")).toBeVisible();
+  await page.keyboard.press("Escape");
+  for (let index = 0; index < 4; index += 1) await page.getByRole("button", { name: "保存并继续" }).click();
+  await expect(page.getByText("高级 JSON 语法有效")).toBeVisible();
+  await expect(page.getByRole("button", { name: "发起 Preview 构建" })).toBeDisabled();
+});
+
 test("总览待办指标直接进入对应构建队列", async ({ page }) => {
   await mockApi(page); await page.goto("/");
   await page.getByRole("button", { name: "需要处理：1，查看队列", exact: true }).click();
