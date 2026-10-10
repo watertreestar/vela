@@ -9,6 +9,7 @@ import pathlib
 import socket
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 
 
@@ -126,9 +127,13 @@ def remote_go_test(command: list[str], env: dict[str, str], root: pathlib.Path, 
     host = docker_context_host(root)
     if not host:
         return subprocess.CompletedProcess(command, 1, "", "remote Docker host is not configured")
-    remote_root = f"/tmp/vela-rustfs-check-{os.getpid()}"
+    # Each integration test needs its own workspace. Go's module cache contains
+    # read-only directories, so reusing the same path can make the next test's
+    # initial rm fail before that test is executed.
+    remote_root = f"/tmp/vela-rustfs-check-{os.getpid()}-{time.time_ns()}"
+    cleanup_command = f"chmod -R u+w {remote_root} 2>/dev/null || true; rm -rf {remote_root}"
     setup = subprocess.run(
-        ["ssh", host, f"rm -rf {remote_root} && mkdir -p {remote_root}"],
+        ["ssh", host, f"mkdir -p {remote_root}"],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -144,6 +149,7 @@ def remote_go_test(command: list[str], env: dict[str, str], root: pathlib.Path, 
         timeout=timeout,
     )
     if copy.returncode != 0:
+        subprocess.run(["ssh", host, cleanup_command], text=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
         return subprocess.CompletedProcess(command, copy.returncode, copy.stdout, copy.stderr)
     exported = " ".join(f"{key}={subprocess.list2cmdline([value])}" for key, value in env.items())
     remote_command = f"cd {remote_root}/conductor && {exported} {' '.join(command)}"
@@ -154,7 +160,7 @@ def remote_go_test(command: list[str], env: dict[str, str], root: pathlib.Path, 
         stderr=subprocess.PIPE,
         timeout=timeout,
     )
-    subprocess.run(["ssh", host, f"rm -rf {remote_root}"], text=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+    subprocess.run(["ssh", host, cleanup_command], text=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
     return result
 
 

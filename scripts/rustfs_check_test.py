@@ -104,6 +104,28 @@ class RustFSCheckTest(unittest.TestCase):
             ]
             self.assertEqual(rustfs_check.docker_context_host(pathlib.Path("repo")), "ubuntu-a")
 
+    def test_remote_go_tests_use_unique_workspaces_and_writable_cleanup(self):
+        calls = []
+
+        def fake_subprocess_run(command, **kwargs):
+            calls.append(command)
+            return type("Result", (), {"returncode": 0, "stdout": "ok", "stderr": ""})()
+
+        with (
+            patch.object(rustfs_check, "docker_context_host", return_value="ubuntu-a"),
+            patch.object(rustfs_check.time, "time_ns", side_effect=[101, 202]),
+            patch.object(rustfs_check.subprocess, "run", side_effect=fake_subprocess_run),
+        ):
+            rustfs_check.remote_go_test(["go", "test"], {}, pathlib.Path("repo"), 30)
+            rustfs_check.remote_go_test(["go", "test"], {}, pathlib.Path("repo"), 30)
+
+        setup_commands = [call[2] for call in calls if call[:2] == ["ssh", "ubuntu-a"] and call[2].startswith("mkdir -p")]
+        cleanup_commands = [call[2] for call in calls if call[:2] == ["ssh", "ubuntu-a"] and "chmod -R u+w" in call[2]]
+        self.assertEqual(len(setup_commands), 2)
+        self.assertNotEqual(setup_commands[0], setup_commands[1])
+        self.assertEqual(len(cleanup_commands), 2)
+        self.assertTrue(all("rm -rf /tmp/vela-rustfs-check-" in command for command in cleanup_commands))
+
     def test_production_mode_requires_valid_retention_policy(self):
         args = Namespace(
             production=True,
