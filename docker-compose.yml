@@ -22,14 +22,16 @@ services:
       - rustfs-data:/data
 
   nomad:
-    image: ${NOMAD_IMAGE:-hashicorp/nomad:latest}
-    command: agent -dev -bind=0.0.0.0 -client
+    image: ${NOMAD_IMAGE:-hashicorp/nomad:2.0.7}
+    command: agent -dev -bind=0.0.0.0 -client -meta=node_class=linux-packager
     privileged: true
     profiles: ["nomad-container"]
     ports:
-      - "4646:4646"
-      - "4647:4647"
-      - "4648:4648"
+      - "${NOMAD_HTTP_PORT:-4646}:4646"
+      - "${NOMAD_RPC_PORT:-4647}:4647"
+      - "${NOMAD_SERF_PORT:-4648}:4648"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
 volumes:
   postgres-data:

@@ -96,6 +96,12 @@ docker run -d --name packaging-postgres \
 docker compose up -d rustfs
 # If Docker runs on a remote host, set RUSTFS_HOST_PORT and point RUSTFS_ENDPOINT at that host.
 
+# Optional local Linux Nomad node. The profile mounts the Docker socket and
+# advertises meta.node_class=linux-packager for real scheduler checks.
+docker compose --profile nomad-container up -d nomad
+# Override NOMAD_HTTP_PORT, NOMAD_RPC_PORT, and NOMAD_SERF_PORT when the
+# default 4646-4648 ports are already occupied.
+
 cd conductor
 go run ./cmd/server
 ```
