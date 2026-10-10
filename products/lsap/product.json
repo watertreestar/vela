@@ -2,7 +2,10 @@
   "id": "lsap",
   "name": "智能定位平台",
   "description": "Linux and Windows installer packaging definition for LSAP.",
-  "targets": ["linux", "windows"],
+  "targets": [
+    "linux",
+    "windows"
+  ],
   "targetConfig": {
     "linux": {
       "installDir": "/opt/lsap",
@@ -26,8 +29,21 @@
       }
     }
   },
-  "profiles": ["qa", "prod"],
-  "versions": ["latest", "0.0.1", "1.0.0"],
+  "profiles": [
+    "qa",
+    "prod"
+  ],
+  "versions": [
+    "latest",
+    "0.0.1",
+    "1.0.0"
+  ],
+  "artifacts": {
+    "location-engine": "artifact/Publish/engine/main/latest/location-engine-*.tar.gz",
+    "location-guard": "artifact/Publish/location-guard/main/latest/location-guard-*.tar.gz",
+    "location-push": "artifact/Publish/location-push/guard-2.2/latest/location-push-*.tar.gz",
+    "ui": "artifact/Publish/location-guard-ui/main/latest/dist.zip"
+  },
   "components": [
     {
       "id": "location-engine",
@@ -36,7 +52,11 @@
       "source": {
         "kind": "artifact-repository",
         "repository": "minio",
-        "path": "artifact/Publish/engine/main/{{version}}/location-engine-*.tar.gz"
+        "path": "artifact/Publish/engine/main/{{version}}/location-engine-*.tar.gz",
+        "url": "",
+        "uploadId": "",
+        "uri": "",
+        "accept": null
       }
     },
     {
@@ -46,7 +66,11 @@
       "source": {
         "kind": "artifact-repository",
         "repository": "minio",
-        "path": "artifact/Publish/location-guard/main/{{version}}/location-guard-*.tar.gz"
+        "path": "artifact/Publish/location-guard/main/{{version}}/location-guard-*.tar.gz",
+        "url": "",
+        "uploadId": "",
+        "uri": "",
+        "accept": null
       }
     },
     {
@@ -56,7 +80,11 @@
       "source": {
         "kind": "artifact-repository",
         "repository": "minio",
-        "path": "artifact/Publish/location-push/guard-2.2/{{version}}/location-push-*.tar.gz"
+        "path": "artifact/Publish/location-push/guard-2.2/{{version}}/location-push-*.tar.gz",
+        "url": "",
+        "uploadId": "",
+        "uri": "",
+        "accept": null
       }
     },
     {
@@ -66,7 +94,11 @@
       "source": {
         "kind": "artifact-repository",
         "repository": "minio",
-        "path": "artifact/Publish/location-guard-ui/main/{{version}}/dist.zip"
+        "path": "artifact/Publish/location-guard-ui/main/{{version}}/dist.zip",
+        "url": "",
+        "uploadId": "",
+        "uri": "",
+        "accept": null
       }
     },
     {
@@ -76,7 +108,11 @@
       "source": {
         "kind": "artifact-repository",
         "repository": "minio",
-        "path": "artifact/Publish/location-worker/main/{{version}}/location-worker-linux-amd64"
+        "path": "artifact/Publish/location-worker/main/{{version}}/location-worker-linux-amd64",
+        "url": "",
+        "uploadId": "",
+        "uri": "",
+        "accept": null
       }
     },
     {
@@ -85,7 +121,15 @@
       "required": false,
       "source": {
         "kind": "manual-upload",
-        "accept": [".lic", ".json"]
+        "repository": "",
+        "path": "",
+        "url": "",
+        "uploadId": "",
+        "uri": "",
+        "accept": [
+          ".lic",
+          ".json"
+        ]
       }
     }
   ],
@@ -96,18 +140,23 @@
       "component": "location-guard",
       "module": "map",
       "docker": {
-        "image": "location-guard:{{version}}",
         "containerName": "lsap-location-guard",
-        "ports": ["{{ports.web}}:8080"],
-        "volumes": [
-          "{{installDir}}/conf/location-guard:/app/conf",
-          "{{installDir}}/logs/location-guard:/app/logs"
+        "dependsOn": [
+          "redis",
+          "mysql"
         ],
         "environment": {
           "CUSTOMER_NAME": "{{customer.name}}"
         },
-        "dependsOn": ["redis", "mysql"],
-        "restart": "unless-stopped"
+        "image": "location-guard:{{version}}",
+        "ports": [
+          "{{ports.web}}:8080"
+        ],
+        "restart": "unless-stopped",
+        "volumes": [
+          "{{installDir}}/conf/location-guard:/app/conf",
+          "{{installDir}}/logs/location-guard:/app/logs"
+        ]
       }
     },
     {
@@ -116,10 +165,12 @@
       "component": "location-push",
       "module": "push",
       "docker": {
-        "image": "location-push:{{version}}",
         "containerName": "lsap-location-push",
-        "volumes": ["{{installDir}}/conf/location-push:/app/conf"],
-        "restart": "unless-stopped"
+        "image": "location-push:{{version}}",
+        "restart": "unless-stopped",
+        "volumes": [
+          "{{installDir}}/conf/location-push:/app/conf"
+        ]
       }
     },
     {
@@ -131,41 +182,40 @@
         "unitName": "lsap-location-worker.service",
         "description": "LSAP Location Worker",
         "user": "lsap",
+        "group": "",
         "workingDirectory": "{{installDir}}/services/location-worker",
         "execStart": "{{installDir}}/services/location-worker/location-worker --config {{installDir}}/conf/location-worker.yaml",
+        "execStop": "",
         "restart": "always",
-        "after": ["network-online.target", "docker.service"],
+        "after": [
+          "network-online.target",
+          "docker.service"
+        ],
         "wantedBy": "multi-user.target",
-        "environmentFile": "{{installDir}}/conf/location-worker.env",
         "environment": {
           "LSAP_PROFILE": "{{profile}}",
           "LSAP_VERSION": "{{version}}"
-        }
+        },
+        "environmentFile": "{{installDir}}/conf/location-worker.env"
       }
     }
   ],
-  "artifacts": {
-    "location-engine": "artifact/Publish/engine/main/latest/location-engine-*.tar.gz",
-    "location-guard": "artifact/Publish/location-guard/main/latest/location-guard-*.tar.gz",
-    "location-push": "artifact/Publish/location-push/guard-2.2/latest/location-push-*.tar.gz",
-    "ui": "artifact/Publish/location-guard-ui/main/latest/dist.zip"
-  },
   "config": {
-    "ports": {
-      "web": 48000
+    "approvalRequired": true,
+    "customer": {
+      "license": "community",
+      "name": "Default Customer"
     },
     "database": {
       "passwordPolicy": "strong"
     },
-    "customer": {
-      "name": "Default Customer",
-      "license": "community"
-    },
     "modules": {
       "camera": true,
-      "push": true,
-      "map": true
+      "map": true,
+      "push": true
     },
-    "approvalRequired": true
+    "ports": {
+      "web": 48000
+    }
   }
 }

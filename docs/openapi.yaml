@@ -1,0 +1,1561 @@
+openapi: 3.1.0
+info:
+  title: Vela Control Plane API
+  version: 1.0.0
+  summary: Frontend-facing REST contract for Vela's packaging control plane.
+  description: |
+    This contract describes the current HTTP API used by a redesigned frontend.
+    It deliberately excludes internal Runner-control endpoints and the Prometheus
+    metrics endpoint; those are documented in `docs/api.md` and must not be called
+    from a browser application.
+
+    The server is authoritative for authorization, Build state transitions, release
+    gates, artifact download policy, and audit records. Client code must branch on
+    stable error codes and release-check IDs, never on natural-language messages.
+  license:
+    name: Internal
+    identifier: LicenseRef-Internal
+servers:
+  - url: https://{host}
+    description: Production deployment behind the platform reverse proxy.
+    variables:
+      host:
+        default: vela.example.internal
+  - url: http://127.0.0.1:8080
+    description: Local development server.
+tags:
+  - name: Health
+    description: API process liveness.
+  - name: Authentication
+    description: OIDC broker and platform-session lifecycle.
+  - name: Products
+    description: Declarative product manifests, overlays, and revisions.
+  - name: Builds
+    description: Build lifecycle, release gates, artifacts, logs, and evidence.
+  - name: Uploads
+    description: Artifact upload metadata and governed downloads.
+  - name: Runners
+    description: Read-only, derived Runner observability for the UI.
+  - name: Audit
+    description: Read-only audit-event queries and portable archive export.
+  - name: Notifications
+    description: Durable platform notifications and their read state.
+security: []
+paths:
+  /api/health:
+    get:
+      tags: [Health]
+      operationId: health
+      summary: Check HTTP handler liveness
+      description: Does not verify PostgreSQL, Nomad, artifact storage, or OIDC health.
+      responses:
+        '200':
+          description: API handler is reachable.
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+            X-Correlation-Id: {$ref: '#/components/headers/CorrelationId'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Health'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /api/auth/oidc/token:
+    post:
+      tags: [Authentication]
+      operationId: exchangeOidcCode
+      summary: Exchange an OIDC authorization-code + PKCE verifier for a platform session
+      description: |
+        Available only if the optional OIDC broker is configured. This endpoint accepts
+        no prior platform bearer token. It must be called only from an approved browser
+        authorization-code/PKCE flow.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/OidcTokenBrokerRequest'}
+      responses:
+        '200':
+          description: A short-lived platform bearer session.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OidcTokenBrokerResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404':
+          description: OIDC broker is not configured.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorResponse'}
+        '502': {$ref: '#/components/responses/UpstreamFailure'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /api/auth/logout:
+    post:
+      tags: [Authentication]
+      operationId: logout
+      summary: Revoke a persisted platform session when applicable
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Logout was accepted. Static and raw OIDC tokens are not server-revocable.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LogoutResponse'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/products:
+    get:
+      tags: [Products]
+      operationId: listProducts
+      summary: List product definitions
+      description: Read access is currently anonymous in the implementation; deployment policy may add edge authentication.
+      responses:
+        '200':
+          description: Product definitions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Product'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/products/{id}:
+    parameters: [{$ref: '#/components/parameters/ProductId'}]
+    get:
+      tags: [Products]
+      operationId: getProduct
+      summary: Get a product definition
+      responses:
+        '200':
+          description: Product definition.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Product'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/products/{id}/manifest:
+    parameters: [{$ref: '#/components/parameters/ProductId'}]
+    get:
+      tags: [Products]
+      operationId: getProductManifest
+      summary: Get the raw product manifest
+      responses:
+        '200':
+          description: Manifest JSON. Its detailed schema is Product-compatible and is validated server-side.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Product'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    put:
+      tags: [Products]
+      operationId: updateProductManifest
+      summary: Validate and replace a product manifest
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Product'}
+      responses:
+        '200':
+          description: Updated product.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Product'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/products/{id}/manifest/dry-run:
+    parameters: [{$ref: '#/components/parameters/ProductId'}]
+    post:
+      tags: [Products]
+      operationId: dryRunProductManifest
+      summary: Validate and resolve a draft manifest without creating a Build
+      description: |
+        Validation and resolution failures are represented by `200` with `valid: false`.
+        A missing/empty `manifest` causes the server to use the saved manifest.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ManifestDryRunRequest'}
+      responses:
+        '200':
+          description: Resolution result, including expected validation failures.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ManifestDryRunResult'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/products/{id}/manifest/revisions:
+    parameters: [{$ref: '#/components/parameters/ProductId'}]
+    get:
+      tags: [Products]
+      operationId: listProductManifestRevisions
+      summary: List revision metadata for a product manifest
+      responses:
+        '200':
+          description: Revisions, normally without full manifest bodies.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/ManifestRevision'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+  /api/products/{id}/manifest/revisions/{revision}/restore:
+    parameters:
+      - {$ref: '#/components/parameters/ProductId'}
+      - {$ref: '#/components/parameters/Revision'}
+    post:
+      tags: [Products]
+      operationId: restoreProductManifestRevision
+      summary: Restore a manifest revision as the current manifest
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Restored product.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Product'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/products/{id}/overlays/{kind}:
+    parameters:
+      - {$ref: '#/components/parameters/ProductId'}
+      - {$ref: '#/components/parameters/OverlayKind'}
+    get:
+      tags: [Products]
+      operationId: listProductOverlays
+      summary: List profile or customer overlays
+      responses:
+        '200':
+          description: Overlay records.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/OverlayRecord'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+  /api/products/{id}/overlays/{kind}/{name}:
+    parameters:
+      - {$ref: '#/components/parameters/ProductId'}
+      - {$ref: '#/components/parameters/OverlayKind'}
+      - {$ref: '#/components/parameters/OverlayName'}
+    get:
+      tags: [Products]
+      operationId: getProductOverlay
+      summary: Get one profile or customer overlay
+      responses:
+        '200':
+          description: Overlay record.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OverlayRecord'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    put:
+      tags: [Products]
+      operationId: updateProductOverlay
+      summary: Create or replace a profile/customer overlay
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Saved overlay record.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OverlayRecord'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/products/{id}/versions:
+    parameters: [{$ref: '#/components/parameters/ProductId'}]
+    get:
+      tags: [Products]
+      operationId: listProductVersions
+      summary: List selectable versions for a product
+      responses:
+        '200':
+          description: Configured versions, or `["latest"]` if none are configured.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [versions]
+                properties:
+                  versions:
+                    type: array
+                    items: {type: string}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/builds:
+    get:
+      tags: [Builds]
+      operationId: listBuilds
+      summary: List Builds
+      description: Each Build includes a server-computed `releaseCheckSummary`.
+      responses:
+        '200':
+          description: Builds ordered by the store implementation.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Build'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    post:
+      tags: [Builds]
+      operationId: createBuild
+      summary: Create a Preview Build pending approval
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/BuildRequest'}
+      responses:
+        '202':
+          description: Build was resolved and saved with status `pending_approval`.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Build'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/builds/{id}:
+    parameters: [{$ref: '#/components/parameters/BuildId'}]
+    get:
+      tags: [Builds]
+      operationId: getBuild
+      summary: Get Build detail
+      responses:
+        '200':
+          description: Build detail, including resolved lock and logs.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Build'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/builds/{id}/lock:
+    parameters: [{$ref: '#/components/parameters/BuildId'}]
+    get:
+      tags: [Builds]
+      operationId: getBuildLock
+      summary: Get the immutable resolution snapshot for a Build
+      responses:
+        '200':
+          description: Build Lock.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BuildLock'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/builds/{id}/release-check:
+    parameters: [{$ref: '#/components/parameters/BuildId'}]
+    get:
+      tags: [Builds]
+      operationId: getBuildReleaseCheck
+      summary: Evaluate Preview and Release gate checks
+      responses:
+        '200':
+          description: Server-authoritative release gate status.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReleaseCheckResult'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/builds/{id}/reproducibility-report:
+    parameters: [{$ref: '#/components/parameters/BuildId'}]
+    get:
+      tags: [Builds]
+      operationId: getBuildReproducibilityReport
+      summary: Generate a read-only reproducibility report
+      responses:
+        '200':
+          description: Reproducibility report derived from the current Build record and lock.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReproducibilityReport'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/builds/{id}/release-evidence/archive:
+    parameters: [{$ref: '#/components/parameters/BuildId'}]
+    get:
+      tags: [Builds]
+      operationId: exportBuildReleaseEvidenceArchive
+      summary: Export signed/persisted release evidence
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Release evidence archive. Optional signature and object-lock fields depend on deployment configuration.
+          headers:
+            Content-Disposition:
+              schema: {type: string}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReleaseEvidenceArchive'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /api/builds/{id}/download:
+    parameters: [{$ref: '#/components/parameters/BuildId'}]
+    get:
+      tags: [Builds]
+      operationId: downloadBuild
+      summary: Download or resolve a Build artifact
+      description: |
+        If a `downloadUrl` exists, returns a 302 redirect. Otherwise returns its opaque
+        artifact URI. Authorization is conditional: a linked upload inherits its download
+        policy; otherwise auth-enabled deployments require viewer+.
+      security: [{}, {bearerAuth: []}]
+      responses:
+        '200':
+          description: No direct download URL was available; the caller received an opaque artifact URI.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [artifactUri]
+                properties:
+                  artifactUri: {type: string}
+        '302':
+          description: Redirect to the authorized artifact download URL.
+          headers:
+            Location:
+              required: true
+              schema: {type: string, format: uri}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '410': {$ref: '#/components/responses/ArtifactExpired'}
+  /api/builds/{id}/approve:
+    parameters: [{$ref: '#/components/parameters/BuildId'}]
+    post:
+      tags: [Builds]
+      operationId: approveBuild
+      summary: Approve a pending/rejected Build and schedule it
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Queued Build with scheduler job reference.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Build'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/BuildStateConflict'}
+        '502': {$ref: '#/components/responses/SchedulerSubmitFailed'}
+  /api/builds/{id}/reject:
+    parameters: [{$ref: '#/components/parameters/BuildId'}]
+    post:
+      tags: [Builds]
+      operationId: rejectBuild
+      summary: Reject a pending Build
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Rejected Build.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Build'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/builds/{id}/validate-preview:
+    parameters: [{$ref: '#/components/parameters/BuildId'}]
+    post:
+      tags: [Builds]
+      operationId: validatePreviewBuild
+      summary: Mark a successful Preview Build as validated if Preview gates pass
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Preview-validated Build.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Build'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/PreviewGateBlocked'}
+  /api/builds/{id}/publish:
+    parameters: [{$ref: '#/components/parameters/BuildId'}]
+    post:
+      tags: [Builds]
+      operationId: publishBuild
+      summary: Promote a validated Preview Build to Release
+      description: Requires admin. Artifact URLs may optionally be replaced in the body before the server commits publication.
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PublishBuildRequest'}
+      responses:
+        '200':
+          description: Published Build with `releaseChannel=release`.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Build'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/ReleaseGateBlocked'}
+  /api/builds/{id}/retry:
+    parameters: [{$ref: '#/components/parameters/BuildId'}]
+    post:
+      tags: [Builds]
+      operationId: retryBuild
+      summary: Requeue a failed or canceled Build
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Requeued Build.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Build'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/BuildStateConflict'}
+        '502': {$ref: '#/components/responses/SchedulerSubmitFailed'}
+  /api/builds/{id}/cancel:
+    parameters: [{$ref: '#/components/parameters/BuildId'}]
+    post:
+      tags: [Builds]
+      operationId: cancelBuild
+      summary: Cancel a pending, queued, or running Build
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Canceled Build.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Build'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '502': {$ref: '#/components/responses/SchedulerStopFailed'}
+  /api/builds/{id}/logs:
+    parameters: [{$ref: '#/components/parameters/BuildId'}]
+    get:
+      tags: [Builds]
+      operationId: listBuildLogs
+      summary: Get a Build's durable log snapshot
+      responses:
+        '200':
+          description: Build logs with server-assigned sequences.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/BuildLog'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/builds/{id}/logs/stream:
+    parameters: [{$ref: '#/components/parameters/BuildId'}]
+    get:
+      tags: [Builds]
+      operationId: streamBuildLogs
+      summary: Stream Build logs using Server-Sent Events
+      description: |
+        The default sends a snapshot and closes. Pass `follow=true` to keep a polling
+        stream open. Each normal event is `event: log` with a BuildLog JSON payload;
+        stream failures use `event: error` with ErrorResponse JSON.
+      parameters:
+        - name: follow
+          in: query
+          required: false
+          schema: {type: boolean, default: false}
+          description: Only the literal query value `true` enables follow mode.
+      responses:
+        '200':
+          description: Event stream.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE stream; see endpoint description for event payloads.
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/runners:
+    get:
+      tags: [Runners]
+      operationId: listRunners
+      summary: List derived Runner status
+      responses:
+        '200':
+          description: Runner status derived from Builds and logs.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/RunnerStatus'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/uploads:
+    get:
+      tags: [Uploads]
+      operationId: listUploads
+      summary: List upload records
+      responses:
+        '200':
+          description: Upload metadata; retention status is computed at read time.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/UploadRecord'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    post:
+      tags: [Uploads]
+      operationId: uploadArtifact
+      summary: Upload a component or supporting artifact
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                downloadPolicy:
+                  type: string
+                  enum: [public, platform, restricted]
+                  default: platform
+                retentionDays:
+                  type: integer
+                  minimum: 0
+                  maximum: 3650
+                  default: 30
+                metadata:
+                  type: object
+                  additionalProperties: {type: string}
+                  description: Send as individual multipart fields named `metadata.{key}`.
+      responses:
+        '201':
+          description: Uploaded artifact metadata.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UploadRecord'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /api/uploads/{id}/download:
+    parameters: [{$ref: '#/components/parameters/UploadId'}]
+    get:
+      tags: [Uploads]
+      operationId: downloadUpload
+      summary: Download artifact bytes under its stored download policy
+      description: |
+        Authorization is conditional. `public` may be anonymous; `platform` requires
+        viewer+ and `restricted` requires operator+ when auth is enabled. Expired
+        records return `410`.
+      security: [{}, {bearerAuth: []}]
+      responses:
+        '200':
+          description: Artifact byte stream. Content type is stored metadata when known.
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '410': {$ref: '#/components/responses/ArtifactExpired'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /api/audit-events:
+    get:
+      tags: [Audit]
+      operationId: listAuditEvents
+      summary: List independent audit events
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/ResourceTypeFilter'}
+        - {$ref: '#/components/parameters/ResourceIdFilter'}
+        - {$ref: '#/components/parameters/BuildIdFilter'}
+        - {$ref: '#/components/parameters/ProductIdFilter'}
+        - {$ref: '#/components/parameters/UploadIdFilter'}
+        - {$ref: '#/components/parameters/ActionFilter'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: Audit events, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/AuditEvent'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /api/audit-events/archive:
+    get:
+      tags: [Audit]
+      operationId: exportAuditArchive
+      summary: Export a digest-addressed audit archive
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/ResourceTypeFilter'}
+        - {$ref: '#/components/parameters/ResourceIdFilter'}
+        - {$ref: '#/components/parameters/BuildIdFilter'}
+        - {$ref: '#/components/parameters/ProductIdFilter'}
+        - {$ref: '#/components/parameters/UploadIdFilter'}
+        - {$ref: '#/components/parameters/ActionFilter'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: Archive, optionally signed and persisted to artifact storage.
+          headers:
+            Content-Disposition:
+              schema: {type: string}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AuditArchive'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /api/notifications:
+    get:
+      tags: [Notifications]
+      operationId: listNotifications
+      summary: List durable notifications
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/NotificationRead'}
+        - {$ref: '#/components/parameters/NotificationType'}
+        - {$ref: '#/components/parameters/NotificationSeverity'}
+        - {$ref: '#/components/parameters/ResourceTypeFilter'}
+        - {$ref: '#/components/parameters/ResourceIdFilter'}
+        - {$ref: '#/components/parameters/BuildIdFilter'}
+        - {$ref: '#/components/parameters/ProductIdFilter'}
+        - {$ref: '#/components/parameters/UploadIdFilter'}
+        - {$ref: '#/components/parameters/RunnerIdFilter'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: Notifications ordered by newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Notification'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/InternalError'}
+  /api/notifications/{id}/read:
+    parameters: [{$ref: '#/components/parameters/NotificationId'}]
+    post:
+      tags: [Notifications]
+      operationId: markNotificationRead
+      summary: Mark one notification as read
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Updated notification.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Notification'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/notifications/read-all:
+    post:
+      tags: [Notifications]
+      operationId: markAllNotificationsRead
+      summary: Mark all notifications as read
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Notifications changed by the operation.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/Notification'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/InternalError'}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT or platform session token
+      description: |
+        Required where declared when `AUTH_ENABLED=true`. The runtime recognizes configured
+        static tokens, validated RS256 OIDC tokens, and broker-issued platform session tokens.
+        Roles are enforced server-side: viewer, operator, admin; the runner role is internal-only.
+  headers:
+    RequestId:
+      description: Server-generated or client-provided request correlation identifier.
+      schema: {type: string, example: req_01JABC}
+    CorrelationId:
+      description: Server-generated or client-provided cross-request correlation identifier.
+      schema: {type: string, example: corr_01JABC}
+  parameters:
+    ProductId:
+      name: id
+      in: path
+      required: true
+      schema: {type: string}
+      description: Product identifier.
+    BuildId:
+      name: id
+      in: path
+      required: true
+      schema: {type: string}
+      description: Build identifier.
+    UploadId:
+      name: id
+      in: path
+      required: true
+      schema: {type: string}
+      description: Upload identifier.
+    NotificationId:
+      name: id
+      in: path
+      required: true
+      schema: {type: string}
+      description: Notification identifier.
+    Revision:
+      name: revision
+      in: path
+      required: true
+      schema: {type: string}
+    OverlayKind:
+      name: kind
+      in: path
+      required: true
+      schema: {type: string, enum: [profiles, customers]}
+    OverlayName:
+      name: name
+      in: path
+      required: true
+      schema: {type: string, pattern: '^[A-Za-z0-9._-]+$'}
+    ResourceTypeFilter:
+      name: resourceType
+      in: query
+      schema: {type: string}
+    ResourceIdFilter:
+      name: resourceId
+      in: query
+      schema: {type: string}
+    BuildIdFilter:
+      name: buildId
+      in: query
+      schema: {type: string}
+    ProductIdFilter:
+      name: productId
+      in: query
+      schema: {type: string}
+    UploadIdFilter:
+      name: uploadId
+      in: query
+      schema: {type: string}
+    RunnerIdFilter:
+      name: runnerId
+      in: query
+      schema: {type: string}
+    ActionFilter:
+      name: action
+      in: query
+      schema: {type: string}
+    Limit:
+      name: limit
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 200, default: 100}
+      description: The store defaults/clamps this value; malformed values are treated as absent.
+    NotificationRead:
+      name: read
+      in: query
+      schema: {type: string, enum: [read, unread, 'true', 'false']}
+    NotificationType:
+      name: type
+      in: query
+      schema: {type: string}
+    NotificationSeverity:
+      name: severity
+      in: query
+      schema: {type: string}
+  responses:
+    BadRequest:
+      description: Invalid JSON, invalid input, invalid state/action, or failed validation.
+      headers:
+        X-Request-Id: {$ref: '#/components/headers/RequestId'}
+        X-Correlation-Id: {$ref: '#/components/headers/CorrelationId'}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    Unauthorized:
+      description: Missing or invalid bearer credential.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    Forbidden:
+      description: Authenticated identity lacks the required role.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    NotFound:
+      description: Requested resource does not exist or artifact is unavailable.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    ArtifactExpired:
+      description: The artifact's configured retention period has expired.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    BuildStateConflict:
+      description: The current Build status does not permit this action.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    PreviewGateBlocked:
+      description: Preview validation checks are blocked. Inspect `error.details`.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    ReleaseGateBlocked:
+      description: Release promotion checks are blocked. Inspect `error.details`.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    SchedulerSubmitFailed:
+      description: The scheduler rejected or could not accept the Build.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    SchedulerStopFailed:
+      description: The scheduler could not stop the active Build job.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    UpstreamFailure:
+      description: A required upstream dependency was unavailable.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+    InternalError:
+      description: Internal server or storage failure.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
+  schemas:
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status: {type: string, const: ok}
+    OidcTokenBrokerRequest:
+      type: object
+      required: [code, codeVerifier, redirectUri]
+      properties:
+        code: {type: string}
+        codeVerifier: {type: string}
+        redirectUri: {type: string, format: uri}
+    OidcTokenBrokerResponse:
+      type: object
+      required: [token, tokenType, role, subject, expiresAt]
+      properties:
+        token: {type: string, description: Treat as secret; never log or persist in product data.}
+        tokenType: {type: string, const: Bearer}
+        role: {type: string, enum: [viewer, operator, admin]}
+        subject: {type: string}
+        sessionId: {type: string}
+        expiresAt: {$ref: '#/components/schemas/DateTime'}
+    LogoutResponse:
+      type: object
+      required: [status, revoked]
+      properties:
+        status: {type: string, const: ok}
+        sessionId: {type: string}
+        revoked: {type: boolean}
+    Product:
+      type: object
+      required: [id, name, description, targets, targetConfig, profiles, versions, artifacts, components, workloads, config]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        description: {type: string}
+        targets:
+          type: array
+          items: {type: string, enum: [linux, windows]}
+        targetConfig:
+          type: object
+          additionalProperties: {$ref: '#/components/schemas/TargetConfig'}
+        profiles:
+          type: array
+          items: {type: string}
+        versions:
+          type: array
+          items: {type: string}
+        artifacts:
+          type: object
+          additionalProperties: {type: string}
+        components:
+          type: array
+          items: {$ref: '#/components/schemas/Component'}
+        workloads:
+          type: array
+          items: {$ref: '#/components/schemas/Workload'}
+        config:
+          type: object
+          additionalProperties: true
+    TargetConfig:
+      type: object
+      required: [installDir, packageName, templates, config]
+      properties:
+        installDir: {type: string}
+        packageName: {type: string}
+        templates:
+          type: object
+          additionalProperties: {type: string}
+        config:
+          type: object
+          additionalProperties: true
+    Component:
+      type: object
+      required: [id, type, required, source]
+      properties:
+        id: {type: string}
+        type: {type: string}
+        required: {type: boolean}
+        source: {$ref: '#/components/schemas/ComponentSource'}
+    ComponentSource:
+      type: object
+      properties:
+        kind:
+          type: string
+          enum: [artifact-repository, manual-upload, fixed-url, previous-build]
+        repository: {type: string}
+        path: {type: string}
+        url: {type: string}
+        uploadId: {type: string}
+        uri: {type: string}
+        accept:
+          type: array
+          items: {type: string}
+    Workload:
+      type: object
+      required: [id, runtime, component, module]
+      properties:
+        id: {type: string}
+        runtime: {type: string, enum: [docker, systemd]}
+        component: {type: string}
+        module: {type: string}
+        enabled: {type: boolean}
+        docker:
+          type: object
+          additionalProperties: true
+        systemd: {$ref: '#/components/schemas/SystemdWorkload'}
+    SystemdWorkload:
+      type: object
+      properties:
+        unitName: {type: string}
+        description: {type: string}
+        user: {type: string}
+        group: {type: string}
+        workingDirectory: {type: string}
+        execStart: {type: string}
+        execStop: {type: string}
+        restart: {type: string}
+        after:
+          type: array
+          items: {type: string}
+        wantedBy: {type: string}
+        environment:
+          type: object
+          additionalProperties: {type: string}
+        environmentFile: {type: string}
+    ManifestRevision:
+      type: object
+      required: [id, productId, hash, summary, createdAt]
+      properties:
+        id: {type: string}
+        productId: {type: string}
+        hash: {type: string}
+        summary: {type: string}
+        manifest: {$ref: '#/components/schemas/Product'}
+        createdAt: {$ref: '#/components/schemas/DateTime'}
+    OverlayRecord:
+      type: object
+      required: [name, kind, data]
+      properties:
+        name: {type: string}
+        kind: {type: string, enum: [profiles, customers]}
+        data:
+          type: object
+          additionalProperties: true
+    ManifestDryRunRequest:
+      type: object
+      properties:
+        manifest:
+          oneOf:
+            - {$ref: '#/components/schemas/Product'}
+            - {type: object, additionalProperties: true}
+        target: {type: string, enum: [linux, windows]}
+        profile: {type: string}
+        customer: {type: string}
+        version: {type: string}
+        releaseChannel: {type: string, enum: [preview]}
+        variables:
+          type: object
+          additionalProperties: true
+        configOverrides:
+          type: object
+          additionalProperties: true
+        componentOverrides:
+          type: object
+          additionalProperties: {$ref: '#/components/schemas/ComponentSource'}
+    ManifestDryRunResult:
+      type: object
+      required: [valid, errors]
+      properties:
+        valid: {type: boolean}
+        errors:
+          type: array
+          items: {type: string}
+        buildLock: {$ref: '#/components/schemas/BuildLock'}
+        config:
+          type: object
+          additionalProperties: true
+        components:
+          type: array
+          items: {$ref: '#/components/schemas/ResolvedComponent'}
+    BuildRequest:
+      type: object
+      required: [productId, target]
+      properties:
+        productId: {type: string}
+        target: {type: string, enum: [linux, windows]}
+        profile: {type: string}
+        customer: {type: string}
+        version: {type: string}
+        releaseChannel:
+          type: string
+          enum: [preview]
+          description: Direct `release` creation is rejected by the server.
+        variables:
+          type: object
+          additionalProperties: true
+        configOverrides:
+          type: object
+          additionalProperties: true
+        componentOverrides:
+          type: object
+          additionalProperties: {$ref: '#/components/schemas/ComponentSource'}
+    PublishBuildRequest:
+      type: object
+      description: Optional artifact field updates recognized by the current publish handler.
+      properties:
+        artifactUri: {type: string}
+        downloadUrl: {type: string}
+    Build:
+      type: object
+      required:
+        - id
+        - productId
+        - target
+        - profile
+        - customer
+        - version
+        - releaseChannel
+        - status
+        - attempt
+        - runnerId
+        - nomadJobId
+        - artifactUri
+        - downloadUrl
+        - error
+        - variables
+        - finalConfig
+        - components
+        - workloads
+        - buildLock
+        - createdAt
+        - updatedAt
+        - schedulerLog
+        - logs
+      properties:
+        id: {type: string}
+        productId: {type: string}
+        target: {type: string, enum: [linux, windows]}
+        profile: {type: string}
+        customer: {type: string}
+        version: {type: string}
+        releaseChannel: {type: string, enum: [preview, release]}
+        status:
+          type: string
+          enum: [pending_approval, queued, running, succeeded, preview_validated, failed, rejected, published, canceled]
+        attempt: {type: integer, minimum: 0}
+        runnerId: {type: string}
+        nomadJobId: {type: string}
+        artifactUri: {type: string}
+        downloadUrl: {type: string}
+        error: {type: string}
+        variables:
+          type: object
+          additionalProperties: true
+        finalConfig:
+          type: object
+          additionalProperties: true
+        components:
+          type: array
+          items: {$ref: '#/components/schemas/ResolvedComponent'}
+        workloads:
+          type: array
+          items: {$ref: '#/components/schemas/ResolvedWorkload'}
+        buildLock: {$ref: '#/components/schemas/BuildLock'}
+        createdAt: {$ref: '#/components/schemas/DateTime'}
+        updatedAt: {$ref: '#/components/schemas/DateTime'}
+        schedulerLog: {type: string}
+        logs:
+          type: array
+          items: {$ref: '#/components/schemas/BuildLog'}
+        approvedAt: {$ref: '#/components/schemas/DateTime'}
+        validatedAt: {$ref: '#/components/schemas/DateTime'}
+        publishedAt: {$ref: '#/components/schemas/DateTime'}
+        canceledAt: {$ref: '#/components/schemas/DateTime'}
+        releaseCheckSummary: {$ref: '#/components/schemas/ReleaseCheckSummary'}
+    BuildLock:
+      type: object
+      required: [buildId, productId, target, profile, customer, version, releaseChannel, config, components, workloads]
+      properties:
+        buildId: {type: string}
+        productId: {type: string}
+        target: {type: string}
+        profile: {type: string}
+        customer: {type: string}
+        version: {type: string}
+        releaseChannel: {type: string}
+        config:
+          type: object
+          additionalProperties: true
+        components:
+          type: array
+          items: {$ref: '#/components/schemas/ResolvedComponent'}
+        workloads:
+          type: array
+          items: {$ref: '#/components/schemas/ResolvedWorkload'}
+    ResolvedComponent:
+      type: object
+      required: [id, type, version, source, uri, sha256, required]
+      properties:
+        id: {type: string}
+        type: {type: string}
+        version: {type: string}
+        source: {$ref: '#/components/schemas/ComponentSource'}
+        uri: {type: string}
+        sha256: {type: string}
+        required: {type: boolean}
+    ResolvedWorkload:
+      type: object
+      required: [id, runtime, component, module, enabled]
+      properties:
+        id: {type: string}
+        runtime: {type: string}
+        component: {type: string}
+        module: {type: string}
+        enabled: {type: boolean}
+        docker:
+          type: object
+          additionalProperties: true
+        systemd: {$ref: '#/components/schemas/SystemdWorkload'}
+    ReleaseCheckResult:
+      type: object
+      required: [buildId, stage, previewReady, releaseReady, blockingCount, checks]
+      properties:
+        buildId: {type: string}
+        stage: {type: string, enum: [preview, release]}
+        previewReady: {type: boolean}
+        releaseReady: {type: boolean}
+        blockingCount: {type: integer, minimum: 0}
+        checks:
+          type: array
+          items: {$ref: '#/components/schemas/ReleaseCheckItem'}
+    ReleaseCheckSummary:
+      type: object
+      required: [buildId, stage, previewReady, releaseReady, blockingCount]
+      properties:
+        buildId: {type: string}
+        stage: {type: string, enum: [preview, release]}
+        previewReady: {type: boolean}
+        releaseReady: {type: boolean}
+        blockingCount: {type: integer, minimum: 0}
+        firstBlockedId: {type: string}
+        firstBlockedStage: {type: string}
+        firstBlockedTitle: {type: string}
+        firstBlockedReason: {type: string}
+    ReleaseCheckItem:
+      type: object
+      required: [id, stage, title, status]
+      properties:
+        id: {type: string, example: release.fixed-version}
+        stage: {type: string, enum: [preview, release]}
+        title: {type: string}
+        status: {type: string, enum: [pass, blocked]}
+        reason: {type: string}
+    BuildLog:
+      type: object
+      required: [time, source, message]
+      properties:
+        time: {$ref: '#/components/schemas/DateTime'}
+        source: {type: string}
+        message: {type: string}
+        sequence: {type: integer, minimum: 1}
+        requestId: {type: string}
+        correlationId: {type: string}
+    UploadRecord:
+      type: object
+      required: [id, fileName, uri, downloadUrl, sha256, size, downloadPolicy, retentionDays, retentionStatus, createdAt]
+      properties:
+        id: {type: string}
+        fileName: {type: string}
+        uri: {type: string}
+        downloadUrl: {type: string}
+        sha256: {type: string}
+        size: {type: integer, format: int64, minimum: 0}
+        contentType: {type: string}
+        downloadPolicy: {type: string, enum: [public, platform, restricted]}
+        retentionDays: {type: integer, minimum: 0, maximum: 3650}
+        expiresAt: {$ref: '#/components/schemas/DateTime'}
+        retentionStatus: {type: string, enum: [active, expired, permanent]}
+        requestId: {type: string}
+        correlationId: {type: string}
+        metadata:
+          type: object
+          additionalProperties: {type: string}
+        createdAt: {$ref: '#/components/schemas/DateTime'}
+    RunnerStatus:
+      type: object
+      required: [runnerId, status, runningBuilds, completedBuilds, failedBuilds, recentMessages]
+      properties:
+        runnerId: {type: string}
+        target: {type: string}
+        status: {type: string, enum: [busy, online, idle, stale, offline, unknown]}
+        currentBuildId: {type: string}
+        currentBuildState: {type: string}
+        lastHeartbeatAt: {$ref: '#/components/schemas/DateTime'}
+        lastClaimAt: {$ref: '#/components/schemas/DateTime'}
+        lastLogAt: {$ref: '#/components/schemas/DateTime'}
+        runningBuilds: {type: integer, minimum: 0}
+        completedBuilds: {type: integer, minimum: 0}
+        failedBuilds: {type: integer, minimum: 0}
+        recentMessages:
+          type: array
+          items: {$ref: '#/components/schemas/BuildLog'}
+    AuditEvent:
+      type: object
+      required: [id, time, action, actorId, resourceType, resourceId, status, summary]
+      properties:
+        id: {type: string}
+        time: {$ref: '#/components/schemas/DateTime'}
+        action: {type: string}
+        actorId: {type: string}
+        actorRole: {type: string}
+        resourceType: {type: string}
+        resourceId: {type: string}
+        productId: {type: string}
+        buildId: {type: string}
+        uploadId: {type: string}
+        requestId: {type: string}
+        correlationId: {type: string}
+        status: {type: string}
+        summary: {type: string}
+        metadata:
+          type: object
+          additionalProperties: {type: string}
+    AuditArchive:
+      type: object
+      required: [schemaVersion, generatedAt, eventCount, filter, events, digestAlgorithm, digest]
+      properties:
+        schemaVersion: {type: string, const: packaging.audit.archive/v1}
+        generatedAt: {$ref: '#/components/schemas/DateTime'}
+        archiveUri: {type: string}
+        archiveStoredAt: {$ref: '#/components/schemas/DateTime'}
+        archiveRetentionMode: {type: string}
+        archiveRetainUntil: {$ref: '#/components/schemas/DateTime'}
+        archiveLegalHold: {type: string}
+        eventCount: {type: integer, minimum: 0}
+        filter: {$ref: '#/components/schemas/AuditEventFilter'}
+        events:
+          type: array
+          items: {$ref: '#/components/schemas/AuditEvent'}
+        digestAlgorithm: {type: string, const: sha256}
+        digest: {type: string}
+        signatureAlgorithm: {type: string, const: hmac-sha256}
+        signatureKeyId: {type: string}
+        signature: {type: string}
+    AuditEventFilter:
+      type: object
+      properties:
+        resourceType: {type: string}
+        resourceId: {type: string}
+        buildId: {type: string}
+        productId: {type: string}
+        uploadId: {type: string}
+        action: {type: string}
+        limit: {type: integer}
+    Notification:
+      type: object
+      required: [id, createdAt, type, severity, title, message]
+      properties:
+        id: {type: string}
+        createdAt: {$ref: '#/components/schemas/DateTime'}
+        readAt: {$ref: '#/components/schemas/DateTime'}
+        type: {type: string}
+        severity: {type: string}
+        title: {type: string}
+        message: {type: string}
+        resourceType: {type: string}
+        resourceId: {type: string}
+        productId: {type: string}
+        buildId: {type: string}
+        uploadId: {type: string}
+        runnerId: {type: string}
+        actionUrl: {type: string}
+        metadata:
+          type: object
+          additionalProperties: {type: string}
+    ReproducibilityReport:
+      type: object
+      required: [generatedAt, buildId, productId, target, profile, customer, version, releaseChannel, status, reproducible, releaseCheck, buildLock, sourceArtifacts, outputArtifact, runner, lifecycle]
+      properties:
+        generatedAt: {$ref: '#/components/schemas/DateTime'}
+        buildId: {type: string}
+        productId: {type: string}
+        target: {type: string}
+        profile: {type: string}
+        customer: {type: string}
+        version: {type: string}
+        releaseChannel: {type: string}
+        status: {type: string}
+        reproducible: {type: boolean}
+        releaseCheck: {$ref: '#/components/schemas/ReleaseCheckResult'}
+        buildLock: {$ref: '#/components/schemas/BuildLock'}
+        sourceArtifacts:
+          type: array
+          items: {$ref: '#/components/schemas/ReproducibilitySourceArtifact'}
+        outputArtifact: {$ref: '#/components/schemas/ReproducibilityArtifact'}
+        runner: {$ref: '#/components/schemas/ReproducibilityRunner'}
+        lifecycle: {$ref: '#/components/schemas/ReproducibilityLifecycle'}
+        configFingerprint:
+          type: object
+          additionalProperties: {type: string}
+        metadata:
+          type: object
+          additionalProperties: {type: string}
+    ReproducibilitySourceArtifact:
+      type: object
+      required: [componentId, type, version, sourceKind, uri, required]
+      properties:
+        componentId: {type: string}
+        type: {type: string}
+        version: {type: string}
+        sourceKind: {type: string}
+        uri: {type: string}
+        sha256: {type: string}
+        required: {type: boolean}
+    ReproducibilityArtifact:
+      type: object
+      required: [uri, downloadUrl]
+      properties:
+        uri: {type: string}
+        downloadUrl: {type: string}
+        uploadId: {type: string}
+        sha256: {type: string}
+        size: {type: integer, format: int64}
+        contentType: {type: string}
+        downloadPolicy: {type: string}
+        retentionStatus: {type: string}
+        createdAt: {$ref: '#/components/schemas/DateTime'}
+    ReproducibilityRunner:
+      type: object
+      properties:
+        runnerId: {type: string}
+        nomadJobId: {type: string}
+    ReproducibilityLifecycle:
+      type: object
+      required: [createdAt, updatedAt]
+      properties:
+        createdAt: {$ref: '#/components/schemas/DateTime'}
+        approvedAt: {$ref: '#/components/schemas/DateTime'}
+        validatedAt: {$ref: '#/components/schemas/DateTime'}
+        publishedAt: {$ref: '#/components/schemas/DateTime'}
+        updatedAt: {$ref: '#/components/schemas/DateTime'}
+    ReleaseEvidenceArchive:
+      type: object
+      required: [schemaVersion, generatedAt, buildId, productId, reproducible, report, digestAlgorithm, digest]
+      properties:
+        schemaVersion: {type: string, const: packaging.release.evidence/v1}
+        generatedAt: {$ref: '#/components/schemas/DateTime'}
+        archiveUri: {type: string}
+        archiveStoredAt: {$ref: '#/components/schemas/DateTime'}
+        archiveRetentionMode: {type: string}
+        archiveRetainUntil: {$ref: '#/components/schemas/DateTime'}
+        archiveLegalHold: {type: string}
+        buildId: {type: string}
+        productId: {type: string}
+        reproducible: {type: boolean}
+        report: {$ref: '#/components/schemas/ReproducibilityReport'}
+        digestAlgorithm: {type: string, const: sha256}
+        digest: {type: string}
+        signatureAlgorithm: {type: string, const: hmac-sha256}
+        signatureKeyId: {type: string}
+        signature: {type: string}
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error: {$ref: '#/components/schemas/ApiError'}
+        errors:
+          type: array
+          description: Legacy compatibility list derived from `error.details`; do not use for client logic.
+          items: {type: string}
+    ApiError:
+      type: object
+      required: [code, status, message, severity, category, retryable]
+      properties:
+        code: {type: string, example: BUILD_RELEASE_GATE_BLOCKED}
+        status: {type: integer}
+        messageKey: {type: string}
+        message: {type: string}
+        severity: {type: string, enum: [error, warning, critical]}
+        category: {type: string, enum: [security, validation, business, resource, system]}
+        retryable: {type: boolean}
+        userActionKey: {type: string}
+        userAction: {type: string}
+        requestId: {type: string}
+        correlationId: {type: string}
+        details:
+          type: array
+          items: {$ref: '#/components/schemas/ApiErrorDetail'}
+    ApiErrorDetail:
+      type: object
+      required: [message]
+      properties:
+        code: {type: string}
+        field: {type: string}
+        stage: {type: string}
+        title: {type: string}
+        titleKey: {type: string}
+        messageKey: {type: string}
+        message: {type: string}
+        params:
+          type: object
+          additionalProperties: {type: string}
+    DateTime:
+      type: string
+      format: date-time
