@@ -224,6 +224,20 @@ class AcceptanceCliTest(unittest.TestCase):
         self.assertEqual(overrides["ui"]["uploadId"], "upload-1")
         self.assertEqual(overrides["ui"]["uri"], "http://packaging-api:8080/api/uploads/upload-1/download")
 
+    def test_local_component_overrides_defer_to_locked_upload_resolution(self):
+        overrides = acceptance_cli.component_overrides(
+            args(artifact_store="local"),
+            {
+                "ui": {
+                    "id": "upload-1",
+                    "uri": "local-upload://upload-1/ui.bin",
+                    "downloadUrl": "http://127.0.0.1:8080/api/uploads/upload-1/download",
+                }
+            },
+        )
+
+        self.assertEqual(overrides["ui"], {"kind": "manual-upload", "uploadId": "upload-1"})
+
     def test_run_acceptance_uses_real_runner_path_and_validates_release_gate(self):
         fake = FakeAcceptanceApi()
 

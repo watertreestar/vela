@@ -1447,7 +1447,7 @@ func (s Server) downloadRunnerInput(w http.ResponseWriter, r *http.Request) {
 	var locked *domain.ResolvedComponent
 	for index := range build.BuildLock.Components {
 		component := &build.BuildLock.Components[index]
-		if component.Source.UploadID == uploadID && component.URI == "local-upload://"+uploadID && strings.TrimSpace(component.SHA256) != "" {
+		if component.Source.UploadID == uploadID && strings.HasPrefix(component.URI, "local-upload://"+uploadID+"/") && strings.TrimSpace(component.SHA256) != "" {
 			locked = component
 			break
 		}

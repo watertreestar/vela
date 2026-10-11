@@ -571,14 +571,13 @@ def runner_download_url(args: argparse.Namespace, upload: dict[str, Any]) -> str
 def component_overrides(args: argparse.Namespace, uploads: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     overrides: dict[str, dict[str, Any]] = {}
     for component_id, upload in uploads.items():
-        uri = upload["uri"]
-        if args.artifact_store == "minio":
-            uri = runner_download_url(args, upload)
-        overrides[component_id] = {
+        override = {
             "kind": "manual-upload",
             "uploadId": upload["id"],
-            "uri": uri,
         }
+        if args.artifact_store == "minio":
+            override["uri"] = runner_download_url(args, upload)
+        overrides[component_id] = override
     return overrides
 
 

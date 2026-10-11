@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"vela/conductor/internal/artifact"
+	"vela/conductor/internal/config"
 	"vela/conductor/internal/domain"
 )
 
@@ -80,5 +82,49 @@ func TestAuthEnabledExecutionAuthorizationFencesBuildAndClaims(t *testing.T) {
 	response = doRequestWithHeaders(t, server, http.MethodPost, "/api/runner/tasks/execution-a/heartbeat", `{}`, headers)
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("expected JTI fence rejection, got %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestAuthEnabledRunnerDownloadsLockedLocalUploadWithFilenameURI(t *testing.T) {
+	store, _ := newTestServerStore(t)
+	dataDir := t.TempDir()
+	artifacts, err := artifact.NewStore(config.Config{DataDir: dataDir, APIBaseURL: "http://api.test", ArtifactStore: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServerWithAuth(store, &fakeScheduler{}, artifacts, testAuthConfig()).Routes()
+	uploadResponse := uploadRequestWithFieldsAndHeaders(t, server, "component.bin", "component-data", nil, bearer("operator-token"))
+	if uploadResponse.Code != http.StatusCreated {
+		t.Fatalf("expected upload status 201, got %d: %s", uploadResponse.Code, uploadResponse.Body.String())
+	}
+	var upload domain.UploadRecord
+	decodeJSON(t, uploadResponse, &upload)
+
+	now := time.Now().UTC()
+	expires := now.Add(time.Hour)
+	build := domain.Build{
+		ID: "locked-local-input", ProductID: "lsap", Target: "windows", Status: domain.BuildRunning,
+		Attempt: 1, RunnerID: "nomad-locked-local-input-a1", ExecutionJTI: "locked-local-jti", ExecutionExpiresAt: &expires,
+		BuildLock: domain.BuildLock{Components: []domain.ResolvedComponent{{
+			ID: "ui", Type: "archive", URI: upload.URI, SHA256: upload.SHA256, Required: true,
+			Source: domain.ComponentSource{Kind: "manual-upload", UploadID: upload.ID},
+		}}},
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.SaveBuild(build); err != nil {
+		t.Fatal(err)
+	}
+	capability, err := issueExecutionCapability("test-runner-execution-key", domain.ExecutionClaims{
+		BuildID: build.ID, Attempt: build.Attempt, Target: build.Target, RunnerID: build.RunnerID,
+		JTI: build.ExecutionJTI, IssuedAt: now.Add(-time.Minute), ExpiresAt: expires,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	headers := bearer("runner-token")
+	headers["X-Runner-Execution"] = capability
+	response := doRequestWithHeaders(t, server, http.MethodGet, "/api/runner/tasks/"+build.ID+"/inputs/"+upload.ID+"/download", "", headers)
+	if response.Code != http.StatusOK || response.Body.String() != "component-data" {
+		t.Fatalf("expected locked local upload download, got %d: %s", response.Code, response.Body.String())
 	}
 }
