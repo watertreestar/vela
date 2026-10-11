@@ -23,7 +23,11 @@ API variables for real Nomad scheduling:
 ```bash
 STORE_DRIVER=postgres
 DRY_RUN=false
-NOMAD_ADDR=http://127.0.0.1:4646
+NOMAD_ADDR=https://nomad.service.consul:4646
+NOMAD_TOKEN=<conductor-client-token>
+NOMAD_CACERT=/run/secrets/nomad/ca.pem
+NOMAD_CLIENT_CERT=/run/secrets/nomad/client.pem
+NOMAD_CLIENT_KEY=/run/secrets/nomad/client-key.pem
 PACKAGING_API_URL=http://<api-host>:8080
 # Required for auth-enabled real scheduling; keep only in the API/Conductor environment.
 AUTH_ENABLED=true
@@ -299,11 +303,17 @@ Live Nomad cluster readiness can be checked separately:
 python scripts/nomad_check_cli.py check \
   --production \
   --address "$NOMAD_ADDR" \
+  --ca-cert "$NOMAD_CACERT" \
+  --client-cert "$NOMAD_CLIENT_CERT" \
+  --client-key "$NOMAD_CLIENT_KEY" \
+  --require-token \
+  --require-acl \
+  --require-mtls \
   --require-linux-node \
   --require-windows-node
 ```
 
-This check calls Nomad's leader and node APIs, verifies at least one ready node, and can require ready nodes with `meta.node_class=linux-packager` and `meta.node_class=windows-packager`. Production mode expects `NOMAD_ADDR` to use HTTPS; for an explicitly accepted internal HTTP cluster, add `--allow-http` so the exception is visible in the confirmation lights.
+This check calls Nomad's leader, node stub, and node detail APIs, verifies at least one ready node, and can require ready nodes with `meta.node_class=linux-packager` and `meta.node_class=windows-packager`. `--require-acl` proves anonymous node reads and ACL administration are denied while a non-management client token can read nodes. `--require-mtls` proves the configured CA/client identity works and the server rejects a request without the client certificate. Token material should be provided through `NOMAD_TOKEN`, not argv. For an explicitly accepted internal HTTP cluster, `--allow-http` records the exception, but it is not mTLS evidence.
 
 ## Deployment Verification
 
@@ -318,7 +328,7 @@ Use the same verification flow for Linux and Windows:
 7. `GET /api/builds/{id}/release-check` reports Preview readiness.
 8. The admin console can validate Preview. Release promotion remains blocked until fixed versions and exact component URIs are present.
 9. `python scripts/lifecycle_cli.py check --full-conductor` passes in CI or deployment verification.
-10. `python scripts/nomad_check_cli.py check --production --address "$NOMAD_ADDR" --require-linux-node --require-windows-node` passes against the live cluster, or records a deliberate `--allow-http` exception for an internal HTTP endpoint.
+10. `python scripts/nomad_check_cli.py check --production --address "$NOMAD_ADDR" --require-token --require-acl --require-mtls --require-linux-node --require-windows-node` passes against the live cluster with `NOMAD_CACERT`, `NOMAD_CLIENT_CERT`, and `NOMAD_CLIENT_KEY` configured.
 
 If a build is stuck:
 

@@ -1548,6 +1548,9 @@ python scripts/production_readiness_cli.py check \
   --windows-live \
   --require-nomad-live \
   --nomad-live \
+  --nomad-require-token \
+  --nomad-require-acl \
+  --nomad-require-mtls \
   --require-nomad-linux-node \
   --require-nomad-windows-node \
   --require-artifact-retention-live \
@@ -1585,6 +1588,12 @@ python scripts/lifecycle_cli.py check --full-conductor
 python scripts/nomad_check_cli.py check \
   --production \
   --address "$NOMAD_ADDR" \
+  --ca-cert "$NOMAD_CACERT" \
+  --client-cert "$NOMAD_CLIENT_CERT" \
+  --client-key "$NOMAD_CLIENT_KEY" \
+  --require-token \
+  --require-acl \
+  --require-mtls \
   --require-linux-node \
   --require-windows-node
 python scripts/artifact_retention_cli.py check \

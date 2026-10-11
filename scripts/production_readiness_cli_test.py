@@ -252,6 +252,26 @@ class ProductionReadinessCliTest(unittest.TestCase):
         self.assertEqual(env["NOMAD_TOKEN"], "nomad-token-sentinel")
         self.assertNotIn("AUTH_RUNNER_TOKEN", env)
 
+    def test_nomad_command_keeps_token_out_of_argv_and_enables_acl_mtls_gates(self):
+        args = parse_args(
+            "--nomad-live",
+            "--nomad-address", "https://nomad.example.test:4646",
+            "--nomad-token", "nomad-token-sentinel",
+            "--nomad-ca-cert", "/run/nomad/ca.pem",
+            "--nomad-client-cert", "/run/nomad/client.pem",
+            "--nomad-client-key", "/run/nomad/client-key.pem",
+            "--nomad-require-acl",
+            "--nomad-require-mtls",
+        )
+
+        command = production_readiness_cli.nomad_command(args, pathlib.Path("."))
+        self.assertNotIn("nomad-token-sentinel", command)
+        self.assertIn("--require-acl", command)
+        self.assertIn("--require-mtls", command)
+        self.assertIn("/run/nomad/ca.pem", command)
+        env = production_readiness_cli.nomad_env(args)
+        self.assertEqual(env["NOMAD_TOKEN"], "nomad-token-sentinel")
+
     def test_report_masks_secret_like_details(self):
         results = [
             production_readiness_cli.CheckResult(

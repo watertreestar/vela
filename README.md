@@ -173,7 +173,7 @@ python scripts/production_readiness_cli.py check
 python scripts/artifact_retention_cli.py check --api-url "$PACKAGING_API_URL"
 python scripts/notification_routing_cli.py check --api-url "$PACKAGING_API_URL" --route critical=https://alert-router.internal/packaging/critical --route error=https://alert-router.internal/packaging/default
 python scripts/correlation_trace_cli.py trace --api-url "$PACKAGING_API_URL" --correlation-id "$PACKAGING_CORRELATION_ID"
-python scripts/nomad_check_cli.py check --production --address "$NOMAD_ADDR" --require-linux-node --require-windows-node
+python scripts/nomad_check_cli.py check --production --address "$NOMAD_ADDR" --require-token --require-acl --require-mtls --require-linux-node --require-windows-node
 python scripts/gitlab_package_check_cli.py check --production --base-url "$GITLAB_PACKAGE_BASE_URL" --token "$GITLAB_PACKAGE_TOKEN" --path "42/engine/1.2.3/engine.tar.gz" --expected-sha256 "$GITLAB_PACKAGE_EXPECTED_SHA256"
 python scripts/oidc_check_cli.py check --issuer https://idp.example.test --audience vela --jwks-url https://idp.example.test/certs --token "$OIDC_CHECK_TOKEN" --api-url http://127.0.0.1:8080
 python scripts/oidc_check_cli.py check --production --issuer "$OIDC_ISSUER" --audience "$OIDC_AUDIENCE" --jwks-url "$OIDC_JWKS_URL" --discovery-url "$OIDC_ISSUER/.well-known/openid-configuration" --authorization-url "$OIDC_AUTHORIZATION_URL" --token-url "$OIDC_TOKEN_URL" --expected-role "$OIDC_OPERATOR_ROLE" --token "$OIDC_CHECK_TOKEN" --api-url https://packaging-api.example.com
@@ -224,6 +224,7 @@ Conductor variables:
 - `NOMAD_ADDR` - Nomad API address, default `http://127.0.0.1:4646`.
 - `NOMAD_REGION` - Nomad region, default `global`.
 - `NOMAD_NAMESPACE` - Nomad namespace, default `default`.
+- `NOMAD_TOKEN`, `NOMAD_CACERT`, `NOMAD_CLIENT_CERT`, `NOMAD_CLIENT_KEY` - production Nomad ACL token and mTLS trust/client identity; inject as secrets and verify with `nomad_check_cli.py --require-acl --require-mtls`.
 - `RUNNER_TIMEOUT_SECONDS` - marks stale running builds failed, default `1800`.
 - `RECONCILE_INTERVAL_SECONDS` - Nomad lifecycle sync interval, default `30`.
 - `NOTIFICATION_RETENTION_DAYS` - read notification retention in days, default `90`; set `0` to disable pruning.

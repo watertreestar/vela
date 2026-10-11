@@ -223,7 +223,9 @@ def windows_env(args: argparse.Namespace) -> dict[str, str]:
 def nomad_command(args: argparse.Namespace, root: Path) -> list[str]:
     command = [sys.executable, str(root / "scripts" / "nomad_check_cli.py"), "check", "--production"]
     append_arg(command, "--address", env_or(args.nomad_address, "NOMAD_ADDR", "http://127.0.0.1:4646"))
-    append_arg(command, "--token", env_or(args.nomad_token, "NOMAD_TOKEN"))
+    append_arg(command, "--ca-cert", env_or(args.nomad_ca_cert, "NOMAD_CACERT"))
+    append_arg(command, "--client-cert", env_or(args.nomad_client_cert, "NOMAD_CLIENT_CERT"))
+    append_arg(command, "--client-key", env_or(args.nomad_client_key, "NOMAD_CLIENT_KEY"))
     append_arg(command, "--linux-node-class", env_or(args.nomad_linux_node_class, "NOMAD_LINUX_NODE_CLASS", "linux-packager"))
     append_arg(command, "--windows-node-class", env_or(args.nomad_windows_node_class, "NOMAD_WINDOWS_NODE_CLASS", "windows-packager"))
     if args.require_nomad_linux_node:
@@ -232,9 +234,21 @@ def nomad_command(args: argparse.Namespace, root: Path) -> list[str]:
         command.append("--require-windows-node")
     if args.nomad_require_token:
         command.append("--require-token")
+    if args.nomad_require_acl:
+        command.append("--require-acl")
+    if args.nomad_require_mtls:
+        command.append("--require-mtls")
     if args.nomad_allow_http:
         command.append("--allow-http")
     return command
+
+
+def nomad_env(args: argparse.Namespace) -> dict[str, str]:
+    env = dict(os.environ)
+    token = env_or(args.nomad_token, "NOMAD_TOKEN")
+    if token:
+        env["NOMAD_TOKEN"] = token
+    return env
 
 
 def artifact_retention_command(args: argparse.Namespace, root: Path) -> list[str]:
@@ -365,7 +379,7 @@ def run_checks(args: argparse.Namespace) -> list[CheckResult]:
         results.append(skipped_gate("Windows runner production readiness", args.require_windows_live, "--windows-live"))
 
     if args.nomad_live:
-        results.append(run_gate("Nomad cluster live acceptance", nomad_command(args, root), root, args.timeout))
+        results.append(run_gate("Nomad cluster live acceptance", nomad_command(args, root), root, args.timeout, nomad_env(args)))
     else:
         results.append(skipped_gate("Nomad cluster live acceptance", args.require_nomad_live, "--nomad-live"))
 
@@ -541,12 +555,17 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--nomad-live", action="store_true", help="run live Nomad cluster leader/node readiness")
     check.add_argument("--require-nomad-live", action="store_true", help="fail if --nomad-live is not supplied")
     check.add_argument("--nomad-address")
-    check.add_argument("--nomad-token")
+    check.add_argument("--nomad-token", help="passed to the child only through NOMAD_TOKEN")
+    check.add_argument("--nomad-ca-cert", help="defaults to NOMAD_CACERT")
+    check.add_argument("--nomad-client-cert", help="defaults to NOMAD_CLIENT_CERT")
+    check.add_argument("--nomad-client-key", help="defaults to NOMAD_CLIENT_KEY")
     check.add_argument("--nomad-linux-node-class")
     check.add_argument("--nomad-windows-node-class")
     check.add_argument("--require-nomad-linux-node", action="store_true")
     check.add_argument("--require-nomad-windows-node", action="store_true")
     check.add_argument("--nomad-require-token", action="store_true")
+    check.add_argument("--nomad-require-acl", action="store_true", help="require anonymous denial and a low-privilege client token")
+    check.add_argument("--nomad-require-mtls", action="store_true", help="require trusted client credentials and server-side client certificate enforcement")
     check.add_argument("--nomad-allow-http", action="store_true")
 
     check.add_argument("--artifact-retention-live", action="store_true", help="run live API artifact retention metadata/download enforcement acceptance")

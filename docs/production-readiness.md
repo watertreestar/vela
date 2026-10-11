@@ -45,6 +45,12 @@ python scripts/production_readiness_cli.py check \
   --require-nomad-live \
   --nomad-live \
   --nomad-address "$NOMAD_ADDR" \
+  --nomad-ca-cert "$NOMAD_CACERT" \
+  --nomad-client-cert "$NOMAD_CLIENT_CERT" \
+  --nomad-client-key "$NOMAD_CLIENT_KEY" \
+  --nomad-require-token \
+  --nomad-require-acl \
+  --nomad-require-mtls \
   --require-nomad-linux-node \
   --require-nomad-windows-node \
   --require-artifact-retention-live \
@@ -62,7 +68,9 @@ python scripts/production_readiness_cli.py check \
 
 如果生产环境选择启用 server-side session/token broker，聚合门禁应同时传入 `--idp-live --broker-live --require-broker`。broker live 验收依赖生产 IdP、一次性 authorization code、PKCE verifier 和后端 API，所以 `--require-broker` 不能单独使用；脚本会在缺少 `--idp-live --broker-live` 时失败。
 
-Nomad live 验收由 `scripts/nomad_check_cli.py` 完成，会访问 Nomad leader 和 node API，确认至少存在 ready 节点，并可通过 `--require-linux-node` / `--require-windows-node` 要求 `linux-packager`、`windows-packager` node class 均在线。生产模式默认要求 `NOMAD_ADDR` 使用 HTTPS；如果当前拓扑只在受控内网使用 HTTP，需要在命令中显式增加 `--nomad-allow-http`，这会在专项脚本里留下 warning。
+Nomad live 验收由 `scripts/nomad_check_cli.py` 完成，会访问 Nomad leader、node stub 和 node detail API，确认至少存在 ready 节点，并可通过 `--require-linux-node` / `--require-windows-node` 要求 `linux-packager`、`windows-packager` node class 均在线。`--require-acl` 还会证明 acceptance token 是非 management client token、匿名 node 读取被拒绝、该 token 不能列举 ACL token；`--require-mtls` 会加载 CA/客户端证书并证明不带客户端证书时 TLS 握手失败。生产发布门禁应同时启用这两个开关。受控内网 HTTP 例外仍可显式使用 `--nomad-allow-http`，但不能与 mTLS 验收同时成立。
+
+隔离复现可运行 `python scripts/nomad_acl_mtls_acceptance.py --docker-context dev-ubuntu`。脚本创建一次性 Nomad 1.10.5 server/client、CA、client identity 和低权限 ACL token，运行同一专项门禁后删除全部容器、网络和 credential volume。
 
 Artifact retention live 验收由 `scripts/artifact_retention_cli.py` 完成，会访问 `/api/uploads` 检查 `sha256`、`downloadUrl`、`downloadPolicy`、`retentionStatus` 元数据契约，统计 expired 数量，并抽样验证 expired 上传的下载入口必须返回 HTTP 410。它验证平台 API 的保留策略行为，不替代 RustFS/MinIO object-lock/WORM 验收。
 
