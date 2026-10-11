@@ -633,6 +633,23 @@ select { font: inherit; }
 .vela-drawer-summary > div:first-child { display: grid; gap: 4px; margin-bottom: 18px; }
 .vela-drawer-summary h2.ant-typography { margin: 0; font-size: 20px; }
 .vela-drawer-summary .ant-descriptions-item { padding-bottom: 8px; }
+.vela-drawer-command { position: relative; display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 24px; overflow: hidden; margin: 0 0 20px; border: 1px solid #d8dee7; border-left: 4px solid #667085; border-radius: 6px; background: #f7f8fa; padding: 18px 20px; }
+.vela-drawer-command.is-attention { border-left-color: var(--vela-orange); background: #fffaf5; }
+.vela-drawer-command.is-active { border-left-color: var(--vela-primary); background: #f6f9fd; }
+.vela-drawer-command.is-ready { border-left-color: #287052; background: #f4faf6; }
+.vela-drawer-command.is-blocked { border-left-color: #b42318; background: #fff8f7; }
+.vela-drawer-command-copy { display: grid; min-width: 0; gap: 4px; }
+.vela-drawer-command-label { color: #475467; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.vela-drawer-command.is-attention .vela-drawer-command-label { color: #99440b; }
+.vela-drawer-command.is-active .vela-drawer-command-label { color: var(--vela-primary-hover); }
+.vela-drawer-command.is-ready .vela-drawer-command-label { color: #176b4f; }
+.vela-drawer-command.is-blocked .vela-drawer-command-label { color: #b42318; }
+.vela-drawer-command h3.ant-typography { margin: 0; color: var(--vela-ink); font-size: 17px; line-height: 1.35; }
+.vela-drawer-actions { display: flex; max-width: 260px; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.vela-drawer-blocker { display: grid; grid-template-columns: auto minmax(0,1fr); align-items: start; gap: 8px; margin-top: 8px; color: #912018; font-size: 12px; line-height: 1.5; }
+.vela-drawer-blocker span { display: grid; gap: 1px; }
+.vela-drawer-load-state { display: grid; min-height: 220px; place-content: center; justify-items: center; gap: 12px; padding: 28px 0; }
+.vela-drawer-load-state .vela-error-banner { width: min(620px, 100%); }
 .vela-build-lifecycle { display: grid; grid-template-columns: repeat(6,minmax(0,1fr)); margin: 20px 0; padding: 0; list-style: none; }
 .vela-build-lifecycle li { position: relative; display: grid; grid-template-columns: 28px minmax(0,1fr); align-items: start; gap: 8px; min-width: 0; }
 .vela-build-lifecycle li:not(:last-child)::after { position: absolute; top: 13px; right: -4px; left: 28px; height: 1px; background: #d7dce3; content: ""; }
@@ -671,6 +688,9 @@ select { font: inherit; }
   .vela-query-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
 }
 @media (max-width: 767px) {
+  .vela-drawer-command { grid-template-columns: minmax(0,1fr); gap: 14px; padding: 16px; }
+  .vela-drawer-actions { max-width: none; justify-content: flex-start; }
+  .vela-drawer-summary .ant-descriptions-view table { table-layout: fixed; }
   .vela-create-workspace { grid-template-columns: minmax(0,1fr); gap: 24px; }
   .vela-create-context { position: static; margin-top: 0; border-left: 0; border-top: 1px solid var(--vela-line); padding: 20px 0 0; }
   .vela-form-grid { grid-template-columns: minmax(0,1fr); }

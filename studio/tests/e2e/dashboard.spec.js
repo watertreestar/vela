@@ -7,7 +7,7 @@ const builds = [
   { id: "build-success", productId: "lsap", target: "windows", profile: "prod", version: "1.0.0", customer: "bank", status: "succeeded", artifactUri: "minio://setup.exe", finalConfig: product.config, buildLock: { ...lock, buildId: "build-success" }, updatedAt: "2026-05-28T06:10:00Z" },
   { id: "build-gated", productId: "lsap", target: "linux", profile: "qa", version: "latest", customer: "trial", status: "preview_validated", artifactUri: "minio://latest.tar.gz", finalConfig: product.config, buildLock: { ...lock, buildId: "build-gated", components: [{ id: "guard", version: "latest", uri: "minio://guard/latest/*.tar.gz" }] }, updatedAt: "2026-05-28T06:20:00Z" },
 ];
-function withRelease(build) { const ready = build.status === "preview_validated" && build.version !== "latest"; return { ...build, releaseCheckSummary: { releaseReady: ready, blockingCount: ready ? 0 : 1 } }; }
+function withRelease(build) { const ready = build.status === "preview_validated" && build.version !== "latest"; return { ...build, releaseCheckSummary: { releaseReady: ready, blockingCount: ready ? 0 : 1, firstBlockedTitle: ready ? "" : "版本必须固定", firstBlockedReason: ready ? "" : build.status === "preview_validated" ? "版本仍为 latest，不能发布 Release。" : "尚未进入 Release 阶段。" } }; }
 async function mockApi(page) {
   const state = { builds: structuredClone(builds), creates: [], requests: [] };
   await page.route("http://localhost:8080/api/**", async (route) => {
@@ -24,7 +24,8 @@ async function mockApi(page) {
     if (method === "GET" && path === "/api/products/lsap/manifest") return json(product);
     if (method === "GET" && /\/(manifest\/revisions|overlays\/profiles|overlays\/customers)$/.test(path)) return json([]);
     if (method === "POST" && path === "/api/builds") { const payload = JSON.parse(request.postData() || "{}"); state.creates.push(payload); const created = { ...state.builds[0], id: "build-created", customer: payload.customer, finalConfig: payload.configOverrides, buildLock: { ...lock, buildId: "build-created", config: payload.configOverrides } }; state.builds.unshift(created); return json(withRelease(created), 202); }
-    const match = path.match(/^\/api\/builds\/([^/]+)\/(logs|lock|release-check|reproducibility-report)$/); if (match) { const [, id, part] = match; const build = state.builds.find((b) => b.id === id); if (part === "logs") return json([{ message: `logs for ${id}` }]); if (part === "lock") return json(build.buildLock); if (part === "release-check") return json({ releaseReady: withRelease(build).releaseCheckSummary.releaseReady, checks: [] }); return json({ reproducible: true }); }
+    const match = path.match(/^\/api\/builds\/([^/]+)\/(logs|lock|release-check|reproducibility-report)$/); if (match) { const [, id, part] = match; const build = state.builds.find((b) => b.id === id); if (part === "logs") return json([{ message: `logs for ${id}` }]); if (part === "lock") return json(build.buildLock); if (part === "release-check") { const ready = withRelease(build).releaseCheckSummary.releaseReady; return json({ releaseReady: ready, checks: ready ? [] : [{ id: "fixed-version", stage: "release", status: "blocked", title: "版本必须固定", reason: build.status === "preview_validated" ? "版本仍为 latest，不能发布 Release。" : "尚未进入 Release 阶段。" }] }); } return json({ reproducible: true }); }
+    const actionMatch = path.match(/^\/api\/builds\/([^/]+)\/(approve|reject|cancel|validate-preview|publish)$/); if (method === "POST" && actionMatch) { const [, id, action] = actionMatch; const build = state.builds.find((b) => b.id === id); build.status = { approve: "queued", reject: "rejected", cancel: "canceled", "validate-preview": "preview_validated", publish: "published" }[action]; return json(withRelease(build)); }
     return json({ error: `Unhandled ${method} ${path}` }, 500);
   });
   return state;
@@ -47,6 +48,20 @@ test("总览和 AntD 菜单可进入构建记录并过滤、打开详情 Drawer"
   await expect(page.getByRole("row", { name: /build-gated/ })).toBeVisible();
   await page.getByRole("button", { name: "build-gated" }).click();
   await expect(page.getByText("构建详情")).toBeVisible(); await expect(page.getByText("构建 ID")).toBeVisible();
+  await expect(page.getByText("版本仍为 latest，不能发布 Release。")).toBeVisible();
+  await expect(page.getByRole("button", { name: "发布 Release" })).toBeDisabled();
+});
+
+test("构建详情内审批后保持打开并切换到执行上下文", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === "mobile-chrome", "desktop command strip coverage");
+  await mockApi(page); await page.goto("/"); await nav(page, "构建记录", testInfo.project.name);
+  await page.getByRole("button", { name: "build-pending" }).click();
+  const drawer = page.getByRole("dialog", { name: "构建详情" });
+  await expect(drawer.getByText("核对锁定输入并决定是否进入队列")).toBeVisible();
+  await drawer.getByRole("button", { name: "审批通过" }).click();
+  await expect(drawer).toBeVisible();
+  await expect(drawer.getByText("构建已进入执行队列")).toBeVisible();
+  await expect(drawer.getByText("排队中")).toBeVisible();
 });
 
 test("创建向导提交 configOverrides 而非法端口不发请求", async ({ page }, testInfo) => {

@@ -233,6 +233,7 @@ function buildActionItems(build, runAction, busy, releaseReady = false) {
   const action = (key, label, fn, permission, danger = false, disabled = false) => ({
     key,
     label,
+    permission,
     danger,
     disabled: running || disabled,
     onClick: () => runAction(build, label, fn, permission, danger),
@@ -254,6 +255,25 @@ function buildActionItems(build, runAction, busy, releaseReady = false) {
       return [];
   }
 }
+function buildActionContext(build, release = {}, releaseReady = false, loading = false) {
+  const blocked = (release.checks || []).find((item) => item.status === "blocked");
+  const blocker = blocked?.reason || blocked?.title || build?.releaseCheckSummary?.firstBlockedReason || build?.releaseCheckSummary?.firstBlockedTitle || "服务端尚未返回具体阻塞原因。";
+  switch (build?.status) {
+    case "pending_approval": return { tone: "attention", label: "下一步：审批", title: "核对锁定输入并决定是否进入队列", description: "审批通过后，构建会提交给调度器；拒绝与取消会保留当前 BuildLock 和审计记录。" };
+    case "queued": return { tone: "active", label: "正在等待 Runner", title: "构建已进入执行队列", description: "当前无需人工推进。可以继续查看锁定输入，必要时取消本次构建。" };
+    case "running": return { tone: "active", label: "正在执行", title: "Runner 正在生成 Preview", description: "日志与状态由 Runner 持续回传。只有确认无需继续时才取消构建。" };
+    case "succeeded": return { tone: "attention", label: "下一步：验证", title: "验证 Preview 的安装与运行结果", description: "验证通过后才会进入 Release 门禁；此操作不会直接发布生产制品。" };
+    case "preview_validated": return releaseReady
+      ? { tone: "ready", label: "下一步：发布", title: "Release 门禁已通过", description: "确认固定版本、构建证据和下载策略后，可将当前 Preview 提升为 Release。" }
+      : { tone: "blocked", label: "发布受阻", title: "先解除 Release 门禁阻塞", description: "Preview 已验证，但服务端仍拒绝发布。处理阻塞项后重新打开或刷新详情。", blocker: loading ? "正在读取服务端门禁结果…" : blocker };
+    case "failed": return { tone: "blocked", label: "下一步：恢复", title: "查看失败日志后重试", description: "重试会创建新的执行尝试，并继续沿用当前构建的锁定输入。" };
+    case "canceled": return { tone: "attention", label: "下一步：恢复", title: "确认取消原因后重新排队", description: "重试会保留当前 BuildLock，并开始新的执行尝试。" };
+    case "published": return { tone: "ready", label: "流程完成", title: "Release 已发布", description: "当前构建已完成交付，可下载制品或导出 Release 证据。" };
+    case "rejected": return { tone: "blocked", label: "审批已结束", title: "构建未进入执行队列", description: "查看锁定输入与审计记录；如需调整配置，请创建新的构建请求。" };
+    default: return { tone: "neutral", label: "构建上下文", title: "查看构建状态与锁定证据", description: "操作可用性以服务端状态和当前角色权限为准。" };
+  }
+}
+function emptyBuildDetail() { return { logs: [], lock: null, release: null, reproducibility: null }; }
 function when(value) { return value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "—"; }
 function formatBytes(value) { const bytes = Number(value); if (!Number.isFinite(bytes) || bytes < 0) return "—"; if (bytes < 1024) return `${bytes} B`; const units = ["KB", "MB", "GB", "TB"]; let size = bytes / 1024; let index = 0; while (size >= 1024 && index < units.length - 1) { size /= 1024; index += 1; } return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[index]}`; }
 function stripAnsi(value) { return String(value ?? "").replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, ""); }
@@ -281,7 +301,9 @@ export default function App() {
   const [form, setForm] = useState({ productId: "", target: "linux", profile: "qa", customer: "", version: "latest", releaseChannel: "preview", installDir: "", webPort: "48000", serviceVersion: "latest", customerName: "", license: "community", passwordPolicy: "strong", modules: {}, variablesText: "{}", componentOverridesText: "{}" });
   const [manifest, setManifest] = useState("{}"), [savedManifest, setSavedManifest] = useState("{}"), [revisions, setRevisions] = useState([]), [dryRun, setDryRun] = useState(null);
   const [overlayKind, setOverlayKind] = useState("profiles"), [overlayName, setOverlayName] = useState(""), [overlayText, setOverlayText] = useState("{}"), [savedOverlay, setSavedOverlay] = useState("{}"), [overlays, setOverlays] = useState({ profiles: [], customers: [] });
-  const [detail, setDetail] = useState(null), [detailData, setDetailData] = useState({ logs: [], lock: null, release: null, reproducibility: null }), [detailOpen, setDetailOpen] = useState(false);
+  const [detail, setDetail] = useState(null), [detailData, setDetailData] = useState(emptyBuildDetail), [detailOpen, setDetailOpen] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false), [detailError, setDetailError] = useState("");
+  const detailRequest = useRef(0);
   const [busy, setBusy] = useState(""), [search, setSearch] = useState(""), [agentOpen, setAgentOpen] = useState(false), [agentMessages, setAgentMessages] = useState([]), [agentDraftSeed, setAgentDraftSeed] = useState(null);
   const product = products.find((p) => p.id === form.productId);
   const permitted = (permission) => can(auth, permission);
@@ -354,22 +376,37 @@ export default function App() {
   }
   async function create() { if (!permitted("build.create")) return; setBusy("create"); try { const created = await createBuild(payload()); await refresh(); await inspect(created); setPage("builds"); notice.success("构建请求已创建，等待审批"); } catch (e) { setError(e); } finally { setBusy(""); } }
   async function inspect(build) {
-    setDetail(build); setDetailOpen(true);
-    try { const [logs, lock, release, reproducibility] = await Promise.all([getBuildLogs(build.id), getBuildLock(build.id), getBuildReleaseCheck(build.id), getBuildReproducibilityReport(build.id)]); setDetailData({ logs, lock, release, reproducibility }); } catch (e) { setError(e); }
+    const request = ++detailRequest.current;
+    setDetail(build); setDetailData(emptyBuildDetail()); setDetailError(""); setDetailLoading(true); setDetailOpen(true);
+    try {
+      const [logs, lock, release, reproducibility] = await Promise.all([getBuildLogs(build.id), getBuildLock(build.id), getBuildReleaseCheck(build.id), getBuildReproducibilityReport(build.id)]);
+      if (request === detailRequest.current) setDetailData({ logs, lock, release, reproducibility });
+    } catch (e) {
+      if (request === detailRequest.current) setDetailError(e);
+    } finally {
+      if (request === detailRequest.current) setDetailLoading(false);
+    }
   }
+  function closeDetail() { detailRequest.current += 1; setDetailOpen(false); setDetailLoading(false); }
   async function runAction(build, label, fn, permission, dangerous = false) {
     if (!permitted(permission) || busy) return;
     const execute = async () => {
+      const activeDetailRequest = detail?.id === build.id ? detailRequest.current : null;
       setBusy(`${label}-${build.id}`);
       try {
         const current = await fn(build.id);
         await refresh();
-        if (detail?.id === build.id) await inspect(current || build);
+        if (activeDetailRequest !== null && activeDetailRequest === detailRequest.current) await inspect(current || build);
         notice.success(`已${label}`);
       } catch (e) { setError(e); } finally { setBusy(""); }
     };
     if (dangerous) {
-      Modal.confirm({ title: `确认${label}`, content: `此操作将影响构建 ${build.id}，服务端会再次校验权限。`, okType: "danger", onOk: execute });
+      const consequences = {
+        "拒绝": "构建不会进入 Runner 队列；BuildLock 与审计记录会保留。",
+        "取消": "当前排队或执行会停止；之后可基于同一 BuildLock 重试。",
+        "发布 Release": "当前已验证的 Preview 将提升为可分发 Release。",
+      };
+      Modal.confirm({ title: `确认${label} ${build.id}`, content: consequences[label] || `此操作将影响构建 ${build.id}。`, okText: label, cancelText: "返回检查", okType: "danger", onOk: execute });
       return;
     }
     await execute();
@@ -444,7 +481,7 @@ export default function App() {
     <Drawer className="vela-nav-drawer" title="Vela Studio" placement="left" width={screens.xs ? "88vw" : 280} open={mobileNav} onClose={() => setMobileNav(false)}>{!screens.lg && menu}</Drawer>
     <Layout className="vela-main"><Header className="vela-header"><Space className="vela-header-search"><Button aria-label={!screens.lg ? "展开导航" : collapsed ? "展开导航" : "折叠导航"} aria-expanded={screens.lg ? !collapsed : mobileNav} type="text" icon={screens.lg && !collapsed ? <MenuFoldOutlined /> : <MenuUnfoldOutlined />} onClick={() => { if (!screens.lg) return setMobileNav(true); const next = !collapsed; setCollapsed(next); localStorage.setItem("packaging.sidebarCollapsed", String(next)); }} /><Input id="global-build-search" aria-label="搜索构建 ID、产品、状态" placeholder="搜索构建 ID、产品、状态" value={search} onChange={(e) => setSearch(e.target.value)} onPressEnter={() => setPage("builds")} suffix={<span className="vela-search-suffix">{search ? <Button type="link" size="small" aria-label="清空全局搜索" onClick={() => setSearch("")}>清空</Button> : !screens.xs && <kbd>Ctrl K</kbd>}</span>} /></Space><Space className="vela-header-tools"><Tooltip title="界面角色用于提前禁用操作，服务端仍会再次鉴权。"><Button aria-label="认证与角色" icon={<SettingOutlined />} onClick={() => setAuthOpen(true)}>{!screens.xs && (auth.token ? `${auth.role || "viewer"} 角色` : "本地开发访问")}</Button></Tooltip><Tooltip title="助手会携带当前页面与构建状态；生产操作仍需明确确认和服务端授权。"><Button className="vela-agent-trigger" icon={<RobotOutlined />} aria-label="打开构建助手" onClick={() => openAgent()}>{!screens.xs && "Ask Vela"}</Button></Tooltip><Dropdown trigger={["click"]} popupRender={() => <Card className="vela-notification-card" title="通知中心" size="small" style={{ width: "min(380px, calc(100vw - 24px))" }} extra={<Button type="link" onClick={async () => { try { await markAllNotificationsRead(); setNotifications((x) => x.map((n) => ({ ...n, readAt: new Date().toISOString() }))); } catch (e) { setError(e); } }}>全部已读</Button>}><Text type="secondary">{notifications.filter((n) => !n.readAt).length ? `${notifications.filter((n) => !n.readAt).length} 条未读` : "没有未读通知"}</Text><List dataSource={notifications} locale={{ emptyText: "暂无平台通知" }} renderItem={(n) => <List.Item className={!n.readAt ? "is-unread" : ""} actions={[!n.readAt && <Button key="read" size="small" onClick={() => readNotification(n)}>已读</Button>, n.buildId && <Button key="view" size="small" onClick={() => { const b = builds.find((x) => x.id === n.buildId); if (b) inspect(b); }}>查看</Button>].filter(Boolean)}><List.Item.Meta avatar={<Badge status={notificationStatus(n.severity)} />} title={n.title || n.type || "平台通知"} description={<div className="vela-notification-copy"><span>{n.message || "没有详细说明"}</span><time>{when(n.createdAt)}</time></div>} /></List.Item>} /></Card>}><Badge count={notifications.filter((n) => !n.readAt).length}><Button aria-label={`通知，${notifications.filter((n) => !n.readAt).length} 条未读`} icon={<BellOutlined />} /></Badge></Dropdown></Space></Header>
       <Content className="vela-content"><div className="vela-content-inner"><ErrorBanner error={error} onClose={() => setError("")} /><div className="vela-page-heading"><div><Title level={1}>{pages.find((x) => x[0] === page)?.[1]}</Title><Text type="secondary">{pageDescriptions[page]}</Text></div><div className="vela-page-agent"><span><RobotOutlined /> Agent 已读取本页上下文</span><Button size="small" onClick={() => openAgent(agentPrompts[page][0])}>检查本页</Button></div></div>{loading ? <div className="vela-loading" role="status" aria-label="正在加载工作台"><Space direction="vertical" align="center"><Spin /><Text type="secondary">加载工作台</Text></Space></div> : <Page page={page} products={products} product={product} builds={shownBuilds} allBuilds={builds} buildFilter={buildFilter} setBuildFilter={setBuildFilter} runners={runners} uploads={uploads} form={form} setForm={setForm} selectProduct={selectProduct} create={create} inspect={inspect} runAction={runAction} busy={busy} upload={upload} manifest={manifest} setManifest={setManifest} savedManifest={savedManifest} revisions={revisions} saveManifest={saveManifest} manifestDryRun={manifestDryRun} dryRun={dryRun} overlay={{ overlayKind, setOverlayKind, overlayName, setOverlayName, overlayText, setOverlayText, savedOverlay, overlays, loadOverlay, saveOverlay }} audit={{ audit, auditFilter, setAuditFilter, loadAudit }} auth={auth} download={downloadBuild} changePage={changePage} askAgent={openAgent} />}</div></Content></Layout>
-    <BuildDrawer build={detail} data={detailData} open={detailOpen} onClose={() => setDetailOpen(false)} onDownload={downloadBuild} />
+    <BuildDrawer build={detail} data={detailData} open={detailOpen} onClose={closeDetail} onDownload={downloadBuild} runAction={runAction} auth={auth} busy={busy} loading={detailLoading} error={detailError} onRetry={() => detail && inspect(detail)} onDismissError={() => setDetailError("")} />
     <Modal title="访问令牌与认证" open={authOpen} onCancel={() => setAuthOpen(false)} footer={null} destroyOnHidden>
       <Alert type="warning" showIcon message="Bearer Token 属于敏感凭据" description="令牌只保存在当前浏览器本地存储，不会写入产品、BuildLock、日志或审计样例。界面角色只用于预判按钮权限，服务端仍是最终授权方。" style={{ marginBottom: 16 }} />
       <Form layout="vertical" initialValues={{ role: auth.role || "operator" }} onFinish={saveAuth}>
@@ -664,7 +701,7 @@ function BuildTable({ builds, inspect, runAction, download, auth, allBuilds, bui
     { title: "更新时间", dataIndex: "updatedAt", render: when },
     { title: "操作", fixed: "right", width: 190, render: (_, r) => {
       const items = buildActionItems(r, runAction, Boolean(busy), Boolean(r.releaseCheckSummary?.releaseReady || r.releaseReady))
-        .map((item) => ({ ...item, disabled: item.disabled || !can(auth, item.key === "publish" ? "build.publish" : item.key === "approve" ? "build.approve" : item.key === "reject" ? "build.reject" : item.key === "validate" ? "build.validate" : item.key === "cancel" ? "build.cancel" : "build.retry") }));
+        .map((item) => ({ ...item, disabled: item.disabled || !can(auth, item.permission) }));
       return <Space><Button size="small" onClick={() => inspect(r)}>详情</Button>{items.length > 0 && <Dropdown menu={{ items }}><Button size="small">操作</Button></Dropdown>}{(r.downloadUrl || r.artifactUri) && <Button size="small" onClick={() => download(r)}>下载</Button>}</Space>;
     } },
   ];
@@ -783,13 +820,39 @@ function LogPanel({ build, data }) {
   ];
   return <Tabs className="vela-log-tabs" items={items} />;
 }
-function BuildDrawer({ build, data, open, onClose, onDownload }) {
+function BuildDrawer({ build, data, open, onClose, onDownload, runAction, auth, busy, loading, error, onRetry, onDismissError }) {
   const release = data.release || {};
   const releaseReady = Boolean(release.releaseReady || build?.releaseCheckSummary?.releaseReady || build?.releaseReady);
+  const context = buildActionContext(build, release, releaseReady, loading);
+  const actions = buildActionItems(build, runAction, Boolean(busy), releaseReady);
+  const primaryKeys = new Set(["approve", "validate", "publish", "retry"]);
   const releaseItems = (release.checks || []).map((item) => ({
     key: item.id,
-    label: item.stage === "release" ? "Release 门禁" : "Preview 门禁",
     children: <div className="vela-gate-row"><Tag color={item.status === "blocked" ? "error" : "success"}>{item.status === "blocked" ? "阻塞" : "通过"}</Tag><div><Text strong>{item.title}</Text><Text type="secondary">{item.reason || "检查通过"}</Text></div></div>,
   }));
-  return <Drawer title="构建详情" width="min(900px, 100vw)" open={open} onClose={onClose} extra={build && <Button icon={<DownloadOutlined />} disabled={!build.downloadUrl && !build.artifactUri} onClick={() => onDownload(build)}>下载制品</Button>}>{build && <><section className="vela-drawer-summary"><div><Space>{buildStatus(build)}<Title level={2}>{build.id}</Title></Space><Text type="secondary">{build.productId} / {build.version || "—"}</Text></div><Descriptions column={2} size="small"><Descriptions.Item label="构建 ID">{build.id}</Descriptions.Item><Descriptions.Item label="目标">{build.target} / {build.profile}</Descriptions.Item><Descriptions.Item label="Runner">{build.runnerId || "尚未分配"}</Descriptions.Item><Descriptions.Item label="更新时间">{when(build.updatedAt)}</Descriptions.Item><Descriptions.Item label="执行尝试">第 {Number(build.attempt || 0) + 1} 次</Descriptions.Item><Descriptions.Item label="Nomad Job">{build.nomadJobId || "尚未调度"}</Descriptions.Item></Descriptions><BuildLifecycle build={build} /><ContextNote title="详情以 BuildLock 为准" tone="secure">构建创建后，锁定配置不会被之后的 Manifest、Profile 或客户覆盖修改。界面中的最终配置用于阅读，BuildLock 才是复现依据。</ContextNote></section><Tabs className="vela-detail-tabs" items={[{ key: "logs", label: "日志", children: <LogPanel build={build} data={data} /> }, { key: "release", label: releaseReady ? "发布门禁（通过）" : "发布门禁", children: <div><ContextNote title="门禁由服务端裁决">每个 checks[] 项包含稳定 id、stage 与 pass/blocked 状态；前端只解释结果，不自行推导发布权限。</ContextNote>{releaseItems.length ? <div className="vela-gate-list">{releaseItems.map((item) => <div key={item.key}>{item.children}</div>)}</div> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="服务端尚未返回门禁检查项" />}</div> }, { key: "components", label: "组件锁定", children: <Table size="small" rowKey={(item) => item.id} dataSource={data.lock?.components || []} pagination={false} columns={[{ title: "组件", dataIndex: "id" }, { title: "版本", dataIndex: "version" }, { title: "URI", dataIndex: "uri", render: (v) => <code>{v || "—"}</code> }, { title: "SHA256", dataIndex: "sha256", render: (v) => <code>{v || "—"}</code> }]} /> }, { key: "workloads", label: `工作负载 ${data.lock?.workloads?.length || 0}`, children: <div className="vela-locked-workloads">{(data.lock?.workloads || []).map((workload) => <div key={workload.id}><Tag color={workload.enabled === false ? "default" : workload.runtime === "docker" ? "cyan" : "purple"}>{workload.runtime}</Tag><div><Text strong>{workload.id}</Text><Text type="secondary">{workload.component} / {workload.module} / {workload.enabled === false ? "未启用" : "已锁定"}</Text></div></div>)}</div> }, { key: "config", label: "最终配置", children: <JsonCodeBlock value={build.finalConfig || data.lock?.config || {}} label="最终配置 JSON" /> }, { key: "lock", label: "构建锁", children: <div><ContextNote title="不可变构建输入" tone="secure">下载、复现和 Release 证据都应关联这个 BuildLock，而不是读取当前产品配置。</ContextNote><JsonCodeBlock value={data.lock} label="构建锁 JSON" /></div> }, { key: "repro", label: "可复现报告", children: <JsonCodeBlock value={data.reproducibility} label="可复现报告 JSON" /> }, { key: "evidence", label: "证据", children: <div className="vela-evidence-action"><Text>导出包含门禁、锁定配置和可复现报告的 Release 证据。</Text><Button type="primary" onClick={() => exportBuildReleaseEvidenceArchive(build.id).then((value) => downloadJson(value, `${build.id}-evidence.json`))}>导出 Release 证据</Button></div> }]} /></>}</Drawer>;
+  const tabs = build ? [
+    { key: "logs", label: "日志", children: <LogPanel build={build} data={data} /> },
+    { key: "release", label: releaseReady ? "发布门禁（通过）" : "发布门禁", children: <div><ContextNote title="门禁由服务端裁决">每个 checks[] 项包含稳定 id、stage 与 pass/blocked 状态；前端只解释结果，不自行推导发布权限。</ContextNote>{releaseItems.length ? <div className="vela-gate-list">{releaseItems.map((item) => <div key={item.key}>{item.children}</div>)}</div> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="服务端尚未返回门禁检查项" />}</div> },
+    { key: "components", label: "组件锁定", children: <Table size="small" rowKey={(item) => item.id} dataSource={data.lock?.components || []} pagination={false} columns={[{ title: "组件", dataIndex: "id" }, { title: "版本", dataIndex: "version" }, { title: "URI", dataIndex: "uri", render: (v) => <code>{v || "—"}</code> }, { title: "SHA256", dataIndex: "sha256", render: (v) => <code>{v || "—"}</code> }]} /> },
+    { key: "workloads", label: `工作负载 ${data.lock?.workloads?.length || 0}`, children: <div className="vela-locked-workloads">{(data.lock?.workloads || []).map((workload) => <div key={workload.id}><Tag color={workload.enabled === false ? "default" : workload.runtime === "docker" ? "cyan" : "purple"}>{workload.runtime}</Tag><div><Text strong>{workload.id}</Text><Text type="secondary">{workload.component} / {workload.module} / {workload.enabled === false ? "未启用" : "已锁定"}</Text></div></div>)}</div> },
+    { key: "config", label: "最终配置", children: <JsonCodeBlock value={build.finalConfig || data.lock?.config || {}} label="最终配置 JSON" /> },
+    { key: "lock", label: "构建锁", children: <div><ContextNote title="不可变构建输入" tone="secure">下载、复现和 Release 证据都应关联这个 BuildLock，而不是读取当前产品配置。</ContextNote><JsonCodeBlock value={data.lock} label="构建锁 JSON" /></div> },
+    { key: "repro", label: "可复现报告", children: <JsonCodeBlock value={data.reproducibility} label="可复现报告 JSON" /> },
+    { key: "evidence", label: "证据", children: <div className="vela-evidence-action"><Text>导出包含门禁、锁定配置和可复现报告的 Release 证据。</Text><Button type="primary" onClick={() => exportBuildReleaseEvidenceArchive(build.id).then((value) => downloadJson(value, `${build.id}-evidence.json`))}>导出 Release 证据</Button></div> },
+  ] : [];
+  return <Drawer title="构建详情" width="min(900px, 100vw)" open={open} onClose={onClose} extra={build && <Button icon={<DownloadOutlined />} disabled={!build.downloadUrl && !build.artifactUri} onClick={() => onDownload(build)}>下载制品</Button>}>
+    {build && <>
+      <section className="vela-drawer-summary">
+        <div><Space>{buildStatus(build)}<Title level={2}>{build.id}</Title></Space><Text type="secondary">{build.productId} / {build.version || "—"}</Text></div>
+        <section className={`vela-drawer-command is-${context.tone}`} aria-label="构建下一步">
+          <div className="vela-drawer-command-copy"><Text className="vela-drawer-command-label">{context.label}</Text><Title level={3}>{context.title}</Title><Text type="secondary">{context.description}</Text>{context.blocker && <div className="vela-drawer-blocker"><WarningOutlined /><span><strong>阻塞原因</strong>{context.blocker}</span></div>}</div>
+          {actions.length > 0 && <div className="vela-drawer-actions" aria-label="构建操作">{actions.map((item) => { const allowed = can(auth, item.permission); const blockedPublish = item.key === "publish" && !releaseReady; const title = !allowed ? "当前角色没有执行此操作的权限" : blockedPublish ? context.blocker : undefined; return <Tooltip key={item.key} title={title}><span><Button type={primaryKeys.has(item.key) ? "primary" : "default"} danger={item.danger} disabled={item.disabled || !allowed} loading={busy === `${item.label}-${build.id}`} onClick={item.onClick}>{item.label}</Button></span></Tooltip>; })}</div>}
+        </section>
+        <Descriptions column={2} size="small"><Descriptions.Item label="构建 ID">{build.id}</Descriptions.Item><Descriptions.Item label="目标">{build.target} / {build.profile}</Descriptions.Item><Descriptions.Item label="Runner">{build.runnerId || "尚未分配"}</Descriptions.Item><Descriptions.Item label="更新时间">{when(build.updatedAt)}</Descriptions.Item><Descriptions.Item label="执行尝试">第 {Number(build.attempt || 0) + 1} 次</Descriptions.Item><Descriptions.Item label="Nomad Job">{build.nomadJobId || "尚未调度"}</Descriptions.Item></Descriptions>
+        <BuildLifecycle build={build} />
+        <ContextNote title="详情以 BuildLock 为准" tone="secure">构建创建后，锁定配置不会被之后的 Manifest、Profile 或客户覆盖修改。界面中的最终配置用于阅读，BuildLock 才是复现依据。</ContextNote>
+      </section>
+      {error ? <div className="vela-drawer-load-state"><ErrorBanner error={error} onClose={onDismissError} /><Button icon={<ReloadOutlined />} onClick={onRetry}>重试加载详情</Button></div> : loading ? <div className="vela-drawer-load-state" role="status" aria-label="加载构建上下文"><Spin /><Text type="secondary">加载构建上下文</Text></div> : <Tabs className="vela-detail-tabs" items={tabs} />}
+    </>}
+  </Drawer>;
 }
