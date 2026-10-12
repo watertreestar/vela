@@ -99,6 +99,7 @@ select { font: inherit; }
 }
 
 .vela-shell .vela-nav .ant-menu-item-group-title { color: #85878b; font-size: 10px; font-weight: 650; padding: 15px 10px 5px; text-transform: none; }
+.vela-shell .vela-sider .vela-nav .ant-menu-item-group + .ant-menu-item-group { margin-top: 7px; border-top: 1px solid #e6e8eb; padding-top: 6px; }
 
 .vela-shell .vela-nav.ant-menu-inline .ant-menu-item {
   width: 100%;
@@ -118,7 +119,10 @@ select { font: inherit; }
 
 .vela-shell .ant-layout-sider-collapsed .vela-brand { justify-content: center; padding-inline: 0; }
 .vela-shell .ant-layout-sider-collapsed .vela-brand-copy { display: none; }
-.vela-shell .ant-layout-sider-collapsed .ant-menu-item-group-title { height: 9px; overflow: hidden; color: transparent; padding: 0; }
+.vela-shell .ant-layout-sider-collapsed .ant-menu-item-group-title { height: 0; overflow: hidden; color: transparent; padding: 0; }
+.vela-shell .ant-layout-sider-collapsed .vela-nav.ant-menu { padding-inline: 7px; }
+.vela-shell .ant-layout-sider-collapsed .vela-nav .ant-menu-item-group + .ant-menu-item-group { margin-top: 8px; padding-top: 8px; }
+.vela-shell .ant-layout-sider-collapsed .vela-sider-footer { display: grid; min-height: 52px; place-items: center; padding: 12px 0; }
 
 .vela-sider-footer {
   overflow: hidden;

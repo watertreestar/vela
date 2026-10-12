@@ -52,6 +52,19 @@ test("总览和 AntD 菜单可进入构建记录并过滤、打开详情 Drawer"
   await expect(page.getByRole("button", { name: "发布 Release" })).toBeDisabled();
 });
 
+test("桌面侧栏默认是 64px 窄轨道且分组使用细线", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === "mobile-chrome", "desktop sidebar coverage");
+  await mockApi(page); await page.goto("/");
+  const sider = page.locator(".vela-sider");
+  await expect(sider).toHaveClass(/ant-layout-sider-collapsed/);
+  expect(Math.round((await sider.boundingBox()).width)).toBe(64);
+  const divider = await page.locator(".vela-sider .ant-menu-item-group").nth(1).evaluate((element) => getComputedStyle(element).borderTopWidth);
+  expect(divider).toBe("1px");
+  await page.getByRole("button", { name: "展开导航" }).click();
+  await expect(sider).not.toHaveClass(/ant-layout-sider-collapsed/);
+  await expect.poll(async () => Math.round((await sider.boundingBox()).width)).toBe(236);
+});
+
 test("构建详情内审批后保持打开并切换到执行上下文", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name === "mobile-chrome", "desktop command strip coverage");
   await mockApi(page); await page.goto("/"); await nav(page, "构建记录", testInfo.project.name);
